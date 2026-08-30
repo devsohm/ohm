@@ -1,0 +1,10 @@
+{
+  "name": "@ohm/example-state-and-policy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Workspace memory, task state, and protected-path policy example for ohm",
+  "ohm": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

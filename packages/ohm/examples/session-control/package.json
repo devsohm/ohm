@@ -1,0 +1,10 @@
+{
+  "name": "@ohm/example-session-control",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Explicit session navigation commands for ohm",
+  "ohm": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@ohm/example-dynamic-package",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime-discovered skill and prompt example for ohm",
+  "ohm": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

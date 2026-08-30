@@ -1,0 +1,23 @@
+{
+  "name": "@ohm/example-starter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal ohm command and tool extension",
+  "scripts": {
+    "test": "tsc --noEmit -p tsconfig.json && node --test checks/runtime.test.mjs"
+  },
+  "dependencies": {
+    "typebox": "1.3.17"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "ohm": ">=0.1.0 <0.2.0"
+  },
+  "ohm": {
+    "extensions": ["extensions/index.ts"]
+  }
+}

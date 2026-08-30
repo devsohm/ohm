@@ -1,0 +1,8 @@
+{
+  "name": "@ohm/example-project-trust",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive project trust decision example for ohm",
+  "ohm": { "extensions": ["extensions/index.mjs"] }
+}

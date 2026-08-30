@@ -1,0 +1,8 @@
+{
+  "name": "@ohm/example-messages-bus",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Custom message rendering and in-process event bus example for ohm",
+  "ohm": { "extensions": ["extensions/index.mjs"] }
+}

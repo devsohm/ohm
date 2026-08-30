@@ -1,0 +1,8 @@
+{
+  "name": "@ohm/example-provider-hooks",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Redacted provider wire lifecycle example for ohm",
+  "ohm": { "extensions": ["extensions/index.mjs"] }
+}

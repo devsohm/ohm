@@ -1,0 +1,16 @@
+{
+  "name": "@ohm/example-mcp-stdio",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bounded MCP stdio tool adapter example for ohm",
+  "scripts": {
+    "test": "node --test checks/runtime.test.mjs"
+  },
+  "peerDependencies": {
+    "ohm": ">=0.1.0 <0.2.0"
+  },
+  "ohm": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

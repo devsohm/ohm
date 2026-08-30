@@ -1,0 +1,8 @@
+{
+  "name": "@ohm/example-lifecycle-events",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generation and agent lifecycle observation example for ohm",
+  "ohm": { "extensions": ["extensions/index.mjs"] }
+}
