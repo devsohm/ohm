@@ -215,6 +215,10 @@ interface SeededSession {
   directory: string;
 }
 
+function benchmarkNodeId(index: number): string {
+  return index.toString(16).padStart(8, "0");
+}
+
 async function seedSession(value: MeasurementFixture, eventCount: number): Promise<SeededSession> {
   const directory = join(value.root, "sessions");
   const manager = SessionManager.inMemory(value.workspace, { id: `resume-${eventCount}` });
@@ -222,7 +226,7 @@ async function seedSession(value: MeasurementFixture, eventCount: number): Promi
   const records = [JSON.stringify(header)];
   for (let index = 0; index < eventCount; index += 1) {
     const message = sessionMessage(index);
-    const nodeId = message.id;
+    const nodeId = benchmarkNodeId(index);
     const commit: SessionV4Commit = {
       record: "commit",
       sequence: index + 1,
@@ -232,7 +236,7 @@ async function seedSession(value: MeasurementFixture, eventCount: number): Promi
         type: "conversation_node",
         node: {
           id: nodeId,
-          parentId: index === 0 ? null : `benchmark-message-${index - 1}`,
+          parentId: index === 0 ? null : benchmarkNodeId(index - 1),
           nodeType: "message",
           role: message.role,
           content: message,

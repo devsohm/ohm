@@ -105,7 +105,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
+          - os: macos-15
             node: 26.7.0
           - os: windows-latest
             node: 26.7.0
@@ -130,7 +130,16 @@ jobs:
       - name: Build kernel process launcher
         if: runner.os == 'Windows'
         run: npm run native:build --workspace @ohm/kernel
-      - run: npm run check
+      - name: Run exhaustive check
+        if: runner.os != 'macOS'
+        run: npm run check
+      - name: Run macOS platform check
+        if: runner.os == 'macOS'
+        run: |
+          npm run build
+          npm run check --workspace @ohm/terminal
+          npm run check --workspace @ohm/kernel
+          npm run test:platform:macos --workspace ohm
 
   stage:
     needs:

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
   <title id="title">ohm release pipeline</title>
-  <desc id="desc">GitHub Actions dependency graph. Regression guards, two additional platform checks, and four native builds feed staging. Staging supplies the Linux full-check platform leg, then feeds six standalone builds and finalization. Finalization feeds six-platform verification. A tag push publishes only after staging and verification have both passed.</desc>
+  <desc id="desc">GitHub Actions dependency graph. Regression guards, a Windows exhaustive check, a focused macOS platform check, and four native builds feed staging. Staging supplies the Linux exhaustive-check platform leg, then feeds six standalone builds and finalization. Finalization feeds six-platform verification. A tag push publishes only after staging and verification have both passed.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
@@ -48,8 +48,8 @@
   <g>
     <rect class="card" x="50" y="280" width="220" height="100"/>
     <text class="label" x="72" y="320">Checks ×2</text>
-    <text class="detail" x="72" y="350">macOS · Windows</text>
-    <text class="detail" x="72" y="372">Node 26.7</text>
+    <text class="detail" x="72" y="350">macOS focused</text>
+    <text class="detail" x="72" y="372">Windows full</text>
   </g>
 
   <g>

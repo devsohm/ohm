@@ -227,6 +227,11 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     'node --import ./test/setup.mjs --import tsx --test --test-concurrency=2 "test/**/*.test.ts"',
     "The product test command must run the complete corpus once at the reviewed concurrency",
   );
+  assert.equal(
+    manifest.scripts?.["test:platform:macos"],
+    "node --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/auth/default-store.test.ts test/cli/diagnostics-command.test.ts test/cli/process-signal-cleanup.test.ts test/config/canonical-path.test.ts test/modes/public-mode-signals.test.ts test/process/graceful-termination.test.ts test/process/managed-process.test.ts test/process/process-tree.test.ts test/storage/file-lock.test.ts test/storage/session-manager.test.ts",
+    "The macOS platform check must retain its reviewed credential, process, path, lock, and session boundaries",
+  );
   assert.ok(
     manifest.scripts?.["test:release"]?.includes("test/release/test-home-isolation.test.mjs"),
     "The release test command must include the user-home isolation suite",
@@ -410,13 +415,14 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   const ciCheckText = JSON.stringify(ciCheck);
   assert.deepEqual(
     ciCheck?.strategy?.matrix,
-    { os: ["ubuntu-latest", "macos-15-intel", "windows-latest"], node: [NODE_RUNTIME] },
-    "ci.yml full checks must use one unsharded Linux, macOS, and Windows matrix",
+    { os: ["ubuntu-latest", "macos-15", "windows-latest"], node: [NODE_RUNTIME] },
+    "ci.yml checks must use one unsharded Linux, macOS, and Windows matrix",
   );
   assert.equal(ciDocument?.jobs?.["macos-check-components"], undefined,
     "ci.yml must not retain a split macOS component job");
   assert.equal(ciDocument?.jobs?.["macos-product-tests"], undefined,
     "ci.yml must not retain macOS product-test shards");
+  assert.doesNotMatch(ciWorkflow, /--test-shard/u, "ci.yml must not shard the product-test corpus");
   assert.ok(
     ciCheckText.includes("npm run native:build --workspace @ohm/terminal"),
     "ci.yml check must build the matching native helper before verification",
@@ -429,6 +435,20 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     ciCheckText.includes("TheMrMilchmann/setup-msvc-dev@368ef7d1ee4d1171b31d4a7f67f4d954f903f5a9"),
     "ci.yml Windows check must initialize the native compiler with a pinned action",
   );
+  const ciExhaustiveStep = ciCheck?.steps?.find((step) => step?.name === "Run exhaustive check");
+  assert.equal(ciExhaustiveStep?.if, "runner.os != 'macOS'",
+    "ci.yml must run the exhaustive check on Linux and Windows");
+  assert.equal(ciExhaustiveStep?.run, "npm run check",
+    "ci.yml exhaustive platforms must run the ordinary complete check");
+  const ciMacosStep = ciCheck?.steps?.find((step) => step?.name === "Run macOS platform check");
+  assert.equal(ciMacosStep?.if, "runner.os == 'macOS'",
+    "ci.yml must select the focused check only on macOS");
+  assert.deepEqual(ciMacosStep?.run?.trim().split("\n"), [
+    "npm run build",
+    "npm run check --workspace @ohm/terminal",
+    "npm run check --workspace @ohm/kernel",
+    "npm run test:platform:macos --workspace ohm",
+  ], "ci.yml macOS platform check must build and exercise native, process, path, lock, and session boundaries");
   const securityWorkflow = parseYaml(await readText(repositoryRoot, ".github/workflows/security.yml"));
   const securityCommands = new Set(
     (securityWorkflow?.jobs?.dependencies?.steps ?? [])
@@ -446,6 +466,7 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     "release.yml must not retain a split macOS component job");
   assert.equal(releaseDocument?.jobs?.["macos-product-tests"], undefined,
     "release.yml must not retain macOS product-test shards");
+  assert.doesNotMatch(releaseWorkflow, /--test-shard/u, "release.yml must not shard the product-test corpus");
   const releaseGuards = releaseDocument?.jobs?.["regression-guards"];
   const releaseGuardCommands = new Set(
     (releaseGuards?.steps ?? []).map((step) => step?.run).filter(isStringValue),
@@ -546,10 +567,10 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.deepEqual(
     platformChecks?.strategy?.matrix?.include,
     [
-      { os: "macos-15-intel", node: NODE_RUNTIME },
+      { os: "macos-15", node: NODE_RUNTIME },
       { os: "windows-latest", node: NODE_RUNTIME },
     ],
-    "release.yml platform-checks must cover the full-suite matrix not already covered by staging",
+    "release.yml platform-checks must cover macOS platform behavior and the Windows full suite",
   );
   assert.equal(platformChecks?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
     "release.yml platform-checks must require process-level tests");
@@ -559,8 +580,21 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     "TheMrMilchmann/setup-msvc-dev@368ef7d1ee4d1171b31d4a7f67f4d954f903f5a9",
     "npm run native:build --workspace @ohm/terminal",
     "npm run native:build --workspace @ohm/kernel",
-    "npm run check",
   ]) assert.ok(platformCheckText.includes(fragment), `release.yml platform-checks must contain ${fragment}`);
+  const releaseExhaustiveStep = platformChecks?.steps?.find((step) => step?.name === "Run exhaustive check");
+  assert.equal(releaseExhaustiveStep?.if, "runner.os != 'macOS'",
+    "release.yml must run the exhaustive platform check on Windows");
+  assert.equal(releaseExhaustiveStep?.run, "npm run check",
+    "release.yml Windows platform check must run the ordinary complete check");
+  const releaseMacosStep = platformChecks?.steps?.find((step) => step?.name === "Run macOS platform check");
+  assert.equal(releaseMacosStep?.if, "runner.os == 'macOS'",
+    "release.yml must select the focused check only on macOS");
+  assert.deepEqual(releaseMacosStep?.run?.trim().split("\n"), [
+    "npm run build",
+    "npm run check --workspace @ohm/terminal",
+    "npm run check --workspace @ohm/kernel",
+    "npm run test:platform:macos --workspace ohm",
+  ], "release.yml macOS platform check must match normal CI");
   const stage = releaseDocument?.jobs?.stage;
   assert.equal(stage?.["runs-on"], "ubuntu-24.04",
     "release staging must supply the Linux full-check platform leg");

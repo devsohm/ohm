@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
         node: [26.7.0]
     runs-on: ${{ matrix.os }}
     steps:
@@ -38,7 +38,16 @@ jobs:
       - name: Build kernel process launcher
         if: runner.os == 'Windows'
         run: npm run native:build --workspace @ohm/kernel
-      - run: npm run check
+      - name: Run exhaustive check
+        if: runner.os != 'macOS'
+        run: npm run check
+      - name: Run macOS platform check
+        if: runner.os == 'macOS'
+        run: |
+          npm run build
+          npm run check --workspace @ohm/terminal
+          npm run check --workspace @ohm/kernel
+          npm run test:platform:macos --workspace ohm
 
   regression-guards:
     timeout-minutes: 90

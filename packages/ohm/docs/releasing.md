@@ -106,10 +106,12 @@ The release workflow uses these job dependencies:
 
 ![Release pipeline](assets/release-pipeline.svg)
 
-Risk-coverage and runtime-performance guards, the remaining full-check platform matrix, and the four native jobs
-run independently. All three paths must pass before staging. Every job uses Node 26.7.0; the platform matrix covers
-Linux, macOS, and Windows. Each native target directory is uploaded, downloaded into its declared package path, and
-checked as part of the complete 8-artifact set before `npm pack --ignore-scripts`.
+Risk-coverage and runtime-performance guards, the remaining platform checks, and the four native jobs run
+independently. All three paths must pass before staging. Every job uses Node 26.7.0. Linux staging and the Windows
+platform leg run the exhaustive check; the focused macOS leg builds the workspace, verifies the native terminal and
+Keychain helpers, runs the kernel checks, and exercises the credential, process, path, lock, and session boundaries.
+Each native target directory is uploaded, downloaded into its declared package path, and checked as part of the
+complete 8-artifact set before `npm pack --ignore-scripts`.
 
 Six target workers then build and execute their own standalone archives. No target result is inferred from another
 host. The finalization job combines the staged and standalone files and creates the SBOM and final checksums. Six

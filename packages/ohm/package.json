@@ -166,6 +166,7 @@
     "test:consumer": "tsc -p test/public-api/tsconfig.json",
     "test:dist": "node --import ./test/setup.mjs --test test/public-api-dist.test.mjs test/public-api-subpaths.test.mjs",
     "test:pack": "node --import ./test/setup.mjs --test test/release/packed-artifact.test.mjs",
+    "test:platform:macos": "node --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/auth/default-store.test.ts test/cli/diagnostics-command.test.ts test/cli/process-signal-cleanup.test.ts test/config/canonical-path.test.ts test/modes/public-mode-signals.test.ts test/process/graceful-termination.test.ts test/process/managed-process.test.ts test/process/process-tree.test.ts test/storage/file-lock.test.ts test/storage/session-manager.test.ts",
     "test:coverage:risk": "tsx benchmarks/risk-coverage.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json"

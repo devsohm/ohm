@@ -1,8 +1,10 @@
 # Platform notes
 
 Building or running ohm from source requires Node.js 26.7.0 or newer; standalone
-archives include their own runtime. The source and packed-artifact checks run on Linux, macOS, and Windows. Release
-verification covers x64 and arm64. macOS runners load the matching TUI and Keychain helpers; Windows runners load the
+archives include their own runtime. Linux and Windows run the exhaustive source and packed-artifact checks; macOS
+runs a focused platform check for its native helpers and credential, process, path, lock, and session boundaries.
+Release verification covers x64 and arm64. macOS runners load the matching TUI and Keychain helpers;
+Windows runners load the
 matching TUI helper and kernel Job Object launcher from the installed archive.
 
 The CLI uses Linux Secret Service after a non-destructive write/read/delete probe. Windows stores an encrypted
