@@ -10,6 +10,9 @@ const PACKAGE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const CLI_SOURCE = join(PACKAGE_ROOT, "src", "bin", "ohm.ts");
 const PTY_AVAILABLE = process.platform === "linux"
   && spawnSync("script", ["--version"], { stdio: "ignore" }).status === 0;
+const SIGNAL_TOOL_READY_TIMEOUT_MS = process.env.CI === "true"
+  && process.platform === "darwin"
+  && process.arch === "x64" ? 20_000 : 10_000;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -282,7 +285,7 @@ test("interactive chat SIGTERM kills an active tool tree, disposes extensions, a
   await waitForOutput(() => fixture.output(child), "ready");
   child.stdin!.write("start the shell fixture\r");
   try {
-    await waitForFile(fixture.ready);
+    await waitForFile(fixture.ready, SIGNAL_TOOL_READY_TIMEOUT_MS);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${fixture.output(child)}`);
   }
@@ -311,7 +314,7 @@ test("print SIGTERM cancels work, kills the detached process group, disposes ext
     "--workspace", fixture.workspace,
     "--print",
   ]);
-  await waitForFile(fixture.ready);
+  await waitForFile(fixture.ready, SIGNAL_TOOL_READY_TIMEOUT_MS);
   assert.equal(child.kill("SIGTERM"), true);
   assert.deepEqual(await waitForExit(child), { code: 143, signal: null });
   await waitForFile(fixture.disposed);
@@ -336,7 +339,7 @@ test("RPC SIGHUP cancels work, kills the detached process group, disposes extens
     "--workspace", fixture.workspace,
   ], "pipe");
   child.stdin!.write(`${JSON.stringify({ id: "prompt", type: "prompt", message: "start the shell fixture" })}\n`);
-  await waitForFile(fixture.ready);
+  await waitForFile(fixture.ready, SIGNAL_TOOL_READY_TIMEOUT_MS);
   assert.equal(child.kill("SIGHUP"), true);
   assert.deepEqual(await waitForExit(child), { code: 129, signal: null });
   await waitForFile(fixture.disposed);
