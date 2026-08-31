@@ -212,6 +212,41 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   );
   assert.ok(manifest, "packages/ohm/package.json must declare ohm");
   const productTestCommand = manifest.scripts?.test ?? "";
+  assert.equal(
+    rootManifest.scripts?.["check:foundation"],
+    "npm run lint && npm run check:dependencies && npm run check:workspaces && npm run build && npm run check --workspace @ohm/terminal && npm run check --workspace @ohm/models && npm run check --workspace @ohm/kernel",
+    "The workspace check foundation must retain every pre-product check",
+  );
+  assert.equal(
+    rootManifest.scripts?.check,
+    "npm run check:foundation && npm run check --workspace ohm && npm run check:nonworkspace",
+    "The workspace check must compose its complete foundation, product, and example checks",
+  );
+  assert.equal(
+    manifest.scripts?.["check:static"],
+    "npm run check:dependencies && npm run check:release && npm run check:provider-models && npm run typecheck && npm run typecheck:test",
+    "The product static check must retain every pre-test check",
+  );
+  assert.equal(
+    manifest.scripts?.["check:post-test"],
+    "npm run test:release && npm run test:consumer && npm run test:dist && npm run test:pack",
+    "The product post-test check must retain every release and public-package check",
+  );
+  assert.equal(
+    manifest.scripts?.check,
+    "npm run check:static && npm run test && npm run check:post-test",
+    "The product check must compose its static, test, and post-test checks",
+  );
+  assert.equal(
+    manifest.scripts?.["test:runner"],
+    "node --import ./test/setup.mjs --import tsx --test --test-concurrency=2",
+    "The product test runner must keep its reviewed isolation and concurrency",
+  );
+  assert.equal(
+    productTestCommand,
+    'npm run test:runner -- "test/**/*.test.ts"',
+    "The default product test must pass the complete corpus to its runner",
+  );
   assert.match(
     productTestCommand,
     /(?:^|\s)"test\/\*\*\/\*\.test\.ts"(?:\s|$)/u,
@@ -398,10 +433,12 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   const ciDocument = parseYaml(ciWorkflow);
   const ciCheck = ciDocument?.jobs?.check;
   const ciCheckText = JSON.stringify(ciCheck);
+  assert.deepEqual(ciCheck?.strategy?.matrix?.os, ["ubuntu-latest", "windows-latest"],
+    "ci.yml full checks must cover Linux and Windows");
   assert.deepEqual(ciCheck?.strategy?.matrix?.node, [NODE_RUNTIME],
     "ci.yml must test only the exact supported Node runtime");
   assert.equal(ciCheck?.strategy?.matrix?.include, undefined,
-    "ci.yml must not retain a second Node runtime lane");
+    "ci.yml full checks must not retain an implicit platform lane");
   assert.ok(
     ciCheckText.includes("npm run native:build --workspace @ohm/terminal"),
     "ci.yml check must build the matching native helper before verification",
@@ -413,6 +450,38 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.ok(
     ciCheckText.includes("TheMrMilchmann/setup-msvc-dev@368ef7d1ee4d1171b31d4a7f67f4d954f903f5a9"),
     "ci.yml Windows check must initialize the native compiler with a pinned action",
+  );
+  const ciMacComponents = ciDocument?.jobs?.["macos-check-components"];
+  assert.equal(ciMacComponents?.["runs-on"], "macos-15", "ci.yml macOS component checks must use macos-15");
+  assert.equal(ciMacComponents?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
+    "ci.yml macOS component checks must require process-level tests");
+  assert.deepEqual(
+    (ciMacComponents?.steps ?? []).map((step) => step?.run).filter(isStringValue),
+    [
+      "npm ci --ignore-scripts",
+      "npm run native:build --workspace @ohm/terminal",
+      "npm run check:foundation",
+      "npm run check:static --workspace ohm",
+      "npm run check:post-test --workspace ohm",
+      "npm run check:nonworkspace",
+    ],
+    "ci.yml macOS component checks must complete every non-product-test check",
+  );
+  const ciMacTests = ciDocument?.jobs?.["macos-product-tests"];
+  assert.equal(ciMacTests?.["runs-on"], "macos-15", "ci.yml macOS product tests must use macos-15");
+  assert.deepEqual(ciMacTests?.strategy?.matrix?.shard, [1, 2, 3, 4],
+    "ci.yml macOS product tests must run every one of four shards");
+  assert.equal(ciMacTests?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
+    "ci.yml macOS product tests must require process-level tests");
+  assert.deepEqual(
+    (ciMacTests?.steps ?? []).map((step) => step?.run).filter(isStringValue),
+    [
+      "npm ci --ignore-scripts",
+      "npm run native:build --workspace @ohm/terminal",
+      "npm run build",
+      'npm run test:runner --workspace ohm -- --test-shard=${{ matrix.shard }}/4 "test/**/*.test.ts"',
+    ],
+    "ci.yml macOS product tests must directly partition the complete corpus",
   );
   const securityWorkflow = parseYaml(await readText(repositoryRoot, ".github/workflows/security.yml"));
   const securityCommands = new Set(
@@ -526,11 +595,8 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   const platformChecks = releaseDocument?.jobs?.["platform-checks"];
   assert.deepEqual(
     platformChecks?.strategy?.matrix?.include,
-    [
-      { os: "macos-15", node: NODE_RUNTIME },
-      { os: "windows-latest", node: NODE_RUNTIME },
-    ],
-    "release.yml platform-checks must cover the full-suite matrix not already covered by staging",
+    [{ os: "windows-latest", node: NODE_RUNTIME }],
+    "release.yml platform-checks must cover the full Windows suite not supplied by staging",
   );
   assert.equal(platformChecks?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
     "release.yml platform-checks must require process-level tests");
@@ -542,6 +608,40 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     "npm run native:build --workspace @ohm/kernel",
     "npm run check",
   ]) assert.ok(platformCheckText.includes(fragment), `release.yml platform-checks must contain ${fragment}`);
+  const releaseMacComponents = releaseDocument?.jobs?.["macos-check-components"];
+  assert.equal(releaseMacComponents?.["runs-on"], "macos-15",
+    "release.yml macOS component checks must use macos-15");
+  assert.equal(releaseMacComponents?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
+    "release.yml macOS component checks must require process-level tests");
+  assert.deepEqual(
+    (releaseMacComponents?.steps ?? []).map((step) => step?.run).filter(isStringValue),
+    [
+      "npm ci --ignore-scripts",
+      "npm run native:build --workspace @ohm/terminal",
+      "npm run check:foundation",
+      "npm run check:static --workspace ohm",
+      "npm run check:post-test --workspace ohm",
+      "npm run check:nonworkspace",
+    ],
+    "release.yml macOS component checks must complete every non-product-test check",
+  );
+  const releaseMacTests = releaseDocument?.jobs?.["macos-product-tests"];
+  assert.equal(releaseMacTests?.["runs-on"], "macos-15",
+    "release.yml macOS product tests must use macos-15");
+  assert.deepEqual(releaseMacTests?.strategy?.matrix?.shard, [1, 2, 3, 4],
+    "release.yml macOS product tests must run every one of four shards");
+  assert.equal(releaseMacTests?.env?.OHM_REQUIRE_PROCESS_TESTS, "1",
+    "release.yml macOS product tests must require process-level tests");
+  assert.deepEqual(
+    (releaseMacTests?.steps ?? []).map((step) => step?.run).filter(isStringValue),
+    [
+      "npm ci --ignore-scripts",
+      "npm run native:build --workspace @ohm/terminal",
+      "npm run build",
+      'npm run test:runner --workspace ohm -- --test-shard=${{ matrix.shard }}/4 "test/**/*.test.ts"',
+    ],
+    "release.yml macOS product tests must directly partition the complete corpus",
+  );
   const stage = releaseDocument?.jobs?.stage;
   assert.equal(stage?.["runs-on"], "ubuntu-24.04",
     "release staging must supply the Linux full-check platform leg");
@@ -553,7 +653,7 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     "release staging must use the exact minimum Node runtime");
   assert.deepEqual(
     stage?.needs,
-    ["regression-guards", "native-build", "platform-checks"],
+    ["regression-guards", "native-build", "platform-checks", "macos-check-components", "macos-product-tests"],
     "release staging must wait for regression guards, every native build, and every additional platform check",
   );
   const stageCommands = new Set(

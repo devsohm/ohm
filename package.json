@@ -14,8 +14,9 @@
   "scripts": {
     "clean": "npm run clean --workspaces --if-present",
     "build": "npm run build --workspace @ohm/terminal && npm run build:offline --workspace @ohm/models && npm run build --workspace @ohm/kernel && npm run build --workspace ohm",
-    "check": "npm run lint && npm run check:dependencies && npm run check:workspaces && npm run build && npm run check --workspace @ohm/terminal && npm run check --workspace @ohm/models && npm run check --workspace @ohm/kernel && npm run check --workspace ohm && npm run check:nonworkspace",
+    "check": "npm run check:foundation && npm run check --workspace ohm && npm run check:nonworkspace",
     "check:dependencies": "node scripts/check-dependency-policy.mjs",
+    "check:foundation": "npm run lint && npm run check:dependencies && npm run check:workspaces && npm run build && npm run check --workspace @ohm/terminal && npm run check --workspace @ohm/models && npm run check --workspace @ohm/kernel",
     "check:nonworkspace": "npm test --prefix packages/ohm/examples/mcp-stdio && npm test --prefix packages/ohm/examples/starter && npm test --prefix packages/ohm/examples/subagent-specialists",
     "check:workspaces": "node scripts/check-workspace-boundaries.mjs",
     "install:user": "node packages/ohm/scripts/install-user.mjs",
