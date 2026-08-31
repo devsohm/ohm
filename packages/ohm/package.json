@@ -158,7 +158,7 @@
     "release:verify": "node ../../scripts/verify-release-artifact.mjs",
     "start": "node dist/bin/ohm.js",
     "pretest": "npm run build",
-    "test": "node --import ./test/setup.mjs --import tsx --test --test-concurrency=2 \"test/**/*.test.ts\"",
+    "test": "node --import ./test/setup.mjs --import tsx --test --test-concurrency=3 \"test/**/*.test.ts\"",
     "test:dogfood": "node --env-file-if-exists=../../.env.local --env-file-if-exists=../../.env --env-file-if-exists=.env.local --env-file-if-exists=.env --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/live/ohm-dogfood.live.test.ts",
     "test:live": "node --env-file-if-exists=../../.env.local --env-file-if-exists=../../.env --env-file-if-exists=.env.local --env-file-if-exists=.env --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/live/provider-smoke.live.test.ts test/live/image-generation.live.test.ts",
     "test:live:session": "node --env-file-if-exists=../../.env.local --env-file-if-exists=../../.env --env-file-if-exists=.env.local --env-file-if-exists=.env --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/live/session-summaries.live.test.ts",
