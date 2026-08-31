@@ -1574,9 +1574,10 @@ test("cold expansion of large built-in inputs avoids whole-object serialization"
     assert.equal(enumerations, afterCollapsed, "expansion serialized every complete built-in input again");
   }
   const medianCpuMs = [...cpuSamples].sort((left, right) => left - right)[1]!;
+  const cpuCeilingMs = process.env.NODE_V8_COVERAGE !== undefined ? 150 : 100;
   assert.ok(
-    medianCpuMs < 100,
-    `cold expansion median occupied JavaScript for ${medianCpuMs.toFixed(1)} ms (${cpuSamples.map((value) => value.toFixed(1)).join(", ")} ms)`,
+    medianCpuMs < cpuCeilingMs,
+    `cold expansion median occupied JavaScript for ${medianCpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms; ${cpuSamples.map((value) => value.toFixed(1)).join(", ")} ms)`,
   );
   assert.match(expanded, /\$ printf 00/u);
   assert.match(expanded, /\$ printf 23/u);

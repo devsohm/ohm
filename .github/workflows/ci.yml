@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   check:
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 30 }}
+    timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && 30 || 60 }}
     env:
       OHM_REQUIRE_PROCESS_TESTS: "1"
     strategy:

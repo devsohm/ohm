@@ -1875,10 +1875,11 @@ test("tiny tool-argument chunks preserve exact no-listener delivery within bound
   const cpuMs = (usage.user + usage.system) / 1_000;
   assert.equal(envelopeDeltas, provider.fragments);
   assert.equal(publicDeltas, provider.fragments);
-  // Hosted coverage and Windows runners add substantial CPU overhead. Keep the local
-  // and non-Windows ordinary guard tight while retaining finite gross-regression ceilings.
+  // Hosted coverage, Windows, and Intel macOS runners add substantial CPU overhead. Keep the
+  // local and ordinary Linux/ARM macOS guard tight while retaining finite gross-regression ceilings.
   const cpuCeilingMs = process.env.NODE_V8_COVERAGE !== undefined ? 8_000
-    : process.env.CI === "true" && process.platform === "win32" ? 5_000 : 3_000;
+    : process.env.CI === "true" && (process.platform === "win32"
+      || (process.platform === "darwin" && process.arch === "x64")) ? 5_000 : 3_000;
   assert.ok(
     cpuMs < cpuCeilingMs,
     `${provider.fragments} tiny tool fragments occupied JavaScript for ${cpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms)`,
@@ -11200,7 +11201,8 @@ test("AgentSession bounds terminal assistant content before durable or observed 
         assert.deepEqual(lastDirectUpdate?.assistantMessageEvent, lastUpdate?.assistantMessageEvent);
         assert.deepEqual(host.diagnostics(), []);
         const cpuCeilingMs = process.env.NODE_V8_COVERAGE !== undefined ? 20_000
-          : process.env.CI === "true" ? 12_000 : 8_000;
+          : process.env.CI === "true" && process.platform === "darwin" && process.arch === "x64" ? 24_000
+            : process.env.CI === "true" ? 12_000 : 8_000;
         assert.ok(
           cpuMs < cpuCeilingMs,
           `${contentBlocks} terminal blocks occupied JavaScript for ${cpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms)`,

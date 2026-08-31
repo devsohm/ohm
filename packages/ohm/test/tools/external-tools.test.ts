@@ -244,12 +244,13 @@ test("external tool downloads use a pinned artifact and reject an integrity mism
   };
   const warnings: string[] = [];
   console.warn = (message) => { warnings.push(String(message)); };
+  const artifact = getFdArtifact();
+  assert.ok(artifact);
 
   assert.equal(await ensureFd({
     environment: { OHM_HOME: join(root, "agent"), PATH: "" },
   }), undefined);
-  assert.equal(requests.length, 1);
-  assert.match(requests[0]!, /\/releases\/download\/v10\.4\.2\//u);
+  assert.deepEqual(requests, [artifact.url]);
   assert.match(warnings[0] ?? "", /integrity check failed/iu);
   assert.deepEqual(await readdir(join(root, "agent", "bin")), []);
 });
