@@ -142,6 +142,7 @@ import { UNAVAILABLE_EXTENSION_UI_ROUTES } from "./runtime-internal/ui-route-reg
 import { ExtensionUISlotCompositor } from "../tui/ui-slot-compositor.js";
 import {
   extensionModelRegistry,
+  type ExtensionModelCompletion,
   type ExtensionModelRegistry,
   type ExtensionProviderConfig,
 } from "./model-boundary.js";
@@ -186,6 +187,7 @@ import type {
   ExtensionSessionProvenance,
   SessionEntry,
 } from "../storage/types.js";
+import type { ExtensionSessionDelivery } from "./capabilities/host.js";
 import { isBuiltinSlashCommand } from "./reserved.js";
 import {
   directDispatchEvents,
@@ -267,6 +269,7 @@ const MAX_RENDERER_FAILURE_DIAGNOSTICS = 128;
 const MAX_RUNTIME_DIAGNOSTICS = 512;
 const MAX_RUNTIME_ACTIVE_TOOLS = 512;
 const MAX_RUNTIME_CATALOG_BYTES = 4 * 1024 * 1024;
+const MAX_RUNTIME_SERVICES = 256;
 const MAX_RUNTIME_SHARED_EVENT_LISTENERS = 1_024;
 const MAX_RUNTIME_STAGED_SHARED_EVENT_EMISSIONS = 1_024;
 const MAX_RUNTIME_SHARED_EVENT_PAYLOAD_BYTES = 1024 * 1024;
@@ -1364,6 +1367,8 @@ export interface RuntimeExtensionListenerContext {
   readonly ui: RuntimeDirectUiContext;
   /** Raw read-only session tree for the active JSONL session. */
   readonly sessionManager: ReadonlyExtensionSessionManager;
+  /** Promise-returning delivery bound to this callback's exact live session. */
+  readonly sessionDelivery: ExtensionSessionDelivery;
   /** Active model directory, including credential resolution for trusted extensions. */
   readonly modelRegistry: RuntimeExtensionModelRegistry;
   /** Currently selected model, when one is selected. */
@@ -1401,6 +1406,8 @@ export type RuntimeExtensionModelRegistry = ExtensionModelRegistry;
 export interface RuntimeDirectContextSnapshot {
   sessionManager: ReadonlyExtensionSessionManager;
   modelRegistry: InternalModelRegistry;
+  /** Host-owned authenticated completion path; registry fallback is used by standalone embeddings. */
+  completeModel?: ExtensionModelCompletion;
   model?: ProviderModel;
   scopedModels?: readonly {
     readonly model: ProviderModel;
@@ -1465,6 +1472,8 @@ interface RuntimeUserMessageDeliveryOptions {
 }
 
 interface RuntimeDirectMessagingActions {
+  /** @internal Opaque identity for the currently bound live session. */
+  getSessionDeliveryBinding?(): object;
   sendMessage<T = unknown>(
     message: RuntimeCustomMessageInput<T>,
     options?: RuntimeCustomMessageDeliveryOptions,
@@ -1473,6 +1482,20 @@ interface RuntimeDirectMessagingActions {
     content: CustomMessage["content"],
     options?: RuntimeUserMessageDeliveryOptions,
   ): void;
+  /** Host-owned Promise boundary used by callback-captured session delivery. */
+  sendMessageAcknowledged?<T = unknown>(
+    message: RuntimeCustomMessageInput<T>,
+    options?: RuntimeCustomMessageDeliveryOptions,
+    targetSessionId?: string,
+    targetSessionBinding?: object,
+  ): Promise<void>;
+  /** Host-owned Promise boundary used by callback-captured session delivery. */
+  sendUserMessageAcknowledged?(
+    content: CustomMessage["content"],
+    options?: RuntimeUserMessageDeliveryOptions,
+    targetSessionId?: string,
+    targetSessionBinding?: object,
+  ): Promise<void>;
   appendEntry<T = unknown>(customType: string, data?: T, provenance?: ExtensionSessionProvenance): void;
 }
 
@@ -1975,6 +1998,11 @@ interface RuntimeExtensionGeneration {
   registrationHandles: Set<RuntimeRegistrationHandleController>;
 }
 
+interface RuntimeServiceRegistration {
+  name: string;
+  service: object;
+}
+
 type RuntimeDirectProviderRegistration =
   | { name: string; config: RuntimeDirectProviderConfig }
   | { name: string; provider: ExtensionProvider };
@@ -1990,6 +2018,7 @@ interface StagedActivation {
   flags: RuntimeFlagRegistration[];
   flagDefaults: Map<string, boolean | string>;
   directProviders: RuntimeDirectProviderRegistration[];
+  services: RuntimeServiceRegistration[];
   toolRenderers: Array<{ name: string; renderer: RuntimeToolRenderer }>;
   messageRenderers: Array<{ customType: string; renderer: RuntimeDirectMessageRenderer }>;
   markdownTransformer?: MarkdownTransformer;
@@ -2204,6 +2233,12 @@ interface OwnedSharedListener {
   listener: RuntimeSharedEventListener;
 }
 
+interface OwnedService {
+  entry: ExtensionRuntimeEntry;
+  generation: RuntimeExtensionGeneration;
+  registration: RuntimeServiceRegistration;
+}
+
 interface OwnedCommand {
   entry: ExtensionRuntimeEntry;
   generation: RuntimeExtensionGeneration;
@@ -2253,6 +2288,20 @@ function utf8Prefix(value: string, maximumBytes: number): string {
 
 function key(value: string, label: string): string {
   if (!NAME.test(value)) throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function runtimeServiceName(value: string): string {
+  if (!Value.Check(STRING_VALUE, value) || !NAME.test(value)) {
+    throw new Error("Runtime service name is invalid");
+  }
+  return value;
+}
+
+function runtimeServiceValue(value: unknown): object {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+    throw new TypeError("Runtime service value must be an object or function");
+  }
   return value;
 }
 
@@ -3633,6 +3682,7 @@ function activation(
     flags: [],
     flagDefaults: new Map(),
     directProviders: [],
+    services: [],
     toolRenderers: [],
     messageRenderers: [],
     entryRenderers: [],
@@ -3733,6 +3783,36 @@ function activation(
       host.emitShared(staged.entry, staged.generation, topic, snapshot);
     },
   };
+  const services: ExtensionAPI["services"] = Object.freeze({
+    register(nameValue, serviceValue) {
+      assertActive();
+      const name = runtimeServiceName(nameValue);
+      const service = runtimeServiceValue(serviceValue);
+      const registration = { name, service };
+      if (!staged.committed) {
+        if (staged.services.some((candidate) => candidate.name === name)) {
+          throw new Error(`Runtime service ${name} is already registered by this extension activation`);
+        }
+        host.assertServiceRegistrationAvailable(name, staged.services.length + 1);
+        staged.services.push(registration);
+      } else {
+        host.registerLiveService(staged.entry, staged.generation, registration);
+      }
+      return runtimeRegistrationHandle(staged.generation, () => {
+        if (!staged.committed) removeExactRegistration(staged.services, registration);
+        else host.unregisterLiveService(staged.entry, staged.generation, registration);
+      });
+    },
+    get<Service extends object = object>(nameValue: string): Service | undefined {
+      assertActive();
+      const name = runtimeServiceName(nameValue);
+      if (!staged.committed) {
+        const pending = staged.services.find((candidate) => candidate.name === name);
+        if (pending !== undefined) return pending.service as Service;
+      }
+      return host.getService(name) as Service | undefined;
+    },
+  });
   const prepareRuntimeTool = (tool: RuntimeToolCandidate): RuntimeToolRegistration => {
     assertActive();
     key(tool.name, "Tool name");
@@ -3911,6 +3991,7 @@ function activation(
   const directApi: ExtensionAPI = {
     config,
     processes,
+    services,
     onDispose(dispose) {
       assertActive();
       if (!Value.Check(FUNCTION_VALUE, dispose)) throw new Error("Runtime extension disposer must be a function");
@@ -4294,6 +4375,7 @@ export class RuntimeExtensionHost {
   readonly #entryRenderers: OwnedDirectRenderer<RuntimeDirectEntryRenderer>[] = [];
   readonly #listeners = new Map<string, OwnedListener[]>();
   readonly #sharedListeners = new Map<string, OwnedSharedListener[]>();
+  readonly #services = new Map<string, OwnedService>();
   readonly #externalSharedListeners = new Set<OwnedExternalSharedListener>();
   readonly #disposers: Array<() => void | Promise<void>> = [];
   readonly #moduleDisposers: Array<() => void | Promise<void>> = [];
@@ -5144,6 +5226,8 @@ export class RuntimeExtensionHost {
       sourcePath: entry.sourcePath,
     };
     const provenance = runtimeSessionProvenance(entry);
+    const sendMessageAcknowledged = handler.sendMessageAcknowledged;
+    const sendUserMessageAcknowledged = handler.sendUserMessageAcknowledged;
     const actions: RuntimeDirectActionsHandler = {
       ...handler,
       sendMessage<T = unknown>(
@@ -5161,6 +5245,38 @@ export class RuntimeExtensionHost {
       appendEntry<T = unknown>(customType: string, data?: T): void {
         handler.appendEntry(customType, data, provenance);
       },
+      ...(sendMessageAcknowledged === undefined ? {} : {
+        async sendMessageAcknowledged<T = unknown>(
+          message: RuntimeCustomMessageInput<T>,
+          options?: RuntimeCustomMessageDeliveryOptions,
+          targetSessionId?: string,
+          targetSessionBinding?: object,
+        ): Promise<void> {
+          await sendMessageAcknowledged.call(handler, {
+            customType: message.customType,
+            content: message.content,
+            display: message.display,
+            ...optionalProperties(message.details === undefined ? undefined : { details: message.details }),
+            ...optionalProperties(provenance === undefined ? undefined : { provenance }),
+          }, options, targetSessionId, targetSessionBinding);
+        },
+      }),
+      ...(sendUserMessageAcknowledged === undefined ? {} : {
+        async sendUserMessageAcknowledged(
+          content: CustomMessage["content"],
+          options?: RuntimeUserMessageDeliveryOptions,
+          targetSessionId?: string,
+          targetSessionBinding?: object,
+        ): Promise<void> {
+          await sendUserMessageAcknowledged.call(
+            handler,
+            content,
+            options,
+            targetSessionId,
+            targetSessionBinding,
+          );
+        },
+      }),
       registerProvider(
         providerOrName: ExtensionProvider | string,
         config?: RuntimeDirectProviderConfig,
@@ -5856,6 +5972,49 @@ export class RuntimeExtensionHost {
     if (listeners.length === 0) this.#sharedListeners.delete(topic);
   }
 
+  assertServiceRegistrationAvailable(name: string, additionalCount = 1): void {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    const existing = this.#services.get(name);
+    if (existing !== undefined) {
+      throw new Error(
+        `Runtime service ${name} is already registered by ${existing.entry.extensionId} (${existing.entry.sourcePath})`,
+      );
+    }
+    if (this.#services.size + additionalCount > MAX_RUNTIME_SERVICES) {
+      throw new Error(`Runtime services exceed ${MAX_RUNTIME_SERVICES} registrations`);
+    }
+  }
+
+  getService(name: string): object | undefined {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    const owned = this.#services.get(name);
+    return owned?.generation.active === true ? owned.registration.service : undefined;
+  }
+
+  registerLiveService(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    registration: RuntimeServiceRegistration,
+  ): void {
+    this.#assertLive(entry, generation);
+    this.assertServiceRegistrationAvailable(registration.name);
+    this.#services.set(registration.name, { entry, generation, registration });
+  }
+
+  unregisterLiveService(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    registration: RuntimeServiceRegistration,
+  ): void {
+    if (!generation.active) return;
+    const owned = this.#services.get(registration.name);
+    if (
+      owned?.entry === entry &&
+      owned.generation === generation &&
+      owned.registration === registration
+    ) this.#services.delete(registration.name);
+  }
+
   emitShared<Input>(
     entry: ExtensionRuntimeEntry,
     generation: RuntimeExtensionGeneration,
@@ -6492,6 +6651,8 @@ export class RuntimeExtensionHost {
   #directModelRegistry(
     owned: Pick<OwnedListener, "entry" | "generation">,
     internal: InternalModelRegistry,
+    completeModel: ExtensionModelCompletion | undefined,
+    signal: AbortSignal,
     assertCurrent?: () => void,
   ): ExtensionModelRegistry {
     const registry = extensionModelRegistry(internal);
@@ -6543,9 +6704,20 @@ export class RuntimeExtensionHost {
       this.#assertLive(owned.entry, owned.generation);
       this.directActions(owned.entry, owned.generation).unregisterProvider(name);
     };
+    const fallbackComplete: ExtensionModelCompletion = (model, context, options) =>
+      registry.complete(model, context, options);
+    const completeRequest = completeModel ?? fallbackComplete;
+    const complete: ExtensionModelCompletion = (model, context, options) => {
+      const callerSignal = options?.signal;
+      const operationSignal = callerSignal === undefined || callerSignal === signal
+        ? signal
+        : AbortSignal.any([signal, callerSignal]);
+      return completeRequest(model, context, { ...options, signal: operationSignal });
+    };
     const methods = new Map<PropertyKey, RuntimeBoundaryValue>();
     const projected = new Proxy(registry, {
       get(target, property) {
+        if (property === "complete") return complete;
         if (property === "getProvider") return getProvider;
         if (property === "getRegisteredNativeProvider") return getRegisteredNativeProvider;
         if (property === "registerProvider") return registerProvider;
@@ -6652,7 +6824,60 @@ export class RuntimeExtensionHost {
           signal,
         };
     const direct = this.#directContextHandler?.(directTarget, signal) ?? unavailableDirectContext();
-    const modelRegistry = this.#directModelRegistry(owned, direct.modelRegistry, assertCurrent);
+    const deliveryActions = this.#directActionsHandler;
+    const sendMessageAcknowledged = deliveryActions?.sendMessageAcknowledged;
+    const sendUserMessageAcknowledged = deliveryActions?.sendUserMessageAcknowledged;
+    const deliverySessionBinding = deliveryActions?.getSessionDeliveryBinding?.();
+    const deliveryProvenance = runtimeSessionProvenance(owned.entry);
+    const deliverySessionId = direct.sessionManager.getSessionId();
+    const assertDeliverySession = (): void => {
+      this.#assertLive(owned.entry, owned.generation);
+      if (direct.sessionManager.getSessionId() !== deliverySessionId) {
+        throw new Error("Runtime extension session delivery target is no longer active");
+      }
+    };
+    const sessionDelivery: ExtensionSessionDelivery = Object.freeze({
+      sessionId: deliverySessionId,
+      async sendMessage<T = unknown>(
+        message: Pick<DirectCustomMessage<T>, "customType" | "content" | "display" | "details">,
+        options?: RuntimeCustomMessageDeliveryOptions,
+      ): Promise<void> {
+        assertDeliverySession();
+        if (sendMessageAcknowledged === undefined) {
+          throw new Error("Acknowledged session message delivery is unavailable");
+        }
+        await sendMessageAcknowledged.call(deliveryActions, {
+          customType: message.customType,
+          content: canonicalInputContent(message.content),
+          display: message.display,
+          ...optionalProperties(message.details === undefined ? undefined : { details: message.details }),
+          ...optionalProperties(deliveryProvenance === undefined ? undefined : { provenance: deliveryProvenance }),
+        }, options, deliverySessionId, deliverySessionBinding);
+      },
+      async sendUserMessage(
+        content: DirectCustomMessage["content"],
+        options?: RuntimeUserMessageDeliveryOptions,
+      ): Promise<void> {
+        assertDeliverySession();
+        if (sendUserMessageAcknowledged === undefined) {
+          throw new Error("Acknowledged session user-message delivery is unavailable");
+        }
+        await sendUserMessageAcknowledged.call(
+          deliveryActions,
+          canonicalInputContent(content),
+          options,
+          deliverySessionId,
+          deliverySessionBinding,
+        );
+      },
+    });
+    const modelRegistry = this.#directModelRegistry(
+      owned,
+      direct.modelRegistry,
+      direct.completeModel,
+      signal,
+      assertCurrent,
+    );
     const live = <TArgs extends unknown[], TResult>(
       operation: (...args: TArgs) => TResult,
     ): ((...args: TArgs) => TResult) => this.#generationBoundCall(owned, operation, assertCurrent);
@@ -6672,6 +6897,7 @@ export class RuntimeExtensionHost {
         assertCurrent,
       ),
       sessionManager: this.#generationBoundView(owned, direct.sessionManager, assertCurrent),
+      sessionDelivery,
       modelRegistry,
       model: direct.model === undefined ? undefined : modelRegistry.present(direct.model),
       scopedModels: Object.freeze((direct.scopedModels ?? []).map((entry) => Object.freeze({
@@ -7800,6 +8026,17 @@ export class RuntimeExtensionHost {
     if ((this.#listeners.get("tool_call")?.length ?? 0) + toolCallListenerCount > MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES) {
       throw new Error(`Runtime tool_call listeners exceed ${MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES}`);
     }
+    if (this.#services.size + staged.services.length > MAX_RUNTIME_SERVICES) {
+      throw new Error(`Runtime services exceed ${MAX_RUNTIME_SERVICES} registrations`);
+    }
+    for (const registration of staged.services) {
+      const existing = this.#services.get(registration.name);
+      if (existing !== undefined) {
+        throw new Error(
+          `Runtime service ${registration.name} is already registered by ${existing.entry.extensionId} (${existing.entry.sourcePath})`,
+        );
+      }
+    }
     if (toolRendererNames.size !== toolRenderers.length || toolRenderers.some((entry) => this.#toolRenderers.has(entry.name))) throw new Error("Runtime extension registered a duplicate tool renderer");
     if (staged.eventBus !== undefined) {
       for (const registration of staged.sharedListeners) {
@@ -7929,6 +8166,11 @@ export class RuntimeExtensionHost {
     this.#moduleDisposers.push(...staged.moduleDisposers);
     this.#initialUi.push(...staged.ui);
     this.#initialAdvancedUi.splice(0, this.#initialAdvancedUi.length, ...retainedAdvancedUi);
+    for (const registration of staged.services) this.#services.set(registration.name, {
+      entry: staged.entry,
+      generation: staged.generation,
+      registration,
+    });
     this.#generations.push(staged.generation);
     staged.committed = true;
     staged.generation.committed = true;
@@ -7982,6 +8224,7 @@ export class RuntimeExtensionHost {
       .map((entry) => entry.unsubscribe);
     this.#listeners.clear();
     this.#sharedListeners.clear();
+    this.#services.clear();
     this.#externalSharedListeners.clear();
     failures.push(...await runRuntimeCleanupPhase(
       [

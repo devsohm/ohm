@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Custom message rendering and in-process event bus example for ohm",
+  "description": "Trusted service, local event, and custom message example for ohm",
   "ohm": { "extensions": ["extensions/index.mjs"] }
 }

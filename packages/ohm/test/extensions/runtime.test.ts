@@ -16,7 +16,7 @@ import {
   type RuntimeExtensionHost,
   type RuntimeExtensionLoadOptions,
 } from "../../src/extensions/runtime.js";
-import type { ExtensionAPI } from "../../src/extensions/direct.js";
+import type { ExtensionAPI, ExtensionSessionDelivery } from "../../src/extensions/direct.js";
 import { UNAVAILABLE_EXTENSION_UI_ROUTES } from "../../src/extensions/runtime-internal/ui-route-registrations.js";
 import { UNAVAILABLE_EXTENSION_UI_SLOTS } from "../../src/extensions/runtime-internal/ui-slot-registrations.js";
 import { extensionSessionManager } from "../../src/extensions/session-contract.js";
@@ -147,6 +147,7 @@ function bindContext(host: RuntimeExtensionHost, root: string): void {
 test("unbound direct context exposes safe empty session state", async (context) => {
   const root = await workspace(context, "ohm-direct-runtime-unbound-session-");
   let page: unknown;
+  let delivery: ExtensionSessionDelivery | undefined;
   let sessionId: string | undefined;
   let systemPrompt: string | undefined;
   const host = await loadDirectExtensions([], {
@@ -155,6 +156,7 @@ test("unbound direct context exposes safe empty session state", async (context) 
     inlineExtensions: [(api) => {
       api.on("session_start", (_event, runtime) => {
         page = runtime.sessionManager.getEntriesPage(0, 1);
+        delivery = runtime.sessionDelivery;
         sessionId = runtime.sessionManager.getSessionId();
         systemPrompt = runtime.getSystemPrompt();
       });
@@ -167,6 +169,12 @@ test("unbound direct context exposes safe empty session state", async (context) 
   assert.deepEqual(page, { entries: [], totalEntries: 0 });
   assert.equal(sessionId, "unbound");
   assert.equal(systemPrompt, "");
+  assert.equal(delivery?.sessionId, "unbound");
+  assert.notEqual(delivery, undefined);
+  await assert.rejects(
+    delivery!.sendMessage({ customType: "unbound", content: "no host", display: false }),
+    /Acknowledged session message delivery is unavailable/u,
+  );
 });
 
 test("direct listeners observe advanced UI state while unavailable terminal input fails closed", async (context) => {

@@ -4,13 +4,15 @@ The machine-readable [`extension-capabilities.json`](extension-capabilities.json
 maps each supported direct-factory capability to its hosts, public API members,
 owned event/result contracts, documentation, examples, and executable tests.
 Repository tests validate every referenced path and require every public event
-to have exactly one capability owner.
+to have exactly one capability owner. The compile-time inventory also covers
+every public factory, callback, command, and UI member in the current TypeScript
+contracts, so adding a surface without matrix ownership fails test typechecking.
 
 Callback UI support is negotiated separately through the optional
 `context.ui.capabilities` map. ohm's built-in hosts always provide a complete,
 frozen map; custom hosts that omit it declare no optional UI surfaces.
 
-ohm has one trusted in-process extension model. A package declares direct entries in `package.json`. A successful factory publishes its commands, tools, events, providers, UI, and resources together. A failed candidate publishes nothing. Refresh replaces the complete generation, makes the old API stale, and then runs its disposers.
+ohm has one trusted in-process extension model. A package declares direct entries in `package.json`. A successful factory publishes its commands, tools, events, services, providers, UI, and resources together. A failed candidate publishes nothing. Refresh replaces the complete generation, makes the old API stale, and then runs its disposers.
 
 ## Focused examples
 
@@ -23,7 +25,7 @@ ohm has one trusted in-process extension model. A package declares direct entrie
 | `input-guard` | Input transformation and tool-call blocking |
 | `ui-surfaces` | UI capability negotiation plus one active named route, ordered session slots, status, autocomplete, and overlay components |
 | `context-compaction` | Prompt transformation, usage, and compaction |
-| `messages-bus` | Shared topics, custom messages, and rendering |
+| `messages-bus` | Trusted services, shared topics, custom messages, and rendering |
 | `model-controls` | Active model-scope inspection and thinking selection |
 | `provider-override` | Generation-owned provider replacement |
 | `raw-editor-ui` | Primary editor replacement through public TUI exports |
@@ -55,6 +57,10 @@ Managed-process ownership controls cancellation and lifecycle rather than
 providing a confidentiality or sandbox boundary. Protocol bridges and delegated
 agents remain trusted extension code; untrusted packages must not be loaded as
 direct extensions.
+
+The trusted service registry is also process-local rather than an isolation
+boundary. It lets cooperating extensions share callback-bearing objects by
+reference; durable or cross-process coordination needs a different contract.
 
 The HTTP service keeps session identity under its endpoint registry. Extension
 commands can navigate the current tree and refresh resources there, but

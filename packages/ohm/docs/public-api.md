@@ -42,6 +42,8 @@ Public subpaths have these stability classes:
 
 All five classes are covered by the compatibility rules below; “advanced” and “test” describe scope, not permission for silent breaking changes. No exported subpath is currently experimental. A future experimental entry point must say so in both its public declarations and documentation.
 
+The advanced `ohm/storage` boundary exposes `SessionManager.openSnapshot(path, cwdOverride?)` for cross-session reads. It returns a `ReadonlySessionManager` capture, excludes writer methods from its type, and does not acquire the journal's writer slot. The capture contains only state committed when it opened; open another snapshot to observe later commits. A caller that bypasses the type with a cast still cannot commit through the snapshot at runtime.
+
 `ohm/images` contains two deliberately separate surfaces: the clipboard/preprocessing helpers used by chat prompts and the image-generation provider/catalog/registry API. Image generation does not share or mutate the chat provider registry. See [Image generation](image-generation.md) for the credential, failure, retry, and lifecycle contracts.
 
 The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/devsohm/ohm/blob/main/packages/ohm/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.

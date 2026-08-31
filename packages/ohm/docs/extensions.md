@@ -1,6 +1,6 @@
 # Extensions
 
-ohm loads trusted extensions as direct in-process factories. The factory receives one stable `ExtensionAPI`; commands, tools, event handlers, providers, renderers, flags, and shortcuts registered during activation become visible only after activation succeeds.
+ohm loads trusted extensions as direct in-process factories. The factory receives one stable `ExtensionAPI`; commands, tools, event handlers, providers, services, renderers, flags, and shortcuts registered during activation become visible only after activation succeeds.
 
 For package layout, installation, integrity, and publishing, read [Extension packages](packages.md). Choose a focused package from the [examples catalog](../examples/README.md); the smallest runnable package is [`examples/starter`](../examples/starter/README.md).
 
@@ -50,6 +50,7 @@ The direct factory API exposes:
 - `sendMessage`, `sendUserMessage`, `appendEntry`, session name and label helpers;
 - `exec` for one-shot argv-based child processes and `processes` for asynchronous generation-owned workers;
 - `config` for bounded extension-specific user and workspace configuration;
+- `services` for trusted same-process sharing of live objects or functions;
 - tool, command, model, and thinking-level selection helpers;
 - `getCommands()` for the invokable extension-command, prompt-template, and skill-command catalog in host order;
 - `getDiscoveryView` for the richer bounded prompt and skill metadata view;
@@ -81,7 +82,7 @@ Command and shortcut contexts provide:
 
 - `cwd`, `mode`, `hasUI`, `signal`, and project-trust status;
 - extension-owned `paths.userData` and canonical-workspace-isolated `paths.workspaceData`;
-- a read-only `sessionManager`, current `model`, `modelRegistry`, active `scopedModels`, and selected `thinkingLevel`;
+- a read-only `sessionManager`, current `model`, `modelRegistry` with authenticated one-shot `complete()`, active `scopedModels`, and selected `thinkingLevel`;
 - `ui.capabilities` feature negotiation plus dialogs, notifications, editor access, theme access, one active named UI route, ordered session slots, widgets, header/footer components, terminal input observation, and primary-editor replacement;
 - idle, pending-message, abort, shutdown, context-usage, compaction, and system-prompt access;
 - command-only `waitForIdle`, `newSession`, `fork`, `navigateTree`, `switchSession`, and `refresh`.
@@ -235,6 +236,15 @@ serialization. Values arriving from a supplied event bus pass through the same
 snapshot boundary before an extension handler runs. The 1,024-emission and 4 MiB
 aggregate limits apply only to the activation queue.
 
+`ohm.services` serves a different trusted-only use case: cooperating extensions
+can publish and retrieve an object or function by exact JavaScript reference.
+Registrations are transactional and generation-owned, the first owner of a name
+wins, names are limited to 128 ASCII identifier characters, and one host admits
+at most 256 live services. The registry is not durable, cross-process, or an
+isolation boundary. Removing a registration prevents later lookup but cannot
+revoke a reference a consumer already retained. Keep `ohm.events` JSON-safe;
+do not use the service registry as an unsafe event bus.
+
 ## Providers
 
 `registerProvider(id, config)` composes a model provider registration. Registering an existing provider ID creates a generation-owned replacement; unloading restores the previous provider. Defined fields compose over the base registration, so a package can replace a catalog, transport family, base URL, display name, or headers without owning unrelated host state.
@@ -269,6 +279,13 @@ Callback contexts expose the current session through a read-only `SessionManager
 Commands may request a new session, fork at an entry, navigate the current tree, or switch to an explicit session file. The host validates the operation, requires idle state where necessary, emits lifecycle events, and owns the transition.
 
 Factory-level `appendEntry`, `sendMessage`, `sendUserMessage`, naming, and labeling helpers act on the active bound session. They are unavailable during installation activation tests because no live session exists.
+
+Callback contexts also expose `sessionDelivery`, whose Promise-returning
+message methods remain bound to the callback's exact session instead of following
+a later host rebind. Use it for background results that need an acceptance
+acknowledgement. It rejects after that live session closes; persist unfinished
+extension work in `context.paths` and retry after a matching `session_start`
+rather than retaining an implicit-current factory sender.
 
 Pair `appendEntry(customType, data)` with `registerEntryRenderer(customType, renderer)`, and pair visible `sendMessage` calls with `registerMessageRenderer`. These renderers project the durable JSONL value directly: the same stored entry, ID, and order are used during live display and resume. Hidden messages stay hidden, and a renderer failure uses the host fallback without changing the session.
 

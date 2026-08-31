@@ -33,6 +33,7 @@ declare global {
   var __ohmSchemaImports: boolean[] | undefined;
   var __ohmServeImport: string | undefined;
   var __ohmDirectCommand: unknown;
+  var __ohmDirectCommandContextKeys: string[] | undefined;
   var __ohmDirectApi: ExtensionAPI | undefined;
   var __ohmDirectShortcut: unknown;
   var __ohmDirectHeaderEvent: unknown;
@@ -293,6 +294,7 @@ test("trusted modules use the direct factory registration signatures", async (co
       description: "Direct command",
       handler(args, ctx) {
         globalThis.__ohmDirectCommand = [args, ctx.cwd, ctx.sessionManager.getSessionId(), ctx.thinkingLevel, ctx.getSystemPrompt()];
+        globalThis.__ohmDirectCommandContextKeys = Object.keys(ctx).sort();
       }
     });
     ohm.registerShortcut("ctrl+alt+d", {
@@ -475,6 +477,7 @@ test("trusted modules use the direct factory registration signatures", async (co
     "registerTool",
     "sendMessage",
     "sendUserMessage",
+    "services",
     "setActiveTools",
     "setLabel",
     "setModel",
@@ -558,6 +561,35 @@ test("trusted modules use the direct factory registration signatures", async (co
     "direct-session",
     "high",
     "direct system prompt",
+  ]);
+  assert.deepEqual(globalThis.__ohmDirectCommandContextKeys, [
+    "abort",
+    "compact",
+    "cwd",
+    "fork",
+    "getContextUsage",
+    "getSystemPrompt",
+    "getSystemPromptOptions",
+    "hasPendingMessages",
+    "hasUI",
+    "isIdle",
+    "isProjectTrusted",
+    "mode",
+    "model",
+    "modelRegistry",
+    "navigateTree",
+    "newSession",
+    "paths",
+    "refresh",
+    "scopedModels",
+    "sessionDelivery",
+    "sessionManager",
+    "shutdown",
+    "signal",
+    "switchSession",
+    "thinkingLevel",
+    "ui",
+    "waitForIdle",
   ]);
   assert.equal(globalThis.__ohmDirectShortcut, root);
   const headers = { "x-existing": "keep", "x-remove": "remove" };

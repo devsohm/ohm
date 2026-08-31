@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
   <title id="title">ohm extension generation lifecycle and capability flow</title>
-  <desc id="desc">A trusted extension factory writes to a private candidate registration ledger. Successful activation publishes one live generation. Failed activation discards the candidate. Refresh prepares a replacement while the current generation remains recoverable, then either restores the current generation or publishes the candidate and disposes the stale generation. The live generation connects commands, tools, events, providers, resources, session actions, processes, and terminal UI to host-owned boundaries.</desc>
+  <desc id="desc">A trusted extension factory writes to a private candidate registration ledger. Successful activation publishes one live generation. Failed activation discards the candidate. Refresh prepares a replacement while the current generation remains recoverable, then either restores the current generation or publishes the candidate and disposes the stale generation. The live generation connects commands, tools, events, services, providers, resources, session actions, processes, and terminal UI to host-owned boundaries.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
@@ -48,7 +48,7 @@
   <g>
     <rect class="muted" x="780" y="170" width="310" height="116"/>
     <text class="label" x="804" y="210">Publish generation</text>
-    <text class="detail" x="804" y="240">commands · tools · hooks</text>
+    <text class="detail" x="804" y="240">commands · tools · services</text>
     <text class="detail" x="804" y="264">become host-visible together</text>
   </g>
   <g>
@@ -113,7 +113,7 @@
   <g>
     <rect class="card" x="1160" y="830" width="384" height="128"/>
     <text class="label" x="1184" y="870">Published effects</text>
-    <text class="detail" x="1184" y="900">commands · tools · events</text>
+    <text class="detail" x="1184" y="900">tools · events · services</text>
     <text class="detail" x="1184" y="926">providers · renderers · resources</text>
   </g>
 

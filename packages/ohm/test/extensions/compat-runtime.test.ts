@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 
 import type { UserMessage } from "@ohm/kernel";
-import type { Api, Model } from "@ohm/models";
+import type { Api, AssistantMessage, Model } from "@ohm/models";
 
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../../src/core/json.js";
@@ -19,6 +19,10 @@ import {
   getExtensionRuntimeHost,
 } from "../../src/extensions/compat-runtime.js";
 import { projectLoadedExtensionHost } from "../../src/extensions/compat.js";
+import {
+  extensionModelRegistry,
+  type ExtensionModelCompletion,
+} from "../../src/extensions/model-boundary.js";
 import type {
   Extension,
   ExtensionActions,
@@ -263,7 +267,15 @@ test("five-argument runner binds actions and keeps projection resolution determi
     SessionManager.inMemory(cwd),
     new ModelRegistry(createModels()),
   );
-  runner.bindCore(actions(), contextActions(), {
+  let acknowledgedDeliveries = 0;
+  runner.bindCore(actions(), {
+    ...contextActions(),
+    getSessionDelivery: () => ({
+      sessionId: "compat-session",
+      async sendMessage() { acknowledgedDeliveries += 1; },
+      async sendUserMessage() { acknowledgedDeliveries += 1; },
+    }),
+  }, {
     registerProvider(name) { registered.push(name); },
   });
 
@@ -290,8 +302,91 @@ test("five-argument runner binds actions and keeps projection resolution determi
   assert.deepEqual(failures, ["failure"]);
 
   const context = runner.createContext();
+  const delivery = context.sessionDelivery;
+  assert.equal(delivery.sessionId, "compat-session");
+  await delivery.sendMessage({ customType: "compat", content: "accepted", display: false });
+  assert.equal(acknowledgedDeliveries, 1);
   runner.invalidate("stale runner");
   assert.throws(() => context.isIdle(), /stale runner/u);
+  await assert.rejects(
+    delivery.sendUserMessage("late"),
+    /stale runner/u,
+  );
+  assert.equal(acknowledgedDeliveries, 1);
+});
+
+test("compat callback model completion is bound to callback and runner lifetime", async (context) => {
+  const cwd = await workspace();
+  const runtime = createExtensionRuntime();
+  const modelRegistry = new ModelRegistry(createModels());
+  const publicRegistry = extensionModelRegistry(modelRegistry);
+  const callbackSignals = [new AbortController(), new AbortController(), new AbortController()];
+  let activeCallback = callbackSignals[0]!;
+  const observedSignals: AbortSignal[] = [];
+  const completion: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: TEST_MODEL.api,
+    provider: TEST_MODEL.provider,
+    model: TEST_MODEL.id,
+    usage: {},
+    stopReason: "stop",
+    timestamp: 0,
+  };
+  const completeModel: ExtensionModelCompletion = (_model, _modelContext, options) => {
+    const signal = options?.signal;
+    assert.ok(signal);
+    observedSignals.push(signal);
+    if (observedSignals.length < 3) return Promise.resolve(completion);
+    return new Promise((_resolve, reject) => {
+      const fail = (): void => { reject(signal.reason); };
+      if (signal.aborted) fail();
+      else signal.addEventListener("abort", fail, { once: true });
+    });
+  };
+  publicRegistry.complete = completeModel;
+  const runner = new ExtensionRunner(
+    [],
+    runtime,
+    cwd,
+    SessionManager.inMemory(cwd),
+    modelRegistry,
+  );
+  context.after(async () => await getExtensionRuntimeHost(runtime)?.close());
+  runner.bindCore(actions(), {
+    ...contextActions(),
+    getSignal: () => activeCallback.signal,
+    completeModel,
+  });
+
+  const caller = new AbortController();
+  const firstComplete = runner.createContext().modelRegistry.complete;
+  await firstComplete(TEST_MODEL, { messages: [] }, { signal: caller.signal });
+  assert.notStrictEqual(observedSignals[0], caller.signal);
+  assert.notStrictEqual(observedSignals[0], callbackSignals[0]!.signal);
+  caller.abort(new Error("caller completion cancelled"));
+  assert.equal(observedSignals[0]?.aborted, true);
+  assert.match(String(observedSignals[0]?.reason), /caller completion cancelled/u);
+
+  activeCallback = callbackSignals[1]!;
+  const secondComplete = runner.createContext().modelRegistry.complete;
+  await secondComplete(TEST_MODEL, { messages: [] });
+  assert.notStrictEqual(observedSignals[1], callbackSignals[1]!.signal);
+  callbackSignals[1]!.abort(new Error("callback completion cancelled"));
+  assert.equal(observedSignals[1]?.aborted, true);
+  assert.match(String(observedSignals[1]?.reason), /callback completion cancelled/u);
+
+  activeCallback = callbackSignals[2]!;
+  const retainedComplete = runner.createContext().modelRegistry.complete;
+  const pending = retainedComplete(TEST_MODEL, { messages: [] });
+  runner.invalidate("stale compat completion");
+  await assert.rejects(pending, /stale compat completion/u);
+  assert.equal(observedSignals[2]?.aborted, true);
+  assert.throws(
+    () => { void retainedComplete(TEST_MODEL, { messages: [] }); },
+    /stale compat completion/u,
+  );
+  assert.equal(observedSignals.length, 3);
 });
 
 test("command resolution terminates through nested invocation-name collisions", async () => {

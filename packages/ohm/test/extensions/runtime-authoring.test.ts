@@ -23,7 +23,10 @@ import type {
   TextContent,
 } from "../../src/extensions/direct.js";
 import type { ExtensionRuntimeEntry } from "../../src/extensions/types.js";
-import { extensionModelRegistry } from "../../src/extensions/model-boundary.js";
+import {
+  extensionModelRegistry,
+  type ExtensionModelRegistry,
+} from "../../src/extensions/model-boundary.js";
 import { extensionSessionManager } from "../../src/extensions/session-contract.js";
 import type { CanonicalMessage } from "../../src/core/types.js";
 import type { SlashCommandInfo } from "../../src/core/slash-commands.js";
@@ -105,6 +108,8 @@ declare global {
   var __capturedListenerContext: ExtensionContext;
   var __capturedShortcutContext: RuntimeDirectCommandContext;
   var __generationBoundProviders: GenerationBoundProviderView[];
+  var __capturedModelComplete: ExtensionModelRegistry["complete"];
+  var __modelCompleteErrors: string[];
   var __headlessDirectUi: unknown;
   var __authoringCommandStarted: () => void;
   var __authoringShortcutStarted: () => void;
@@ -869,6 +874,115 @@ test("listener provider and auth capabilities expire with their session binding 
   assert.throws(() => second.stream.call(second.provider, model, { messages: [] }), generationStale);
   await assert.rejects(async () => await second.resolve.call(second.apiKey, authInput), generationStale);
   assert.deepEqual(calls, []);
+});
+
+test("listener model completion follows callback and generation lifetime without following a rebound session", async (context) => {
+  const source = `export default (api) => {
+    api.on("session_start", async (_event, context) => {
+      const model = context.modelRegistry.find("completion-provider", "completion-model");
+      if (!model) throw new Error("completion model is unavailable");
+      globalThis.__capturedModelComplete = context.modelRegistry.complete;
+      try {
+        await context.modelRegistry.complete(model, { messages: [] });
+      } catch (error) {
+        globalThis.__modelCompleteErrors.push(error instanceof Error ? error.message : String(error));
+      }
+    });
+  };\n`;
+  const { host, root } = await fixture(context, [source]);
+  context.after(async () => {
+    await host.close();
+    Reflect.deleteProperty(globalThis, "__capturedModelComplete");
+    Reflect.deleteProperty(globalThis, "__modelCompleteErrors");
+  });
+  globalThis.__modelCompleteErrors = [];
+  const model: Model<Api> = {
+    id: "completion-model",
+    name: "Completion model",
+    api: "openai-completions",
+    provider: "completion-provider",
+    baseUrl: "https://example.test/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 8_000,
+    maxTokens: 1_000,
+  };
+  const provider: Provider = {
+    id: model.provider,
+    name: "Completion provider",
+    auth: { apiKey: { name: "Completion key", async resolve() { return { auth: {} }; } } },
+    getModels: () => [model],
+    stream: () => createAssistantMessageEventStream(),
+    streamSimple: () => createAssistantMessageEventStream(),
+  };
+  const modelRegistry = new ModelRegistry(createModels());
+  extensionModelRegistry(modelRegistry).registerProvider(provider);
+  const sessionManager = SessionManager.inMemory(root, { id: "completion-generation" });
+  const observedSignals: AbortSignal[] = [];
+  let calls = 0;
+  let startedResolve!: () => void;
+  let started = new Promise<void>((resolve) => { startedResolve = resolve; });
+  const completeModel: ExtensionModelRegistry["complete"] = (_model, _context, options) => {
+    const signal = options?.signal;
+    assert.ok(signal);
+    calls += 1;
+    observedSignals.push(signal);
+    startedResolve();
+    return new Promise((_resolve, reject) => {
+      const fail = (): void => { reject(signal.reason); };
+      if (signal.aborted) fail();
+      else signal.addEventListener("abort", fail, { once: true });
+    });
+  };
+  const bindSession = (): void => host.setDirectContextHandler(() => ({
+    sessionManager: extensionSessionManager(sessionManager),
+    modelRegistry,
+    completeModel,
+    thinkingLevel: "off",
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    abort() {},
+    shutdown() {},
+    getContextUsage: () => undefined,
+    compact() {},
+    getSystemPrompt: () => "completion generation",
+  }));
+
+  bindSession();
+  const callbackAbort = new AbortController();
+  const firstDispatch = host.dispatch(
+    "session_start",
+    { reason: "startup", threadId: "completion-generation" },
+    callbackAbort.signal,
+  );
+  await started;
+  callbackAbort.abort(new Error("callback completion cancelled"));
+  await assert.rejects(firstDispatch, /callback completion cancelled/u);
+  assert.equal(observedSignals[0]?.aborted, true);
+  assert.match(globalThis.__modelCompleteErrors[0] ?? "", /callback completion cancelled/u);
+
+  const staleComplete = globalThis.__capturedModelComplete;
+  bindSession();
+  assert.throws(
+    () => { void staleComplete(model, { messages: [] }); },
+    /session context is no longer active/u,
+  );
+  assert.equal(calls, 1);
+
+  started = new Promise<void>((resolve) => { startedResolve = resolve; });
+  const secondDispatch = host.dispatch(
+    "session_start",
+    { reason: "resume", threadId: "completion-generation" },
+  );
+  await started;
+  const close = host.close();
+  const [dispatchResult, closeResult] = await Promise.allSettled([secondDispatch, close]);
+  assert.equal(dispatchResult.status, "rejected");
+  assert.equal(closeResult.status, "fulfilled");
+  assert.equal(observedSignals[1]?.aborted, true);
+  assert.equal(calls, 2);
+  assert.match(globalThis.__modelCompleteErrors[1] ?? "", /closed|no longer active|abort/u);
 });
 
 test("headless direct UI exposes a stable fallback theme and no-op editor replacement", async (context) => {

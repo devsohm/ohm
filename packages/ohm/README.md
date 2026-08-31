@@ -316,7 +316,7 @@ Chat Completions, and Responses. OpenCode Go has a separate credential identity,
 Chat Completions, or Responses routes, and filters those routes through its authenticated model listing. xAI uses
 Responses. Ollama discovers local models without a key.
 
-Trusted extensions and SDK hosts can register other services through the generic provider and protocol APIs. Those
+Trusted extensions and SDK hosts can register other model providers through the generic provider and protocol APIs. Those
 registrations do not become default providers or add environment variables to the built-in credential map.
 
 Common environment variables are recognized automatically:

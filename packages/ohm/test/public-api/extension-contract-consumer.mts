@@ -40,8 +40,10 @@ import {
   type ExtensionEventResultMap,
   type ExtensionFactory,
   type ExtensionHandler,
+  type ExtensionModelCompletion,
   type ExtensionMode,
   type ExtensionRuntime,
+  type ExtensionSessionDelivery,
   type ExtensionUIRouteDefinition,
   type ExtensionUIRouteHost,
   type ExtensionUIRouteOpenOptions,
@@ -121,6 +123,8 @@ export interface ExtensionApiExportFixture {
   contextActions: ExtensionContextActions;
   commandContextActions: ExtensionCommandContextActions;
   runtime: ExtensionRuntime;
+  sessionDelivery: ExtensionSessionDelivery;
+  modelCompletion: ExtensionModelCompletion;
   loadResult: LoadExtensionsResult;
 }
 
@@ -246,6 +250,7 @@ const extensionApiMembers = [
   "registerTool",
   "sendMessage",
   "sendUserMessage",
+  "services",
   "setActiveTools",
   "setLabel",
   "setModel",
@@ -352,10 +357,18 @@ declare const extensionContext: ExtensionContext;
 declare const resultEvent: ToolResultEvent;
 
 api.sendUserMessage("/review", { expandPromptTemplates: true });
+const sessionDelivery: ExtensionSessionDelivery = extensionContext.sessionDelivery;
+void sessionDelivery.sendMessage({
+  customType: "public-contract",
+  content: "accepted",
+  display: false,
+});
+const completeModel: ExtensionModelCompletion = extensionContext.modelRegistry.complete;
 const scopedModel = extensionContext.scopedModels[0];
 if (scopedModel !== undefined) {
   scopedModel.model.id satisfies string;
   scopedModel.thinkingLevel satisfies typeof extensionContext.thinkingLevel | undefined;
+  void completeModel(scopedModel.model, { messages: [] });
 }
 
 function exerciseUiRouteFacade(context: ExtensionContext): void {

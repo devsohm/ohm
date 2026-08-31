@@ -81,6 +81,8 @@ export interface ExtensionContext extends ExtensionContextOperations {
   readonly paths: ExtensionDataPaths;
   readonly signal: AbortSignal | undefined;
   readonly sessionManager: ReadonlyExtensionSessionManager;
+  /** Promise-returning delivery bound to this callback's exact live session. */
+  readonly sessionDelivery: ExtensionSessionDelivery;
   readonly modelRegistry: ExtensionModelRegistry;
   readonly model: Model<Api> | undefined;
   /** Models currently available inside the session's exact provider/model scope. */
@@ -112,6 +114,24 @@ export interface CustomMessageDeliveryOptions {
 export interface UserMessageDeliveryOptions {
   deliverAs?: "steer" | "followUp";
   expandPromptTemplates?: boolean;
+}
+
+/**
+ * Acknowledged message delivery captured from one live session binding.
+ *
+ * The handle remains tied to `sessionId`; it never follows a later host binding.
+ * Calls reject after that session or extension generation becomes stale.
+ */
+export interface ExtensionSessionDelivery {
+  readonly sessionId: string;
+  sendMessage<T = unknown>(
+    message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+    options?: CustomMessageDeliveryOptions,
+  ): Promise<void>;
+  sendUserMessage(
+    content: CustomMessage["content"],
+    options?: UserMessageDeliveryOptions,
+  ): Promise<void>;
 }
 
 export type ExtensionMessage = Pick<CustomMessage, "customType" | "content" | "display" | "details">;

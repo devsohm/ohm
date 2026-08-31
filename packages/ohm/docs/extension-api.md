@@ -26,7 +26,7 @@ Activation is transactional. Registrations become live only after the factory co
 - may be asynchronous;
 - must not call the stale `ExtensionAPI`.
 
-Use disposal for resources that the extension creates. These resources include timers, watchers, sockets, raw child processes, and temporary files. The host removes commands, tools, listeners, providers, renderers, shortcuts, flags, UI mounts, and processes started through `ohm.processes`.
+Use disposal for resources that the extension creates. These resources include timers, watchers, sockets, raw child processes, and temporary files. The host removes commands, tools, listeners, services, providers, renderers, shortcuts, flags, UI mounts, and processes started through `ohm.processes`.
 
 The normal shutdown budget is five seconds for each cleanup phase. A timed-out callback is diagnosed while the host continues with the remaining cleanup phases, so cleanup should also own an internal bound.
 
@@ -84,6 +84,8 @@ The complete `ExtensionAPI` surface is:
 | `exec(command, args, options?)` | `Promise<ExecResult>` | Run an executable with an argv array, without a shell. |
 | `config` | `ExtensionConfigStore` | Read or compare-and-swap the extension's user or workspace configuration. |
 | `processes` | `ExtensionProcessService` | Start and control generation-owned asynchronous processes. |
+| `services.register(name, service)` | `ExtensionRegistrationHandle` | Publish one trusted same-process object or function by exact reference. |
+| `services.get<T>(name)` | `T \| undefined` | Look up the current exact service reference. |
 | `getActiveTools()` | `string[]` | Snapshot active tool names. |
 | `getAllTools()` | `ToolInfo[]` | Snapshot all registered tool metadata. |
 | `setActiveTools(names)` | `void` | Select available names; unknown names are omitted by the session. |
@@ -106,6 +108,31 @@ readonly `disposed` flag. Both invocation forms remove only that exact
 registration and are idempotent. Disposing an older handle after a same-name
 replacement cannot remove the replacement. Generation teardown still removes
 all remaining registrations automatically and marks their handles disposed.
+
+### Trusted in-process services
+
+`ohm.services` is the narrow escape hatch for two trusted extensions that need
+to share a callback-bearing object or function. `register(name, service)` keeps
+the exact reference; it does not clone, freeze, serialize, proxy, or catch calls
+through that value. Names start with an ASCII letter, use only letters, digits,
+`.`, `_`, or `-`, and contain at most 128 characters. One host admits at most
+256 live services.
+
+Factory-time registrations stay private until activation commits. The
+registering factory can look up its own staged value, while already committed
+extensions cannot see it. A failed activation publishes none of its services.
+The first committed owner holds a name; a duplicate registration fails instead
+of replacing it. Calling the returned handle removes that exact lookup, and
+generation teardown removes every remaining lookup.
+
+This registry is trusted, same-process, non-durable, and deliberately not an
+isolation boundary. A service may contain mutable state, functions, class
+instances, or other non-JSON values. A consumer that already obtained a
+reference keeps an ordinary JavaScript reference after the registration is
+removed; the host cannot revoke it. Owners that require revocation must enforce
+their own closed-state checks, and consumers should not retain services across
+generation refresh. Use `ohm.events` for detached JSON-safe notifications and a
+validated external protocol for cross-process coordination.
 
 `sendMessage` accepts `{ customType, content, display, details? }`. `details` and durable custom-entry data must be JSON-safe. `deliverAs` can be `steer`, `followUp`, or, for custom messages, `nextTurn`. `triggerTurn: true` starts a turn when idle.
 
@@ -248,6 +275,7 @@ Ordinary event handlers, tools, and shortcuts receive `ExtensionContext`:
 | `paths.userData` | Extension-owned durable cross-workspace directory |
 | `paths.workspaceData` | Extension-owned durable directory isolated to the canonical workspace |
 | `sessionManager` | `ReadonlyExtensionSessionManager` |
+| `sessionDelivery` | Promise-returning message delivery bound to this callback's exact live session |
 | `modelRegistry` | `ExtensionModelRegistry` |
 | `model` | Current `Model<Api> \| undefined` |
 | `scopedModels` | Available scoped entries as `{ model: Model<Api>, thinkingLevel?: ThinkingLevel }[]` |
@@ -263,6 +291,15 @@ Ordinary event handlers, tools, and shortcuts receive `ExtensionContext`:
 | `getSystemPrompt()` | Current built system prompt |
 
 `compact()` is callback-based and returns `void`. Use `onComplete` and `onError`; do not assume a compaction has finished when the call returns.
+
+`sessionDelivery` captures the session ID and host delivery binding used to create the
+callback. Its `sendMessage()` and `sendUserMessage()` methods resolve only after
+that exact live session accepts the message, propagate delivery failures, and
+never follow a later host rebind. Calls reject after the extension generation or
+captured session becomes stale. This is a live-session acknowledgement, not a
+durable cross-session mailbox: extension-owned background work should persist
+its unfinished result and retry from a later `session_start` callback if the
+captured session has already closed.
 
 `scopedModels` is a callback snapshot of the active session scope. A later callback observes changes made by
 `/scoped-models`. With no configured selectors, it contains every currently available model. Selectors use exact
@@ -417,12 +454,17 @@ interface ReadonlyExtensionSessionManager {
   buildContextEntries(): SessionEntry[];
   getHeader(): SessionHeader | null;
   getEntries(): SessionEntry[];
+  getEntriesPage(offset: number, limit: number): SessionEntryPage;
   getTree(): SessionTreeNode[];
   getSessionName(): string | undefined;
 }
 ```
 
 Returned entries are the public extension projection. One canonical tool batch can project as multiple public entries with derived IDs. Read this view instead of reopening and racing the active JSONL file.
+
+`getEntriesPage()` returns `{ entries, totalEntries }` from that same public
+projection without materializing every canonical entry. Invalid or out-of-range
+page arguments return an empty page with the current total.
 
 `findEntriesOnBranch()` reads newest first from the active leaf by default. Its
 query can select another `start` entry, use oldest-first order, stop inclusively
@@ -438,11 +480,24 @@ above are public imports from `ohm/extensions`.
 `ExtensionModelRegistry` exposes:
 
 - `refresh()`, `getError()`, `getAll()`, `getAvailable()`, and `find(provider, modelId)`;
+- `complete(model, context, options?)` for one authenticated out-of-band model completion;
 - `present(internalModel)` and `resolve(publicModel)` for the host boundary;
 - `hasConfiguredAuth(model)`, `getApiKeyAndHeaders(model)`, `getApiKeyForProvider(id)`, `getProviderAuthStatus(id)`, `getProviderDisplayName(id)`, `getProviderAuth(id)`, and `isUsingOAuth(model)`;
 - `getProvider(id)`, both `registerProvider` forms, `unregisterProvider`, and registration-inspection helpers.
 
 The registration-inspection methods are `getRegisteredProviderConfig(id)`, `getRegisteredNativeProvider(id)`, and `getRegisteredProviderIds()`.
+
+`context.modelRegistry.complete()` uses the active host `ModelRuntime`, including
+credential refresh, credential-selected base URLs, environment, and
+case-insensitive credential/request header composition. The callback signal and
+an optional caller signal are combined, and a retained method cannot start work
+after its extension generation or session binding becomes stale. This is one
+out-of-band provider call: it does not append session data, change the selected
+model, run tools, or emit agent/session lifecycle events. It also runs outside
+the enclosing agent provider-lifecycle scope, so `before_provider_headers`,
+`before_provider_request`, and `after_provider_response` do not recursively
+observe the helper's request. Host-level provider transport interceptors still
+apply.
 
 This view is generation-bound. Provider and authentication facades returned by
 it have the same lifetime, including methods retained separately from those

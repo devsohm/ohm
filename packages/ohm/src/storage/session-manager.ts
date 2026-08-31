@@ -2120,6 +2120,7 @@ export class SessionManager {
   }
 
   createBranchedSession(leafId: string): string | undefined {
+    if (this.snapshotOnly) throw new Error("A session snapshot is read-only");
     const branch = this.getBranch(leafId);
     if (branch.length === 0) throw new Error(`Entry ${leafId} not found`);
     const source = this.inspectState((state) => ({
@@ -2213,8 +2214,11 @@ export class SessionManager {
     }
   }
 
-  /** @internal Opens an immutable projection without acquiring the file's writer slot. */
-  static openSnapshot(path: string, cwdOverride?: string): SessionManager {
+  /**
+   * Opens an immutable capture of the committed state without acquiring the file's writer slot.
+   * The returned reader does not observe commits made after it opens.
+   */
+  static openSnapshot(path: string, cwdOverride?: string): ReadonlySessionManager {
     const file = absolutePath(path);
     const loaded = stateFromFile(file);
     return new SessionManager({
@@ -2397,7 +2401,8 @@ type SessionHistoryReader =
   | "getActiveBranchUsage"
   | "getEntries"
   | "getTree"
-  | "buildContextEntries";
+  | "buildContextEntries"
+  | "buildSessionContext";
 
 type SessionMetadataReader = "getLabel" | "getHeader" | "getSessionName";
 

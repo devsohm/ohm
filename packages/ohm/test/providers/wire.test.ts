@@ -517,6 +517,37 @@ test("provider wire lifecycle scopes remain isolated across nested and concurren
   ]);
 });
 
+test("provider wire can run out-of-band requests without recursive lifecycle hooks", async () => {
+  const registry = new ProviderWireInterceptorRegistry();
+  const calls: string[] = [];
+  registry.registerLifecycle({
+    beforeRequest() {
+      calls.push("lifecycle");
+    },
+  });
+  registry.register("openai", {
+    interceptRequest() {
+      calls.push("interceptor");
+    },
+  });
+  const wrapped = registry.wrapFetch("openai", async () => new Response("ok"));
+
+  await registry.withScope(lifecycleScope("outer"), async () => {
+    await registry.withoutScope(() => wrapped("https://provider.example/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }));
+    await wrapped("https://provider.example/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+  });
+
+  assert.deepEqual(calls, ["interceptor", "lifecycle", "interceptor"]);
+});
+
 test("provider wire lifecycle observers are scoped, disposable, and do not disturb legacy interception", async () => {
   const registry = new ProviderWireInterceptorRegistry();
   const calls: string[] = [];

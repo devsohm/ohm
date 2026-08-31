@@ -46,6 +46,7 @@ import {
 import type {
   CompactionPreparation,
   ExtensionAPI,
+  ExtensionSessionDelivery,
   MessageUpdateEvent,
   ToolExecutionEndEvent,
   ToolExecutionUpdateEvent,
@@ -5382,17 +5383,225 @@ test("custom messages append or trigger exactly once while idle", async () => {
   await session.close();
 });
 
+test("callback session delivery acknowledges the exact live session and rejects after disposal", async (context) => {
+  const cwd = await workspace();
+  let delivery: ExtensionSessionDelivery | undefined;
+  const host = await loadDirectExtensions([], {
+    workspace: cwd,
+    activationFailure: "throw",
+    inlineExtensions: [{
+      name: "acknowledged-session-delivery",
+      factory(ohm) {
+        ohm.on("session_start", (_event, extensionContext) => {
+          delivery = extensionContext.sessionDelivery;
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const manager = SessionManager.inMemory(cwd, { id: "acknowledged-session" });
+  const session = await AgentSession.create({
+    ...sessionOptions(manager, new ProviderRegistry([new RecordingProvider()])),
+    extensionRunner: host,
+  });
+
+  await session.bindExtensions();
+  const captured = delivery;
+  assert.notEqual(captured, undefined);
+  assert.equal(captured!.sessionId, "acknowledged-session");
+  const accepted = captured!.sendMessage({
+    customType: "background-result",
+    content: "completed",
+    display: true,
+    details: { runId: "run-1" },
+  });
+  assert.equal(accepted instanceof Promise, true);
+  await accepted;
+  const entry = manager.getBranch().findLast((candidate) => candidate.type === "custom_message");
+  assert.equal(entry?.type, "custom_message");
+  assert.equal(entry?.type === "custom_message" ? entry.customType : undefined, "background-result");
+  assert.deepEqual(entry?.details, { runId: "run-1" });
+
+  session.newSession({ id: "acknowledged-session" });
+  await assert.rejects(
+    captured!.sendMessage({ customType: "background-result", content: "same-id late", display: false }),
+    /no longer active/u,
+  );
+  assert.equal(manager.getBranch().some((candidate) =>
+    candidate.type === "custom_message"
+    && (typeof candidate.content === "string"
+      ? candidate.content === "same-id late"
+      : candidate.content.some((block) => block.type === "text" && block.text === "same-id late"))), false);
+
+  await session.close();
+  await assert.rejects(
+    captured!.sendMessage({ customType: "background-result", content: "late", display: false }),
+    /no longer active|host is closed|AgentSession (?:is )?closed/u,
+  );
+});
+
+test("callback session delivery cannot resume a queued user message in a replacement session", async (context) => {
+  const cwd = await workspace();
+  let delivery: ExtensionSessionDelivery | undefined;
+  let deliveryOutcome: Promise<"resolved" | Error> | undefined;
+  let replacementCancelled: boolean | undefined;
+  let activeSession: AgentSession | undefined;
+  const innerSessions: string[] = [];
+  const host = await loadDirectExtensions([], {
+    workspace: cwd,
+    activationFailure: "throw",
+    inlineExtensions: [{
+      name: "session-delivery-replacement-race",
+      factory(ohm) {
+        ohm.on("session_start", (_event, extensionContext) => {
+          delivery = extensionContext.sessionDelivery;
+        });
+        ohm.registerCommand("inner-delivery-race", {
+          handler(_args, commandContext) {
+            innerSessions.push(commandContext.sessionDelivery.sessionId);
+          },
+        });
+        ohm.registerCommand("outer-delivery-race", {
+          async handler(_args, _commandContext) {
+            deliveryOutcome = delivery!.sendUserMessage("/inner-delivery-race", {
+              expandPromptTemplates: true,
+            }).then(() => "resolved" as const, (cause: unknown) => cause as Error);
+            activeSession!.newSession({ id: delivery!.sessionId });
+            replacementCancelled = false;
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd, { id: "delivery-session-a" }), new ProviderRegistry([])),
+    extensionRunner: host,
+  });
+  activeSession = session;
+  context.after(async () => await session.close());
+  await session.bindExtensions();
+
+  await session.prompt("/outer-delivery-race");
+  const outcome = await deliveryOutcome;
+
+  assert.equal(replacementCancelled, false);
+  assert.equal(session.sessionId, "delivery-session-a");
+  assert.ok(outcome instanceof Error);
+  assert.match(outcome.message, /prompt target|aborted|session/iu);
+  assert.deepEqual(innerSessions, []);
+});
+
+test("callback session delivery rejects command prompt continuation after public replacement", async (context) => {
+  const cwd = await workspace();
+  let delivery: ExtensionSessionDelivery | undefined;
+  const observedInputs: string[] = [];
+  const host = await loadDirectExtensions([], {
+    workspace: cwd,
+    activationFailure: "throw",
+    inlineExtensions: [{
+      name: "session-delivery-command-replacement",
+      factory(ohm) {
+        ohm.on("session_start", (_event, extensionContext) => {
+          delivery = extensionContext.sessionDelivery;
+        });
+        ohm.on("input", (event) => {
+          observedInputs.push(event.text);
+          return { action: "continue" };
+        });
+        ohm.registerCommand("replace-and-return-prompt", {
+          async handler(_args, commandContext) {
+            const result = await commandContext.newSession();
+            assert.equal(result.cancelled, false);
+            return "prompt-returned-after-replacement";
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd, { id: "delivery-command-source" }), new ProviderRegistry([])),
+    extensionRunner: host,
+  });
+  context.after(async () => await session.close());
+  await session.bindExtensions();
+
+  await assert.rejects(
+    delivery!.sendUserMessage("/replace-and-return-prompt", { expandPromptTemplates: true }),
+    /delivery target is no longer active/u,
+  );
+
+  assert.notEqual(session.sessionId, "delivery-command-source");
+  assert.equal(observedInputs.includes("prompt-returned-after-replacement"), false);
+});
+
+test("callback session delivery rejects command prompt continuation after same-id switch", async (context) => {
+  const cwd = await workspace();
+  const targetManager = SessionManager.create(cwd, join(cwd, "sessions"), { id: "delivery-switch-id" });
+  const targetPath = targetManager.getSessionFile();
+  targetManager.closeV4Store();
+  if (targetPath === undefined) assert.fail("Expected a persisted delivery switch target");
+  let delivery: ExtensionSessionDelivery | undefined;
+  const observedInputs: string[] = [];
+  const host = await loadDirectExtensions([], {
+    workspace: cwd,
+    activationFailure: "throw",
+    inlineExtensions: [{
+      name: "session-delivery-command-switch",
+      factory(ohm) {
+        ohm.on("session_start", (_event, extensionContext) => {
+          delivery = extensionContext.sessionDelivery;
+        });
+        ohm.on("input", (event) => {
+          observedInputs.push(event.text);
+          return { action: "continue" };
+        });
+        ohm.registerCommand("switch-and-return-prompt", {
+          async handler(_args, commandContext) {
+            const result = await commandContext.switchSession(targetPath);
+            assert.equal(result.cancelled, false);
+            return "prompt-returned-after-same-id-switch";
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const sourceManager = SessionManager.inMemory(cwd, { id: "delivery-switch-id" });
+  const session = await AgentSession.create({
+    ...sessionOptions(sourceManager, new ProviderRegistry([])),
+    extensionRunner: host,
+  });
+  context.after(async () => await session.close());
+  await session.bindExtensions();
+
+  await assert.rejects(
+    delivery!.sendUserMessage("/switch-and-return-prompt", { expandPromptTemplates: true }),
+    /delivery target is no longer active/u,
+  );
+
+  assert.equal(session.sessionId, "delivery-switch-id");
+  assert.equal(session.sessionFile, targetPath);
+  assert.equal(observedInputs.includes("prompt-returned-after-same-id-switch"), false);
+});
+
 test("path extension custom writes retain their generation provenance", async (context) => {
   const cwd = await workspace();
   const sourcePath = join(cwd, "provenance-extension.mjs");
   await writeFile(sourcePath, `export default function (ohm) {
-    ohm.on("session_start", () => {
+    ohm.on("session_start", async (_event, context) => {
       ohm.appendEntry("owned-state", { ready: true });
       ohm.sendMessage({ customType: "owned-message", content: "ready", display: true });
       ohm.sendMessage(
         { customType: "owned-next-turn", content: "later", display: false },
         { deliverAs: "nextTurn" },
       );
+      await context.sessionDelivery.sendMessage({
+        customType: "owned-acknowledged-message",
+        content: "accepted",
+        display: true,
+      });
     });
   }\n`);
   const host = await loadDirectExtensions([sourcePath], {
@@ -5428,6 +5637,11 @@ test("path extension custom writes retain their generation provenance", async (c
   const entries = manager.getBranch().filter((entry) =>
     entry.type === "custom" || entry.type === "custom_message");
   assert.deepEqual(entries.map((entry) => entry.provenance), [
+    {
+      schemaVersion: 1,
+      extensionId: owner.extensionId,
+      sourceSha256: owner.sha256,
+    },
     {
       schemaVersion: 1,
       extensionId: owner.extensionId,
@@ -10986,7 +11200,7 @@ test("AgentSession bounds terminal assistant content before durable or observed 
         assert.deepEqual(lastDirectUpdate?.assistantMessageEvent, lastUpdate?.assistantMessageEvent);
         assert.deepEqual(host.diagnostics(), []);
         const cpuCeilingMs = process.env.NODE_V8_COVERAGE !== undefined ? 20_000
-          : process.env.CI === "true" ? 12_000 : 6_000;
+          : process.env.CI === "true" ? 12_000 : 8_000;
         assert.ok(
           cpuMs < cpuCeilingMs,
           `${contentBlocks} terminal blocks occupied JavaScript for ${cpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms)`,

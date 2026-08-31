@@ -28,6 +28,7 @@ import {
 import {
   SessionManager,
   type ExtensionSessionProvenance,
+  type ReadonlySessionManager,
   type SessionBranchQuery,
   type SessionEntry,
 } from "ohm/storage";
@@ -49,6 +50,13 @@ const fixedViewportOptions = { mode: "full" } satisfies TuiControllerOptions;
 // @ts-expect-error The product rich viewport has no selectable screen host.
 const removedScreenOverride: TuiControllerOptions = { alternateScreen: false };
 void [fixedViewportOptions, removedScreenOverride];
+
+declare const sessionPath: string;
+const sessionSnapshot = SessionManager.openSnapshot(sessionPath);
+const readonlySessionSnapshot: ReadonlySessionManager = sessionSnapshot;
+// @ts-expect-error Snapshot readers do not expose session mutations.
+sessionSnapshot.newSession();
+void [readonlySessionSnapshot.getSessionId(), readonlySessionSnapshot.buildSessionContext()];
 
 export const layerValues = [
   SecretRedactor,

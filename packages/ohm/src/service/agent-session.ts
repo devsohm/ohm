@@ -219,6 +219,7 @@ import type {
   ExtensionError,
   ExtensionEventMap,
   ExtensionMode,
+  ExtensionSessionDelivery,
   ReplacedSessionContext,
   ExtensionUIContext,
   LoadExtensionsResult,
@@ -3904,6 +3905,11 @@ interface NativeAgentSessionConstruction {
   workspaceBoundary: WorkspaceBoundary;
 }
 
+interface AgentSessionDeliveryTarget {
+  readonly sessionId: string;
+  readonly binding: object;
+}
+
 export class AgentSession {
   readonly #providers: ProviderRegistry;
   readonly #modelRegistry: ModelRegistry | undefined;
@@ -3967,7 +3973,8 @@ export class AgentSession {
     active: boolean;
     preflight: AbortController;
   }>();
-  readonly #promptPreflights = new Set<AbortController>();
+  readonly #promptPreflights = new Map<AbortController, AgentSessionDeliveryTarget | undefined>();
+  #sessionDeliveryBinding: object = Object.freeze({});
   readonly #bashAbortControllers = new Set<AbortController>();
   readonly #bashSettlements = new Set<Promise<void>>();
   #pendingBashMessages: BashExecutionMessage[] = [];
@@ -4973,6 +4980,14 @@ export class AgentSession {
   }
 
   async prompt(text: string, options: AgentSessionPromptOptions = {}): Promise<AgentSessionRun> {
+    return await this.#prompt(text, options);
+  }
+
+  async #prompt(
+    text: string,
+    options: AgentSessionPromptOptions,
+    deliveryTarget?: AgentSessionDeliveryTarget,
+  ): Promise<AgentSessionRun> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
     const {
@@ -5003,7 +5018,7 @@ export class AgentSession {
       normalizedOptions.preflightResult?.(succeeded);
     };
     const preflight = new AbortController();
-    this.#promptPreflights.add(preflight);
+    this.#promptPreflights.set(preflight, deliveryTarget);
     const preflightSignal = normalizedOptions.signal === undefined
       ? preflight.signal
       : AbortSignal.any([preflight.signal, normalizedOptions.signal]);
@@ -5032,6 +5047,7 @@ export class AgentSession {
         text,
         { ...normalizedOptions, signal: preflightSignal },
         preflight,
+        deliveryTarget,
       );
       if (prepared.handled) {
         reportPreflight(true);
@@ -5145,18 +5161,26 @@ export class AgentSession {
     content: string | (TextBlock | ImageBlock)[],
     options: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean } = {},
   ): Promise<void> {
+    await this.#sendUserMessage(content, options);
+  }
+
+  async #sendUserMessage(
+    content: string | (TextBlock | ImageBlock)[],
+    options: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+    deliveryTarget?: AgentSessionDeliveryTarget,
+  ): Promise<void> {
     const text = Value.Check(STRING_VALUE, content)
       ? content
       : content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
     const images = Value.Check(STRING_VALUE, content)
       ? undefined
       : content.filter((block): block is ImageBlock => block.type === "image");
-    await this.prompt(text, {
+    await this.#prompt(text, {
       expandPromptTemplates: options.expandPromptTemplates ?? false,
       source: "extension",
       ...optionalProperties(options.deliverAs === undefined ? undefined : { streamingBehavior: options.deliverAs }),
       ...optionalProperties(images === undefined || images.length === 0 ? undefined : { images }),
-    });
+    }, deliveryTarget);
   }
 
   async sendCustomMessage<T = unknown>(
@@ -5202,10 +5226,59 @@ export class AgentSession {
     );
   }
 
+  #acknowledgedSessionDelivery(): ExtensionSessionDelivery {
+    const target: AgentSessionDeliveryTarget = {
+      sessionId: this.sessionId,
+      binding: this.#sessionDeliveryBinding,
+    };
+    const assertTarget = (): void => {
+      this.#assertOpen();
+      this.#assertSessionDeliveryTarget(target);
+    };
+    const delivery: ExtensionSessionDelivery = {
+      sessionId: target.sessionId,
+      sendMessage: async (message, options): Promise<void> => {
+        assertTarget();
+        await this.sendCustomMessage({
+          ...message,
+          content: canonicalInputContent(message.content),
+        }, options);
+      },
+      sendUserMessage: async (content, options): Promise<void> => {
+        assertTarget();
+        await this.#sendUserMessage(canonicalInputContent(content), options ?? {}, target);
+      },
+    };
+    return Object.freeze(delivery);
+  }
+
+  #sessionDeliveryTarget(
+    sessionId?: string,
+    binding?: object,
+  ): AgentSessionDeliveryTarget | undefined {
+    if (sessionId === undefined && binding === undefined) return undefined;
+    if (sessionId === undefined || binding === undefined) {
+      throw new Error("AgentSession delivery target is no longer active");
+    }
+    const target = { sessionId, binding };
+    this.#assertSessionDeliveryTarget(target);
+    return target;
+  }
+
+  #assertSessionDeliveryTarget(target?: AgentSessionDeliveryTarget): void {
+    if (
+      target !== undefined
+      && (
+        target.sessionId !== this.sessionId
+        || target.binding !== this.#sessionDeliveryBinding
+      )
+    ) throw new Error("AgentSession delivery target is no longer active");
+  }
+
   async abort(reason?: string): Promise<void> {
     const cancellationReason = this.#recordRunCancellation(reason ?? "AgentSession aborted");
     const abortReason = new Error(cancellationReason);
-    for (const preflight of this.#promptPreflights) preflight.abort(abortReason);
+    for (const preflight of this.#promptPreflights.keys()) preflight.abort(abortReason);
     this.cancelRetry();
     this.#control?.cancel(cancellationReason);
     this.abortCompaction();
@@ -6734,6 +6807,8 @@ export class AgentSession {
     const selectedThinkingLevel = this.#thinkingLevel;
     const providerSessionTracksManager = this.#publicAgent.sessionId === this.#session.getSessionId();
     const path = this.#session.newSession(options);
+    this.#sessionDeliveryBinding = Object.freeze({});
+    this.#abortReplacedSessionPromptPreflights();
     if (providerSessionTracksManager) this.#publicAgent.sessionId = this.#session.getSessionId();
     this.#pendingQueuedMessages = [];
     this.#pendingNextTurnMessages = [];
@@ -6761,6 +6836,8 @@ export class AgentSession {
       durableQueues = this.#prepareDurableQueues(candidate);
       selection = this.#restoredSessionSelection(candidate);
     });
+    this.#sessionDeliveryBinding = Object.freeze({});
+    this.#abortReplacedSessionPromptPreflights();
     if (providerSessionTracksManager) this.#publicAgent.sessionId = this.#session.getSessionId();
     this.#pendingQueuedMessages = durableQueues.queued;
     this.#pendingNextTurnMessages = durableQueues.nextRun;
@@ -6792,7 +6869,7 @@ export class AgentSession {
     const replacementCommandPreflight = waitForPromptAdmission || commandScope?.active !== true
       ? undefined
       : commandScope.preflight;
-    for (const preflight of this.#promptPreflights) {
+    for (const preflight of this.#promptPreflights.keys()) {
       if (preflight !== replacementCommandPreflight) preflight.abort(closeReason);
     }
     const failures: unknown[] = [];
@@ -8505,6 +8582,7 @@ export class AgentSession {
       })),
     ];
     const actions: RuntimeDirectActionsHandler = {
+      getSessionDeliveryBinding: () => this.#sessionDeliveryBinding,
       sendMessage: (message, options = {}) => {
         const { provenance, ...input } = message;
         void this.#sendCustomMessage(input, options, provenance).catch((error) => {
@@ -8523,6 +8601,25 @@ export class AgentSession {
             message: `User message delivery failed: ${safeErrorMessage(error)}`,
           });
         });
+      },
+      sendMessageAcknowledged: async (
+        message,
+        options = {},
+        targetSessionId,
+        targetSessionBinding,
+      ) => {
+        this.#sessionDeliveryTarget(targetSessionId, targetSessionBinding);
+        const { provenance, ...input } = message;
+        await this.#sendCustomMessage(input, options, provenance);
+      },
+      sendUserMessageAcknowledged: async (
+        content,
+        options = {},
+        targetSessionId,
+        targetSessionBinding,
+      ) => {
+        const deliveryTarget = this.#sessionDeliveryTarget(targetSessionId, targetSessionBinding);
+        await this.#sendUserMessage(content, options, deliveryTarget);
       },
       appendEntry: (customType, data, provenance) => {
         this.#appendCustomEntry(customType, data, provenance);
@@ -8750,6 +8847,12 @@ export class AgentSession {
         setThinkingLevel: (level) => { this.setThinkingLevel(level); },
       },
       {
+        completeModel: (model, context, options) => {
+          const complete = () => this.modelRuntime.complete(model, context, options);
+          return this.#providerWireLifecycle === undefined
+            ? complete()
+            : this.#providerWireLifecycle.withoutScope(complete);
+        },
         getModel: () => {
           const selected = this.#model;
           const model = selected === undefined ? undefined : this.#modelRegistry?.find(selected.provider, selected.id);
@@ -8769,6 +8872,7 @@ export class AgentSession {
           });
         },
         getSystemPrompt: () => this.systemPrompt,
+        getSessionDelivery: () => this.#acknowledgedSessionDelivery(),
         getSystemPromptOptions: () => this.getSystemPromptOptions(),
       },
       {
@@ -8836,6 +8940,12 @@ export class AgentSession {
       return {
         sessionManager: extensionSessionManager(this.#session),
         modelRegistry,
+        completeModel: (model, context, options) => {
+          const complete = () => this.modelRuntime.complete(model, context, options);
+          return this.#providerWireLifecycle === undefined
+            ? complete()
+            : this.#providerWireLifecycle.withoutScope(complete);
+        },
         ...optionalProperties(directModel === undefined ? undefined : { model: directModel }),
         scopedModels: this.nativeScopedModels,
         thinkingLevel: this.thinkingLevel,
@@ -8863,6 +8973,7 @@ export class AgentSession {
     text: string,
     options: NormalizedAgentSessionPromptOptions,
     preflight: AbortController,
+    deliveryTarget?: AgentSessionDeliveryTarget,
   ): Promise<{ handled: boolean; text: string; images?: ImageBlock[] }> {
     const expand = options.expandPromptTemplates !== false;
     let currentText = text;
@@ -8885,6 +8996,7 @@ export class AgentSession {
           commandScope.active = false;
         }
         if (result.handled && result.prompt === undefined) return { handled: true, text: currentText };
+        this.#assertSessionDeliveryTarget(deliveryTarget);
         if (result.prompt !== undefined) currentText = result.prompt;
       }
     }
@@ -10921,6 +11033,21 @@ export class AgentSession {
 
   #hasExtensionCommandPermit(): boolean {
     return this.#extensionCommandScope.getStore()?.active === true;
+  }
+
+  #abortReplacedSessionPromptPreflights(): void {
+    const commandPreflight = this.#extensionCommandScope.getStore()?.preflight;
+    const reason = new Error("AgentSession prompt target is no longer active");
+    for (const [preflight, deliveryTarget] of this.#promptPreflights) {
+      if (
+        preflight !== commandPreflight
+        && deliveryTarget !== undefined
+        && (
+          deliveryTarget.sessionId !== this.sessionId
+          || deliveryTarget.binding !== this.#sessionDeliveryBinding
+        )
+      ) preflight.abort(reason);
+    }
   }
 
   #assertIdle(): void {

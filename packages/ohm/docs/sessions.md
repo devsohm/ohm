@@ -101,6 +101,13 @@ instead of rewriting history.
 `SessionManager.listAll()` scans all workspace directories under the configured
 session root.
 
+`SessionManager.openSnapshot(path, cwdOverride?)` opens a detached
+`ReadonlySessionManager` capture without acquiring the journal's writer slot.
+It can inspect a session while its owning host continues writing, but it does
+not observe commits made after the snapshot opened. Open a new snapshot for a
+fresh view. Mutator methods are absent from the returned public type, and
+runtime commit attempts still fail closed if a caller bypasses that type.
+
 Listing:
 
 - reads no more than ten files at once;

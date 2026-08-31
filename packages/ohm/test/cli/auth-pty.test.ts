@@ -314,9 +314,10 @@ test("PTY login stores an extension-provided device credential, selects a model,
   const cancelledLoginOffset = read().length;
   child.stdin.write("\u001b");
   await waitForOutputToSettle(read, cancelledLoginOffset);
+  const sessionOffset = read().length;
   child.stdin.write("/session\r");
-  await waitForOutputAfter(read, cancelledLoginOffset, "Session:");
-  await waitForOutputToSettle(read, cancelledLoginOffset);
+  await waitForOutputAfter(read, sessionOffset, "Whole-journal cache hit:");
+  await waitForOutputToSettle(read, sessionOffset);
   assert.doesNotMatch(read().slice(secondLoginOffset), /Command failed: authorization cancelled/u);
   const exitCodePromise = new Promise<number | null>((resolveExit, reject) => {
     const timeout = setTimeout(() => {

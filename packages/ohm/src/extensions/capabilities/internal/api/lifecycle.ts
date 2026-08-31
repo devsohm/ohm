@@ -7,6 +7,10 @@ import type { ExtensionRegistrationHandle } from "./registration.js";
 export interface ExtensionLifecycleCapabilities {
   readonly config: ExtensionConfigStore;
   readonly processes: ExtensionProcessService;
+  readonly services: {
+    register<Service extends object>(name: string, service: Service): ExtensionRegistrationHandle;
+    get<Service extends object = object>(name: string): Service | undefined;
+  };
   onDispose(callback: () => void | Promise<void>): ExtensionRegistrationHandle;
   on<K extends keyof ExtensionEventMap>(event: K, handler: ExtensionHandler<K>): ExtensionRegistrationHandle;
   readonly events: {

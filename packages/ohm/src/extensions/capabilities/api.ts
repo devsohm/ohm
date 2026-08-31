@@ -1,7 +1,8 @@
 import type { Api, Model, Provider } from "@ohm/models";
 
 import type { BuildSystemPromptOptions } from "../../core/system-prompt.js";
-import type { CompactOptions, ContextUsage } from "./host.js";
+import type { ExtensionModelCompletion } from "../model-boundary.js";
+import type { CompactOptions, ContextUsage, ExtensionSessionDelivery } from "./host.js";
 import type { ProviderConfig } from "./provider.js";
 import type {
   ExtensionCatalogActions,
@@ -40,12 +41,14 @@ export interface ExtensionActions extends ExtensionSessionActions, ExtensionCata
 }
 
 interface ExtensionContextStateActions {
+  completeModel?: ExtensionModelCompletion;
   getModel(): Model<Api> | undefined;
   getScopedModels?(): readonly { readonly model: Model<Api>; readonly thinkingLevel?: import("../../core/settings-manager.js").ThinkingLevel }[];
   getSignal(): AbortSignal | undefined;
   getContextUsage(): ContextUsage | undefined;
   getSystemPrompt(): string;
   getSystemPromptOptions?(): BuildSystemPromptOptions;
+  getSessionDelivery?(): ExtensionSessionDelivery;
 }
 
 interface ExtensionContextControlActions {

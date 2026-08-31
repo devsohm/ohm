@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.1.0] - 2026-08-30
+## [0.1.0] - 2026-08-31
 
 ### Added
 
@@ -24,6 +24,20 @@
 - Direct extensions can observe outer blocking UI prompt spans, inspect
   `scopedModels`, and declare subscription-backed OAuth. Named OAuth refresh
   callbacks receive the requesting operation's cancellation signal.
+- Callback model registries expose one-shot authenticated `complete()` through
+  the active host model runtime. Calls inherit callback and generation
+  cancellation without entering the agent loop or recursively emitting
+  provider lifecycle hooks.
+- Trusted extensions can publish generation-owned same-process services by
+  exact reference while keeping the shared event bus JSON-safe. Callback
+  contexts also expose Promise-returning message delivery bound to the exact
+  live session that created the callback, so background results cannot silently
+  follow a later session rebind.
+- The executable extension capability matrix is compile-time exhaustive across
+  factory, callback, command, and UI members as well as all six host modes.
+- `SessionManager.openSnapshot()` is a supported writer-lease-free,
+  point-in-time reader and now returns the mutation-free
+  `ReadonlySessionManager` contract.
 - Tool lifecycle events expose arguments once at execution start; progress and
   completion retain only call identity and their phase-specific result fields
   across direct extensions, SDK events, JSON, and RPC.

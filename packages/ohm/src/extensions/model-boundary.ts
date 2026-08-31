@@ -16,6 +16,7 @@ import type {
   Credential,
   ImageContent,
   Model,
+  ModelsApiStreamOptions,
   OAuthCredentials,
   OAuthLoginCallbacks,
   Provider as ExtensionProvider,
@@ -86,6 +87,7 @@ import type {
   ProviderStreamContext,
   ProviderStreamOptions,
 } from "../providers/models.js";
+import { modelRuntimeForInternalRegistry } from "../providers/model-runtime-ownership.js";
 import { ProviderStreamProjector } from "../providers/stream-envelope.js";
 
 /** Public provider-model declaration used by trusted direct extensions. */
@@ -1800,6 +1802,12 @@ export function immutableExtensionModel(model: Model<Api>): Model<Api> {
 }
 
 /** Extension-facing model directory backed by the active internal model registry. */
+export type ExtensionModelCompletion = <TApi extends Api>(
+  model: Model<TApi>,
+  context: Context,
+  options?: ModelsApiStreamOptions<TApi>,
+) => Promise<AssistantMessage>;
+
 export class ExtensionModelRegistry {
   readonly #internal: InternalModelRegistry;
   readonly #publicModels = new Map<string, Model<Api>>();
@@ -1868,6 +1876,14 @@ export class ExtensionModelRegistry {
   find(provider: string, modelId: string): Model<Api> | undefined {
     const model = this.#internal.find(provider, modelId);
     return model === undefined ? undefined : this.#publicModel(model);
+  }
+  /** Run one authenticated out-of-band completion through the active host model runtime. */
+  complete<TApi extends Api>(
+    model: Model<TApi>,
+    context: Context,
+    options?: ModelsApiStreamOptions<TApi>,
+  ): Promise<AssistantMessage> {
+    return modelRuntimeForInternalRegistry(this.#internal).complete(model, context, options);
   }
   hasConfiguredAuth(model: Model<Api>): boolean { return this.#internal.hasConfiguredAuth(model.provider); }
   getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> { return this.#internal.getApiKeyAndHeaders(this.resolve(model)); }

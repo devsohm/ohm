@@ -27,7 +27,7 @@ For an installed copy, use `ohm install PATH`, ask the user to run `/refresh`, e
 | [tool-rendering](./tool-rendering/) | Wrap a built-in tool and render its call and result | `recipe` | `all` | `filesystem-read` | `central conformance` |
 | [input-guard](./input-guard/) | Transform user input and block selected tool calls | `recipe` | `all` | `none` | `central conformance` |
 | [context-compaction](./context-compaction/) | Add bounded context and request host-owned compaction | `recipe` | `all` | `none` | `central conformance` |
-| [messages-bus](./messages-bus/) | Connect local events to rendered durable messages | `recipe` | `all` | `none` | `central conformance` |
+| [messages-bus](./messages-bus/) | Connect trusted services and local events to rendered durable messages | `recipe` | `all` | `none` | `central conformance` |
 | [model-controls](./model-controls/) | Inspect the model and change its thinking level | `recipe` | `all` | `none` | `central conformance` |
 | [session-jsonl](./session-jsonl/) | Inspect the active session through the read-only facade | `recipe` | `all` | `none` | `central conformance` |
 | [session-control](./session-control/) | Request new, fork, switch, refresh, abort, and shutdown flows | `recipe` | `tui, print, json, rpc, sdk` | `none` | `central conformance` |

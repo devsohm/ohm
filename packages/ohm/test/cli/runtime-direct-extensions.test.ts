@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { AssistantMessage } from "@ohm/models";
 
 import { loadRuntime } from "../../src/cli/runtime.js";
 import { DefaultPackageManager } from "../../src/core/package-manager.js";
@@ -12,6 +13,7 @@ import type {
   RuntimeExtensionListenerContext,
 } from "../../src/extensions/runtime.js";
 import { RpcExtensionUiBridge } from "../../src/interfaces/rpc-extension-ui.js";
+import { ProviderWireInterceptorRegistry } from "../../src/providers/wire.js";
 import { AgentSession, type ExtensionBindings } from "../../src/service/agent-session.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
@@ -129,6 +131,88 @@ test("empty direct runtime starts and refreshes before provider lifecycle bindin
   ]);
   assert.deepEqual((await runtime.refresh()).warnings, []);
   assert.deepEqual(runtime.runtimeExtensions.extensions(), []);
+});
+
+test("CLI-bound callback completion stays outside an enclosing provider lifecycle scope", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-runtime-callback-completion-"));
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  await mkdir(workspace);
+  const previousAgentDir = process.env.OHM_HOME;
+  process.env.OHM_HOME = agentDir;
+  context.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.OHM_HOME;
+    else process.env.OHM_HOME = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtime = await loadRuntime({
+    workspace,
+    credentialStore: new InMemoryCredentialStore(),
+    projectTrusted: true,
+    ephemeral: true,
+    extensions: false,
+    extensionRuntime: true,
+    extensionFactories: [{
+      name: "callback-completion-scope-probe",
+      factory(api) {
+        api.on("session_start", async (event, extensionContext) => {
+          if (event.reason !== "resume") return;
+          const model = extensionContext.modelRegistry.getAll()[0];
+          assert.ok(model !== undefined);
+          await extensionContext.modelRegistry.complete(model, { messages: [] });
+        });
+      },
+    }],
+    skills: false,
+    promptTemplates: false,
+    themes: false,
+    offline: true,
+  });
+  context.after(async () => await runtime.close().catch(() => undefined));
+  assert.ok(runtime.providerWireLifecycle instanceof ProviderWireInterceptorRegistry);
+  const wire = runtime.providerWireLifecycle;
+  let lifecycleCalls = 0;
+  const unregister = wire.registerLifecycle({
+    beforeRequest() { lifecycleCalls += 1; },
+  });
+  context.after(unregister);
+  const modelRuntime = runtime.session.modelRuntime;
+  const originalComplete = modelRuntime.complete;
+  modelRuntime.complete = async (model, _modelContext, options): Promise<AssistantMessage> => {
+    const fetch = wire.wrapFetch(model.provider, async () => new Response("{}"));
+    await fetch("https://provider.example/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+    });
+    return {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {},
+      stopReason: "stop",
+      timestamp: 0,
+    };
+  };
+  context.after(() => { modelRuntime.complete = originalComplete; });
+
+  await wire.withScope({
+    threadId: runtime.session.sessionId,
+    runId: "callback-completion-scope",
+    branch: "root",
+    step: 0,
+  }, async () => {
+    await runtime.runtimeExtensions.dispatch("session_start", {
+      reason: "resume",
+      threadId: runtime.session.sessionId,
+    });
+  });
+
+  assert.equal(lifecycleCalls, 0);
 });
 
 test("inline extension factories are reactivated for each committed runtime generation", async (context) => {

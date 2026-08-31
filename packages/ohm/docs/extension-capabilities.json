@@ -41,6 +41,42 @@
       "tests": ["test/extensions/runtime.test.ts", "test/extensions/direct-example-packages.test.ts"]
     },
     {
+      "id": "callback-context-contract",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": [
+        "abort",
+        "cwd",
+        "getSystemPromptOptions",
+        "hasPendingMessages",
+        "hasUI",
+        "isIdle",
+        "isProjectTrusted",
+        "mode",
+        "model",
+        "modelRegistry",
+        "sessionDelivery",
+        "shutdown",
+        "signal",
+        "thinkingLevel",
+        "waitForIdle"
+      ],
+      "docs": ["docs/extension-api.md", "docs/extensions.md", "docs/modes.md"],
+      "examples": [
+        "examples/model-controls",
+        "examples/session-control",
+        "examples/state-and-policy",
+        "examples/subagent-specialists",
+        "examples/terminal-workbench"
+      ],
+      "tests": [
+        "test/extensions/runtime-authoring.test.ts",
+        "test/extensions/session-delivery-runtime.test.ts",
+        "test/service/agent-session.test.ts"
+      ]
+    },
+    {
       "id": "commands-and-flags",
       "status": "implemented",
       "authoring": true,
@@ -152,6 +188,16 @@
       "docs": ["docs/extensions.md", "docs/extension-events.md"],
       "examples": ["examples/messages-bus"],
       "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "trusted-in-process-services",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["services"],
+      "docs": ["docs/extensions.md", "docs/extension-api.md"],
+      "examples": ["examples/messages-bus"],
+      "tests": ["test/extensions/service-registry.test.ts", "test/extensions/direct-example-packages.test.ts"]
     },
     {
       "id": "model-and-thinking-controls",
@@ -296,10 +342,44 @@
       "status": "implemented",
       "authoring": true,
       "hosts": ["tui"],
-      "apiMembers": ["ui"],
+      "apiMembers": [
+        "ui",
+        "addAutocompleteProvider",
+        "confirm",
+        "custom",
+        "editor",
+        "getAllThemes",
+        "getEditorComponent",
+        "getEditorText",
+        "getTheme",
+        "getToolsExpanded",
+        "input",
+        "notify",
+        "onTerminalInput",
+        "pasteToEditor",
+        "select",
+        "setBackground",
+        "setEditorText",
+        "setFooter",
+        "setHeader",
+        "setHiddenThinkingLabel",
+        "setStatus",
+        "setTheme",
+        "setTitle",
+        "setToolsExpanded",
+        "setWidget",
+        "setWorkingIndicator",
+        "setWorkingMessage",
+        "setWorkingVisible",
+        "theme"
+      ],
       "docs": ["docs/tui.md", "docs/themes.md", "docs/keybindings.md"],
-      "examples": ["examples/terminal-workbench"],
-      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+      "examples": ["examples/terminal-workbench", "examples/ui-surfaces"],
+      "tests": [
+        "test/extensions/runtime-authoring.test.ts",
+        "test/tui/direct-ui.test.ts",
+        "test/extensions/direct-example-packages.test.ts"
+      ]
     },
     {
       "id": "project-trust-decision",

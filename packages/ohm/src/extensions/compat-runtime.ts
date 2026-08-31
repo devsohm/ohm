@@ -19,6 +19,7 @@ import { createTheme } from "../tui/theme.js";
 import { sanitizeTerminalText } from "../tui/unicode.js";
 import {
   extensionModelRegistry,
+  type ExtensionModelCompletion,
   type ExtensionModelRegistry,
 } from "./model-boundary.js";
 import {
@@ -65,6 +66,7 @@ import type {
   ExtensionCommandContextActions,
   ExtensionContext,
   ExtensionContextActions,
+  ExtensionSessionDelivery,
   ExtensionEvent,
   ExtensionEventMap,
   ExtensionHandler,
@@ -270,6 +272,7 @@ function contextProxy(context: ExtensionContext, getSystemPrompt = (): string =>
     get cwd() { return context.cwd; },
     get paths() { return context.paths; },
     get sessionManager() { return context.sessionManager; },
+    get sessionDelivery() { return context.sessionDelivery; },
     get modelRegistry() { return context.modelRegistry; },
     get model() { return context.model; },
     get scopedModels() { return context.scopedModels; },
@@ -296,6 +299,7 @@ export class ExtensionRunner {
   readonly #modelRegistry: ModelRegistry;
   readonly #publicSessionManager: ReturnType<typeof extensionSessionManager>;
   readonly #publicModelRegistry: ExtensionModelRegistry;
+  readonly #lifecycle = new AbortController();
   readonly #errorListeners = new Set<ExtensionErrorListener>();
   #ui: ExtensionUIContext = noUi;
   #mode: ExtensionMode = "print";
@@ -313,6 +317,8 @@ export class ExtensionRunner {
   #getContextUsage: () => ContextUsage | undefined = () => undefined;
   #compact: (options?: CompactOptions) => void = () => {};
   #getSystemPrompt: () => string = () => "";
+  #completeModel: ExtensionModelCompletion;
+  #getSessionDelivery: () => ExtensionSessionDelivery;
   #getSystemPromptOptions: () => BuildSystemPromptOptions;
   #waitForIdle: ExtensionCommandContextActions["waitForIdle"] = async () => {};
   #newSession: ExtensionCommandContextActions["newSession"] = async () => ({ cancelled: false });
@@ -337,6 +343,9 @@ export class ExtensionRunner {
     this.#modelRegistry = modelRegistry;
     this.#publicSessionManager = extensionSessionManager(sessionManager);
     this.#publicModelRegistry = extensionModelRegistry(modelRegistry);
+    this.#completeModel = (model, context, options) =>
+      this.#publicModelRegistry.complete(model, context, options);
+    this.#getSessionDelivery = () => this.#unavailableSessionDelivery();
     this.#getSystemPromptOptions = () => ({ cwd: this.#cwd });
     this.#host = ensureExtensionRuntimeHost(runtime, cwd);
     for (const extension of extensions) {
@@ -428,6 +437,10 @@ export class ExtensionRunner {
     this.#getContextUsage = contextActions.getContextUsage;
     this.#compact = contextActions.compact;
     this.#getSystemPrompt = contextActions.getSystemPrompt;
+    this.#completeModel = contextActions.completeModel
+      ?? ((model, context, options) => this.#publicModelRegistry.complete(model, context, options));
+    this.#getSessionDelivery = contextActions.getSessionDelivery
+      ?? (() => this.#unavailableSessionDelivery());
     this.#getSystemPromptOptions = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.#cwd }));
 
     for (const pending of this.#runtime.pendingProviderRegistrations) {
@@ -467,6 +480,19 @@ export class ExtensionRunner {
       (providerActions?.unregisterProvider ?? ((providerName) => this.#publicModelRegistry.unregisterProvider(providerName)))(name);
     };
     this.#host.setHostContext({ projectTrusted: this.#isProjectTrusted() });
+  }
+
+  #unavailableSessionDelivery(): ExtensionSessionDelivery {
+    const sessionId = this.#sessionManager.getSessionId();
+    return Object.freeze({
+      sessionId,
+      async sendMessage(): Promise<void> {
+        throw new Error("Acknowledged session message delivery is unavailable before the session host is bound");
+      },
+      async sendUserMessage(): Promise<void> {
+        throw new Error("Acknowledged session user-message delivery is unavailable before the session host is bound");
+      },
+    });
   }
 
   bindCommandContext(actions?: ExtensionCommandContextActions): void {
@@ -596,6 +622,7 @@ export class ExtensionRunner {
   invalidate(message = "Extension runtime context is stale after session replacement or refresh"): void {
     if (this.#staleMessage !== undefined) return;
     this.#staleMessage = message;
+    this.#lifecycle.abort(new Error(message));
     const unsubscribeHostError = this.#unsubscribeHostError;
     this.#unsubscribeHostError = undefined;
     unsubscribeHostError?.();
@@ -695,8 +722,49 @@ export class ExtensionRunner {
   shutdown(): void { this.#shutdown(); }
   getActiveTools(): string[] { this.#assertActive(); return [...this.#runtime.getActiveTools()]; }
 
+  #modelCompletionSignal(
+    callbackSignal: AbortSignal | undefined,
+    callerSignal: AbortSignal | undefined,
+  ): AbortSignal {
+    const signals = Array.from(new Set([
+      this.#lifecycle.signal,
+      this.#host.lifecycleSignal(),
+      callbackSignal,
+      callerSignal,
+    ].filter((signal): signal is AbortSignal => signal !== undefined)));
+    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  }
+
+  #contextModelRegistry(callbackSignal: AbortSignal | undefined): ExtensionModelRegistry {
+    const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
+    const complete: ExtensionModelCompletion = (model, context, options) => {
+      this.#assertActive();
+      const signal = this.#modelCompletionSignal(callbackSignal, options?.signal);
+      signal.throwIfAborted();
+      return this.#completeModel(model, context, { ...options, signal });
+    };
+    return new Proxy(this.#publicModelRegistry, {
+      get: (target, property) => {
+        this.#assertActive();
+        if (property === "complete") return complete;
+        const selected: unknown = Reflect.get(target, property, target);
+        if (typeof selected !== "function") return selected;
+        const existing = methods.get(property);
+        if (existing !== undefined) return existing;
+        const method = (...args: unknown[]): unknown => {
+          this.#assertActive();
+          return Reflect.apply(selected, target, args);
+        };
+        methods.set(property, method);
+        return method;
+      },
+    });
+  }
+
   createContext(extension?: Extension): ExtensionContext {
     const owner = (): ExtensionRunner => this;
+    const callbackSignal = this.#getSignal();
+    const modelRegistry = this.#contextModelRegistry(callbackSignal);
     return {
       get ui() { const runner = owner(); runner.#assertActive(); return runner.#ui; },
       get mode() { const runner = owner(); runner.#assertActive(); return runner.#mode; },
@@ -715,13 +783,29 @@ export class ExtensionRunner {
         return Object.freeze({ userData: paths.user, workspaceData: paths.workspace });
       },
       get sessionManager() { const runner = owner(); runner.#assertActive(); return runner.#publicSessionManager; },
-      get modelRegistry() { const runner = owner(); runner.#assertActive(); return runner.#publicModelRegistry; },
+      get sessionDelivery() {
+        const runner = owner();
+        runner.#assertActive();
+        const delivery = runner.#getSessionDelivery();
+        return Object.freeze({
+          sessionId: delivery.sessionId,
+          async sendMessage(...args: Parameters<ExtensionSessionDelivery["sendMessage"]>) {
+            owner().#assertActive();
+            await delivery.sendMessage(...args);
+          },
+          async sendUserMessage(...args: Parameters<ExtensionSessionDelivery["sendUserMessage"]>) {
+            owner().#assertActive();
+            await delivery.sendUserMessage(...args);
+          },
+        });
+      },
+      get modelRegistry() { const runner = owner(); runner.#assertActive(); return modelRegistry; },
       get model() { const runner = owner(); runner.#assertActive(); return runner.#getModel(); },
       get scopedModels() { const runner = owner(); runner.#assertActive(); return [...runner.#getScopedModels()]; },
       get thinkingLevel() { const runner = owner(); runner.#assertActive(); return runner.#getThinkingLevel(); },
       isIdle: () => { this.#assertActive(); return this.#isIdle(); },
       isProjectTrusted: () => { this.#assertActive(); return this.#isProjectTrusted(); },
-      get signal() { const runner = owner(); runner.#assertActive(); return runner.#getSignal(); },
+      get signal() { const runner = owner(); runner.#assertActive(); return callbackSignal; },
       abort: () => { this.#assertActive(); this.#abort(); },
       hasPendingMessages: () => { this.#assertActive(); return this.#hasPendingMessages(); },
       shutdown: () => { this.#assertActive(); this.#shutdown(); },
@@ -1317,6 +1401,7 @@ export class ExtensionRunner {
       return {
         sessionManager: this.#publicSessionManager,
         modelRegistry: this.#modelRegistry,
+        completeModel: (model, context, options) => this.#completeModel(model, context, options),
         ...optionalProperties(model === undefined ? undefined : { model }),
         scopedModels: this.#getScopedModels().flatMap((entry) => {
           const scoped = this.#modelRegistry.find(entry.model.provider, entry.model.id);
@@ -1375,6 +1460,7 @@ export class ExtensionRunner {
       isProjectTrusted: () => context.isProjectTrusted(),
       ui: context.ui,
       sessionManager: context.sessionManager,
+      sessionDelivery: context.sessionDelivery,
       modelRegistry: context.modelRegistry,
       model: context.model,
       scopedModels: context.scopedModels,

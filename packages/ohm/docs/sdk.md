@@ -152,7 +152,7 @@ The default provider runtime connects these extension events to its exact transp
 - `before_provider_request`;
 - `after_provider_response`.
 
-When `modelRuntime` is caller-supplied, pass the same `ProviderWireLifecycleHost` already connected to that transport as `providerWireLifecycle`. A separate lifecycle host cannot observe those requests. `ProviderWireInterceptorRegistry` from `ohm/providers` implements both contracts. The SDK removes its extension observer when the session closes.
+When `modelRuntime` is caller-supplied, pass the same `ProviderWireLifecycleHost` already connected to that transport as `providerWireLifecycle`. A separate lifecycle host cannot observe those requests. A custom lifecycle host implements `registerLifecycle()`, `withScope()`, and `withoutScope()`. `withoutScope(operation)` must run the operation without inheriting the current provider-lifecycle scope; callback-scoped `modelRegistry.complete()` uses it to avoid recursively emitting agent-turn provider hooks. `ProviderWireInterceptorRegistry` from `ohm/providers` implements the complete contract. The SDK removes its extension observer when the session closes.
 
 SDK factories do not create local operational logs. A host that wants the
 bounded metadata event projection can pass its own `ObservabilitySink` as

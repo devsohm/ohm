@@ -709,6 +709,47 @@ test("one session file cannot acquire two product writers", async () => {
   reopened.closeV4Store();
 });
 
+test("session snapshots coexist with the writer and remain immutable point-in-time views", async () => {
+  const root = await temporaryRoot();
+  const manager = SessionManager.create(root, join(root, "sessions"), { id: "snapshot" });
+  manager.appendMessage(message("user", "before snapshot"));
+
+  const snapshot = SessionManager.openSnapshot(manager.getSessionFile()!);
+  assert.deepEqual(snapshot.buildSessionContext().messages.map(contextText), ["before snapshot"]);
+
+  manager.appendMessage(message("assistant", "after snapshot"));
+  assert.deepEqual(snapshot.buildSessionContext().messages.map(contextText), ["before snapshot"]);
+  assert.deepEqual(manager.buildSessionContext().messages.map(contextText), ["before snapshot", "after snapshot"]);
+  const mutableSnapshot = snapshot as SessionManager;
+  let candidateValidated = false;
+  assert.throws(
+    () => mutableSnapshot.setSessionFile(manager.getSessionFile()!, () => { candidateValidated = true; }),
+    /session snapshot is read-only/u,
+  );
+  assert.equal(candidateValidated, false);
+  assert.throws(
+    () => mutableSnapshot.newSession(),
+    /session snapshot is read-only/u,
+  );
+  assert.throws(
+    () => mutableSnapshot.commitChanges(
+      [{ type: "session_name", name: "blocked" }],
+      "snapshot-write",
+      new Date().toISOString(),
+    ),
+    /session snapshot is read-only/u,
+  );
+  const sessionFiles = readdirSync(join(root, "sessions"));
+  assert.throws(
+    () => mutableSnapshot.createBranchedSession(snapshot.getLeafId()!),
+    /session snapshot is read-only/u,
+  );
+  assert.deepEqual(readdirSync(join(root, "sessions")), sessionFiles);
+  manager.closeV4Store();
+  const reopened = SessionManager.open(manager.getSessionFile()!);
+  reopened.closeV4Store();
+});
+
 test("non-v4 structures fail ordinary strict validation", async () => {
   const root = await temporaryRoot();
   const file = join(root, "invalid.jsonl");

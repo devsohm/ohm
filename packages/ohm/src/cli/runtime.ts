@@ -2297,6 +2297,9 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       return {
         sessionManager: extensionSessionManager(runtime.sessionManager),
         modelRegistry: target.modelRegistry,
+        completeModel: (model, context, options) => target.providerWire.withoutScope(
+          () => controlledSession.modelRuntime.complete(model, context, options),
+        ),
         ...(() => {
           const selected = runtime.session.nativeModel;
           const model = selected === undefined ? undefined : target.modelRegistry.find(selected.provider, selected.id);

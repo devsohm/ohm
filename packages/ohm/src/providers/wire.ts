@@ -173,6 +173,8 @@ export interface ProviderWireTransportHost extends ProviderWireFetchHost {
 export interface ProviderWireLifecycleHost {
   registerLifecycle(observer: ProviderWireLifecycleObserver): () => void;
   withScope<T>(scope: ProviderWireLifecycleScope, operation: () => T): T;
+  /** Run one provider operation without inheriting an enclosing agent-turn lifecycle scope. */
+  withoutScope<T>(operation: () => T): T;
 }
 
 interface RegisteredInterceptor {
@@ -234,6 +236,11 @@ export class ProviderWireInterceptorRegistry implements ProviderWireTransportHos
   withScope<T>(scope: ProviderWireLifecycleScope, operation: () => T): T {
     if (!Value.Check(FUNCTION_VALUE, operation)) throw new TypeError("Provider wire scoped operation must be a function");
     return this.#scope.run(normalizeLifecycleScope(scope), operation);
+  }
+
+  withoutScope<T>(operation: () => T): T {
+    if (!Value.Check(FUNCTION_VALUE, operation)) throw new TypeError("Provider wire unscoped operation must be a function");
+    return this.#scope.exit(operation);
   }
 
   wrapFetch(provider: ProviderId, fetchImplementation: FetchLike): FetchLike {

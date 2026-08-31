@@ -22,6 +22,7 @@ import {
   publicApiFromProtocol,
   streamFunctionAdapterEvents,
 } from "../../src/extensions/model-boundary.js";
+import { ModelRuntime } from "../../src/providers/model-compat.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
 import { createModels, createProvider, type ProviderStreamOptions } from "../../src/providers/models.js";
 import { MAX_TOOL_INVOCATIONS } from "../../src/tools/coordinator.js";
@@ -1042,6 +1043,76 @@ test("native public providers execute through the internal run-loop boundary", a
   const completion = await internal.models().completeSimple(internalModel, { messages: [] });
   assert.equal(completion.text, "native response");
   assert.equal(registry.find("native-provider", "native-model")?.api, "native-custom-api");
+});
+
+test("extension model completion uses the active runtime credential and request preparation", async (context) => {
+  const runtime = await ModelRuntime.create({
+    models: createModels(),
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
+  context.after(async () => await runtime.close());
+  const model = {
+    ...publicModel("native-custom-api", "completion-provider", "completion-model"),
+    baseUrl: "https://model.example.test/v1",
+  };
+  let observed: {
+    model: Model<Api>;
+    context: Context;
+    options: import("@ohm/models").StreamOptions | undefined;
+  } | undefined;
+  const provider: Provider = {
+    id: model.provider,
+    name: "Completion provider",
+    auth: {
+      apiKey: {
+        name: "Completion key",
+        async resolve() {
+          return {
+            auth: {
+              apiKey: "stored-secret",
+              baseUrl: "https://credential.example.test/v1",
+              headers: { "x-auth": "credential", "x-shared": "credential" },
+            },
+            env: { SHARED: "credential", STORED: "yes" },
+          };
+        },
+      },
+    },
+    getModels: () => [model],
+    stream(selectedModel, selectedContext, options) {
+      observed = { model: selectedModel, context: selectedContext, options };
+      return responseStream(model, "prepared completion");
+    },
+    streamSimple: () => responseStream(model, "unused"),
+  };
+  runtime.registerNativeProvider(provider);
+  await runtime.refresh({ allowNetwork: false });
+  const requestContext: Context = { messages: [] };
+
+  const completion = await extensionModelRegistry(runtime.internalRegistry()).complete(
+    model,
+    requestContext,
+    {
+      headers: { "X-SHARED": "request", "x-request": "yes" },
+      env: { SHARED: "request", REQUEST: "yes" },
+    },
+  );
+
+  assert.deepEqual(completion.content, [{ type: "text", text: "prepared completion" }]);
+  assert.equal(observed?.model.baseUrl, "https://credential.example.test/v1");
+  assert.equal(observed?.context, requestContext);
+  assert.equal(observed?.options?.apiKey, "stored-secret");
+  assert.deepEqual(observed?.options?.headers, {
+    "x-auth": "credential",
+    "X-SHARED": "request",
+    "x-request": "yes",
+  });
+  assert.deepEqual(observed?.options?.env, {
+    SHARED: "request",
+    STORED: "yes",
+    REQUEST: "yes",
+  });
 });
 
 test("OAuth credentials are normalized at both model-provider boundaries", async () => {
