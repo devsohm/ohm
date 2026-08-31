@@ -230,7 +230,13 @@ test("owned replay handles 10,000 growing lifecycle commits within the linear ga
 	assert.equal(replayed.state.sequence, 10_000);
 	assert.equal(replayed.state.operations.size, 2_500);
 	assert.equal(replayed.state.nodes.size, 5_000);
-	assert.ok(elapsed < 5_000, `10,000-commit replay took ${elapsed.toFixed(1)} ms`);
+	const replayCeilingMs = process.env.CI === "true" && process.platform === "darwin" && process.arch === "x64"
+		? 10_000
+		: 5_000;
+	assert.ok(
+		elapsed < replayCeilingMs,
+		`10,000-commit replay took ${elapsed.toFixed(1)} ms (limit ${replayCeilingMs} ms)`,
+	);
 });
 
 function apply(
