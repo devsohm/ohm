@@ -527,7 +527,7 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.deepEqual(
     platformChecks?.strategy?.matrix?.include,
     [
-      { os: "macos-latest", node: NODE_RUNTIME },
+      { os: "macos-15", node: NODE_RUNTIME },
       { os: "windows-latest", node: NODE_RUNTIME },
     ],
     "release.yml platform-checks must cover the full-suite matrix not already covered by staging",
