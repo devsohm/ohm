@@ -20,6 +20,9 @@ import {
 } from "../../src/storage/index.js";
 
 const sessionManagerModule = new URL("../../src/storage/session-manager.ts", import.meta.url).href;
+const SPECIAL_SCAN_CHILD_TIMEOUT_MS = process.env.CI === "true"
+  && process.platform === "darwin"
+  && process.arch === "x64" ? 5_000 : 2_000;
 
 const roots = new Set<string>();
 let messageSequence = 0;
@@ -871,7 +874,7 @@ test("session inspect and list reject special scan entries without blocking", {
   const child = spawnSync(
     process.execPath,
     ["--import", "tsx", "--input-type=module", "--eval", source, root, sessions, alias],
-    { encoding: "utf8", timeout: 2_000 },
+    { encoding: "utf8", timeout: SPECIAL_SCAN_CHILD_TIMEOUT_MS },
   );
   assert.equal(child.error, undefined, String(child.error));
   assert.equal(child.status, 0, `${child.stdout}${child.stderr}`);

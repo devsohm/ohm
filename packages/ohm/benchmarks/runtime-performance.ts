@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
+import type { SessionV4Commit } from "@ohm/kernel/session-v4";
 import { loadRuntime, type LoadedRuntime } from "../src/cli/runtime.js";
 import { RpcRuntimeDispatcher, type RpcSessionRuntime } from "../src/interfaces/rpc-runtime.js";
 import type { RpcEntryPage, RpcResponse } from "../src/interfaces/rpc-protocol.js";
@@ -214,20 +215,51 @@ interface SeededSession {
   directory: string;
 }
 
-function seedSession(value: MeasurementFixture, eventCount: number): SeededSession {
+async function seedSession(value: MeasurementFixture, eventCount: number): Promise<SeededSession> {
   const directory = join(value.root, "sessions");
-  const manager = SessionManager.create(value.workspace, directory, { id: `resume-${eventCount}` });
-  for (let index = 0; index < eventCount; index += 1) manager.appendMessage(sessionMessage(index));
-  const path = manager.getSessionFile();
-  if (path === undefined) throw new Error("Runtime benchmark session was not persisted");
-  manager.closeV4Store();
+  const manager = SessionManager.inMemory(value.workspace, { id: `resume-${eventCount}` });
+  const header = manager.getV4State().header;
+  const records = [JSON.stringify(header)];
+  for (let index = 0; index < eventCount; index += 1) {
+    const message = sessionMessage(index);
+    const nodeId = message.id;
+    const commit: SessionV4Commit = {
+      record: "commit",
+      sequence: index + 1,
+      commitId: `benchmark-commit-${index}`,
+      committedAt: message.createdAt,
+      changes: [{
+        type: "conversation_node",
+        node: {
+          id: nodeId,
+          parentId: index === 0 ? null : `benchmark-message-${index - 1}`,
+          nodeType: "message",
+          role: message.role,
+          content: message,
+          createdAt: message.createdAt,
+        },
+      }, {
+        type: "head",
+        branchId: "main",
+        nodeId,
+      }],
+    };
+    records.push(JSON.stringify(commit));
+  }
+  await mkdir(directory, { mode: 0o700 });
+  const path = join(directory, `resume-${eventCount}.jsonl`);
+  await writeFile(
+    path,
+    `${records.join("\n")}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 },
+  );
   return { path, directory };
 }
 
 async function resumeSample(eventCount: number): Promise<number> {
   const value = await fixture(`ohm-resume-${eventCount}-`);
   try {
-    const seeded = seedSession(value, eventCount);
+    const seeded = await seedSession(value, eventCount);
     const started = performance.now();
     const manager = SessionManager.open(seeded.path, seeded.directory);
     try {
@@ -306,7 +338,7 @@ async function coldEventPageSample(eventCount: number): Promise<ColdPageSample> 
   let dispatcher: RpcRuntimeDispatcher | undefined;
   let observation: ReturnType<typeof observeSessionRowMaterialization> | undefined;
   try {
-    const seeded = seedSession(value, eventCount);
+    const seeded = await seedSession(value, eventCount);
     return await withEnvironment(value, async () => {
       runtime = await loadRuntime({ ...runtimeOptions(value.workspace), sessionFile: seeded.path, sessionDirectory: seeded.directory });
       dispatcher = new RpcRuntimeDispatcher({ runtime: rpcRuntime(runtime), output() {} });
@@ -346,7 +378,7 @@ async function rpcReplaySample(eventCount: number, pageLimit: number, timeoutMs:
   let runtime: LoadedRuntime | undefined;
   let dispatcher: RpcRuntimeDispatcher | undefined;
   try {
-    const seeded = seedSession(value, eventCount);
+    const seeded = await seedSession(value, eventCount);
     return await withEnvironment(value, async () => {
       runtime = await loadRuntime({ ...runtimeOptions(value.workspace), sessionFile: seeded.path, sessionDirectory: seeded.directory });
       dispatcher = new RpcRuntimeDispatcher({ runtime: rpcRuntime(runtime), output() {} });
