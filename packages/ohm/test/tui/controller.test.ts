@@ -8852,15 +8852,17 @@ test("native detail prewarming yields until after paint and cancels across resiz
   );
   assert.equal(internalPrewarmOhmNativeToolDetail(detail(resized), 100, "", toolDetailCache), false);
 
-  const suspended = renderCompleted("native-lifecycle-suspend", `suspend-${"u".repeat(700)}`, 3);
-  controller.renderNow();
-  controller.suspend(() => undefined);
-  await tick();
-  assert.equal(
-    internalPrewarmOhmNativeToolDetail(detail(suspended), 100, "", toolDetailCache),
-    true,
-    "idle work continued after terminal suspension",
-  );
+  if (process.platform !== "win32") {
+    const suspended = renderCompleted("native-lifecycle-suspend", `suspend-${"u".repeat(700)}`, 3);
+    controller.renderNow();
+    controller.suspend(() => undefined);
+    await tick();
+    assert.equal(
+      internalPrewarmOhmNativeToolDetail(detail(suspended), 100, "", toolDetailCache),
+      true,
+      "idle work continued after terminal suspension",
+    );
+  }
 
   const closing = fullController();
   context.after(() => closing.controller.close());

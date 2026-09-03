@@ -3,7 +3,7 @@ import fs, { existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 
@@ -45,6 +45,10 @@ function candidateApi(): ExtensionAPI {
   const api = candidateState().api;
   if (api === undefined) throw new Error("Candidate extension did not publish its API");
   return api;
+}
+
+function npmFileSpec(path: string): string {
+  return `file:${path.replaceAll("\\", "/")}`;
 }
 
 interface Fixture {
@@ -355,6 +359,12 @@ test("npm install and update retain hoisted direct and transitive runtime depend
   await assertNoResidue(value);
 });
 
+test("npm file dependency specs preserve absolute Windows drive roots", () => {
+  const spec = npmFileSpec("D:\\a\\_temp\\package");
+  assert.equal(spec, "file:D:/a/_temp/package");
+  assert.equal(win32.resolve("D:\\a\\workspace", spec.slice("file:".length)), "D:\\a\\_temp\\package");
+});
+
 test("real npm file installs materialize an immutable package with its dependency closure", async (context) => {
   const value = await fixture(context);
   const packages = join(value.root, "real-npm-packages");
@@ -376,14 +386,14 @@ test("real npm file installs materialize an immutable package with its dependenc
     version: "1.0.0",
     type: "module",
     exports: "./index.mjs",
-    dependencies: { "ohm-real-transitive-dependency": pathToFileURL(transitiveRoot).href },
+    dependencies: { "ohm-real-transitive-dependency": npmFileSpec(transitiveRoot) },
   }));
   await writeFile(join(directRoot, "index.mjs"), 'export { value } from "ohm-real-transitive-dependency";\n');
   await writeFile(join(sourceRoot, "package.json"), JSON.stringify({
     name: "ohm-real-file-package",
     version: "1.0.0",
     type: "module",
-    dependencies: { "ohm-real-direct-dependency": pathToFileURL(directRoot).href },
+    dependencies: { "ohm-real-direct-dependency": npmFileSpec(directRoot) },
     ohm: { extensions: ["extensions/index.mjs"] },
   }));
   await writeFile(join(sourceRoot, "extensions", "index.mjs"), `

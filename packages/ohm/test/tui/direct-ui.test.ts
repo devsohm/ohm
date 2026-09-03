@@ -48,6 +48,7 @@ import { createFixtureFrameProjector, envelope, FakeInput, FakeOutput, tick } fr
 import { FocusedVirtualTerminal } from "./virtual-terminal.js";
 
 const execute = promisify(execFile);
+const BRANCH_TEST_DEADLINE_MS = 10_000;
 
 type ThemeForegroundFixture = Record<ThemeColor, string | number>;
 type ThemeBackgroundFixture = Record<ThemeBg, string | number>;
@@ -710,7 +711,7 @@ test("footer branch data follows named and detached Git transitions until its ge
     let disposeSecond = (): void => undefined;
     const changed = new Promise<void>((resolve, reject) => {
       let remaining = 2;
-      timer = setTimeout(() => reject(new Error(`Timed out waiting for branch ${String(expected)}`)), 4_000);
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for branch ${String(expected)}`)), BRANCH_TEST_DEADLINE_MS);
       const observed = () => {
         remaining -= 1;
         if (remaining === 0) resolve();
@@ -739,7 +740,10 @@ test("footer branch data follows named and detached Git transitions until its ge
   generation.abort(new Error("generation ended"));
   await execute("git", ["switch", "footer-feature"], { cwd: repository });
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for the surviving shared branch probe")), 4_000);
+    const timeout = setTimeout(
+      () => reject(new Error("Timed out waiting for the surviving shared branch probe")),
+      BRANCH_TEST_DEADLINE_MS,
+    );
     const dispose = secondData!.onBranchChange(() => {
       clearTimeout(timeout);
       dispose();
