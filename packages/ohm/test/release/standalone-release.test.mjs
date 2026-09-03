@@ -31,6 +31,11 @@ const RELEASE_MANIFEST_KEYS = [
   "schemaVersion", "product", "version", "tag", "packaging", "node", "nodeRuntime", "archive", "archives",
   "source", "standalones", "checksumFile", "releaseNotes", "targets",
 ];
+const PINNED_LICENSE_ASSETS = [
+  "aws-sdk-js-v3-d760a008-LICENSE.txt",
+  "data-uri-to-buffer-4.0.1-LICENSE.txt",
+  "standardwebhooks-1.0.0-LICENSE.txt",
+];
 
 function parseTarEntries(buffer) {
   const entries = [];
@@ -74,6 +79,15 @@ test("standalone dependency installation uses npm ci without unlocked archive ar
   assert.equal(plan.args.includes("--offline=false"), true);
   assert.equal(plan.args.includes("--prefer-offline"), true);
   assert.equal(Object.keys(plan.environment).some((name) => /(?:token|secret|password)/iu.test(name)), false);
+});
+
+test("pinned standalone license assets retain canonical LF checkout bytes", async () => {
+  const attributes = await readFile(resolve(REPOSITORY_ROOT, ".gitattributes"), "utf8");
+  assert.match(attributes, /^scripts\/third-party-license-assets\/\*\.txt text eol=lf$/mu);
+  for (const name of PINNED_LICENSE_ASSETS) {
+    const bytes = await readFile(resolve(REPOSITORY_ROOT, "scripts", "third-party-license-assets", name));
+    assert.equal(bytes.includes(0x0d), false, `${name} contains a carriage return`);
+  }
 });
 
 test("standalone production lock is a closed projection of the committed workspace lock", async () => {

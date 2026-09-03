@@ -1,1 +1,2 @@
 packages/models/src/providers/data/*.json text eol=lf
+scripts/third-party-license-assets/*.txt text eol=lf
