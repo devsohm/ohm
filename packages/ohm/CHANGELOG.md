@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## [0.1.1] - 2026-09-02
+
+### Added
+
+- Added bounded durable jobs and host-owned child sessions with persisted
+  identity, private V4 journals, lifecycle control, and explicit restart
+  reattachment while keeping orchestration policy extension-owned.
+- Added opt-in generation-owned facets for worker, session, presentation, and
+  rich-TUI roles, with typed bounded wire services and named replicated JSON
+  state. Portable presentations expose retained snapshots and validated actions
+  across supported host adapters.
+
+### Fixed
+
+- Managed npm packages now retain their complete runtime dependency closure,
+  activate prepared copies before commit, and recover interrupted atomic swaps
+  without discarding the previous installation.
+- Reduced rich-TUI stalls during tool updates and `Ctrl+O` expansion with
+  bounded renderer and transcript caches plus idle detail prewarming. Cache-hit
+  status now omits compaction activity instead of presenting a misleading rate.
+
 ## [0.1.0] - 2026-08-31
 
 ### Added

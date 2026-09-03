@@ -116,17 +116,20 @@ export interface RuntimeUiComponentHost<T> {
 export interface RuntimeToolRenderBridge {
   readonly theme: Theme;
   readonly showImages: boolean;
+  /** Marks retained call/result output stale after renderer-owned state changes. */
   invalidate(): void;
 }
 
 export interface RuntimeToolRenderer {
   /** Default keeps the host card; self lets the renderer own all framing. */
   renderShell?: "default" | "self";
+  /** Output may be retained until the view/context changes or `bridge.invalidate()` is called. */
   renderCall?(
     view: Readonly<RuntimeToolRenderView>,
     context: RuntimeUiRenderContext,
     bridge?: RuntimeToolRenderBridge,
   ): RuntimeUiBlock | undefined;
+  /** Output may be retained until the view/context changes or `bridge.invalidate()` is called. */
   renderResult?(
     view: Readonly<RuntimeToolRenderView>,
     context: RuntimeUiRenderContext,

@@ -406,11 +406,9 @@ test("standalone third-party license bundle covers and verifies the exact instal
   const licenses = resolve(root, "LICENSES");
   const alpha = resolve(modules, "alpha");
   const beta = resolve(alpha, "node_modules", "@scope", "beta");
-  const fallback = resolve(modules, "fallback");
   await Promise.all([
     mkdir(alpha, { recursive: true }),
     mkdir(beta, { recursive: true }),
-    mkdir(fallback, { recursive: true }),
   ]);
   await Promise.all([
     writeFile(resolve(alpha, "package.json"), `${JSON.stringify({ name: "alpha", version: "1.0.0", license: "MIT" })}\n`),
@@ -418,15 +416,12 @@ test("standalone third-party license bundle covers and verifies the exact instal
     writeFile(resolve(alpha, "NOTICE.txt"), "alpha notice\n"),
     writeFile(resolve(beta, "package.json"), `${JSON.stringify({ name: "@scope/beta", version: "2.0.0", license: "Apache-2.0" })}\n`),
     writeFile(resolve(beta, "COPYING"), "beta license\n"),
-    writeFile(resolve(fallback, "package.json"), `${JSON.stringify({ name: "fallback", version: "3.0.0", license: "LGPL-3.0-or-later" })}\n`),
-    writeFile(resolve(fallback, "README.md"), "## Licensing\n\nfallback notice\n"),
   ]);
 
   const manifest = await createThirdPartyLicenseBundle(modules, licenses);
   assert.deepEqual(manifest.packages.map(({ name, version }) => `${name}@${version}`), [
     "@scope/beta@2.0.0",
     "alpha@1.0.0",
-    "fallback@3.0.0",
   ]);
   assert.equal(manifest.packages.every(({ documents }) => documents.length > 0), true);
   await assert.doesNotReject(verifyThirdPartyLicenseBundle(modules, licenses));
@@ -434,6 +429,17 @@ test("standalone third-party license bundle covers and verifies the exact instal
   const copied = resolve(licenses, manifest.packages[0].documents[0].path);
   await writeFile(copied, "tampered\n");
   await assert.rejects(verifyThirdPartyLicenseBundle(modules, licenses), /digest|bytes/u);
+
+  const fallback = resolve(modules, "fallback");
+  await mkdir(fallback);
+  await writeFile(resolve(fallback, "package.json"), `${JSON.stringify({
+    name: "fallback", version: "3.0.0", license: "MIT",
+  })}\n`);
+  await writeFile(resolve(fallback, "README.md"), "## License\n\nUnverified README text.\n");
+  await assert.rejects(
+    createThirdPartyLicenseBundle(modules, licenses),
+    /fallback has no license or notice document and no pinned override/u,
+  );
 });
 
 test("standalone license bundle pins the missing proxy-agent-negotiate notice", async (context) => {
@@ -446,6 +452,7 @@ test("standalone license bundle pins the missing proxy-agent-negotiate notice", 
   await writeFile(resolve(dependency, "package.json"), `${JSON.stringify({
     name: "proxy-agent-negotiate", version: "1.1.0", license: "MIT",
   })}\n`);
+  await writeFile(resolve(dependency, "LICENSE"), "wrong installed license\n");
 
   const manifest = await createThirdPartyLicenseBundle(modules, licenses);
   assert.equal(manifest.packages.length, 1);
@@ -465,8 +472,80 @@ test("standalone license bundle pins the missing proxy-agent-negotiate notice", 
   })}\n`);
   await assert.rejects(
     createThirdPartyLicenseBundle(modules, licenses),
-    /Package .*unknown has no license, notice, or README document/u,
+    /Package .*unknown has no license or notice document and no pinned override/u,
   );
+});
+
+test("standalone license overrides pin exact production notices before installed fallbacks", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-standalone-license-pins-test-"));
+  context.after(async () => await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
+  const modules = resolve(root, "node_modules");
+  const licenses = resolve(root, "LICENSES");
+  const packages = [
+    { name: "@aws-sdk/credential-provider-http", version: "3.972.72", license: "Apache-2.0" },
+    { name: "@aws-sdk/credential-provider-login", version: "3.972.77", license: "Apache-2.0" },
+    { name: "@aws-sdk/nested-clients", version: "3.997.44", license: "Apache-2.0" },
+    { name: "data-uri-to-buffer", version: "4.0.1", license: "MIT" },
+    { name: "standardwebhooks", version: "1.0.0", license: "MIT" },
+  ];
+  for (const entry of packages) {
+    const directory = resolve(modules, ...entry.name.split("/"));
+    await mkdir(directory, { recursive: true });
+    await writeFile(resolve(directory, "package.json"), `${JSON.stringify(entry)}\n`);
+    await writeFile(resolve(directory, "LICENSE"), "wrong installed license\n");
+    await writeFile(resolve(directory, "README.md"), "wrong installed README\n");
+  }
+
+  const manifest = await createThirdPartyLicenseBundle(modules, licenses);
+  assert.deepEqual(
+    manifest.packages.map(({ name, version, documents }) => ({
+      identity: `${name}@${version}`,
+      documents: documents.map(({ source, bytes, sha256: digest }) => ({ source, bytes, sha256: digest })),
+    })),
+    [
+      {
+        identity: "@aws-sdk/credential-provider-http@3.972.72",
+        documents: [{
+          source: "aws/aws-sdk-js-v3/d760a00859a08b5d04590ee047510b49add12361/LICENSE",
+          bytes: 11_352,
+          sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+        }],
+      },
+      {
+        identity: "@aws-sdk/credential-provider-login@3.972.77",
+        documents: [{
+          source: "aws/aws-sdk-js-v3/d760a00859a08b5d04590ee047510b49add12361/LICENSE",
+          bytes: 11_352,
+          sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+        }],
+      },
+      {
+        identity: "@aws-sdk/nested-clients@3.997.44",
+        documents: [{
+          source: "aws/aws-sdk-js-v3/d760a00859a08b5d04590ee047510b49add12361/LICENSE",
+          bytes: 11_352,
+          sha256: "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+        }],
+      },
+      {
+        identity: "data-uri-to-buffer@4.0.1",
+        documents: [{
+          source: "TooTallNate/node-data-uri-to-buffer/85cd8c854aefbf1bb636789d80364cfac8ea1583/README.md#license",
+          bytes: 1_108,
+          sha256: "3072ef4a004c4f92b37eae61cdc3e27225c0a7d2f5e144700e40b9c5a5a7a9b9",
+        }],
+      },
+      {
+        identity: "standardwebhooks@1.0.0",
+        documents: [{
+          source: "standard-webhooks/standard-webhooks/929bf0c1928b188287eaf88d0a9f0a4e87df6499/libraries/LICENSE",
+          bytes: 1_088,
+          sha256: "5ec8c7b26b64d881a6706617bed25c049f97f2f35de034c756de8546fd6dbe27",
+        }],
+      },
+    ],
+  );
+  await assert.doesNotReject(verifyThirdPartyLicenseBundle(modules, licenses));
 });
 
 test("standalone tar headers normalize owner, timestamp, and executable mode", () => {

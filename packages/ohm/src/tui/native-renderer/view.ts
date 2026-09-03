@@ -82,6 +82,7 @@ interface EntryRenderOptions {
   readonly hyperlinks: boolean;
   readonly codeBlockIndent: string;
   readonly presentation: NativePresentation;
+  readonly toolDetailCache: OhmNativeToolDetailCache;
 }
 
 function usableWidth(columns: number): number {
@@ -160,8 +161,40 @@ function joinStyledRuns(runs: readonly string[]): string {
   return runs.join("");
 }
 
+function wrapAsciiText(value: string, maximum: number, preserveTrailing: boolean): string[] {
+  const output: string[] = [];
+  for (const physical of value.split("\n")) {
+    if (physical.length <= maximum) {
+      output.push(preserveTrailing ? physical : physical.trimEnd());
+      continue;
+    }
+    let line = "";
+    const finish = (): void => {
+      output.push(preserveTrailing ? line : line.trimEnd());
+      line = "";
+    };
+    for (const token of physical.match(/\s+|\S+/gu) ?? []) {
+      const whitespace = /^\s+$/u.test(token);
+      if (!whitespace && token.length <= maximum && line.length > 0 && line.length + token.length > maximum) {
+        finish();
+      }
+      let offset = 0;
+      while (offset < token.length) {
+        if (line.length === maximum) finish();
+        const available = maximum - line.length;
+        const selected = token.slice(offset, offset + available);
+        line += selected;
+        offset += selected.length;
+      }
+    }
+    output.push(preserveTrailing ? line : line.trimEnd());
+  }
+  return output.length === 0 ? [""] : output;
+}
+
 function wrapNativeText(value: string, width: number, preserveTrailing = false): string[] {
   const maximum = Math.max(1, width);
+  if (/^[\x20-\x7e\n]*$/u.test(value)) return wrapAsciiText(value, maximum, preserveTrailing);
   const output: string[] = [];
   for (const physical of value.split("\n")) {
     let line = "";
@@ -414,10 +447,159 @@ function statusPresentation(status: OhmTuiToolStatus, presentation: NativePresen
 
 const COLLAPSED_TOOL_DETAIL_ROWS = 4;
 const EXPANDED_TOOL_DETAIL_ROWS = 120;
+const MAX_TOOL_DETAIL_WRAP_CACHE_ENTRIES = 8_192;
+const MAX_TOOL_DETAIL_WRAP_CACHE_BYTES = 8 * 1024 * 1024;
 
 interface BoundedToolDetailRows<Line> {
   readonly rows: readonly Line[];
   readonly collapseChanges: boolean;
+}
+
+interface CachedToolDetailWrap<Line> {
+  readonly width: number;
+  readonly variant: string;
+  readonly count: number;
+  readonly head: readonly Line[];
+  readonly tail: readonly Line[];
+  readonly bytes: number;
+}
+
+class ToolDetailWrapCache<Line> {
+  readonly #values = new Map<string, CachedToolDetailWrap<Line>[]>();
+  readonly #lru = new Map<CachedToolDetailWrap<Line>, string>();
+  #bytes = 0;
+
+  has(value: string, width: number, variant: string): boolean {
+    return this.#values.get(value)?.some((entry) => entry.width === width && entry.variant === variant) === true;
+  }
+
+  get(value: string, width: number, variant: string, render: () => readonly Line[]): CachedToolDetailWrap<Line> {
+    const retained = this.#values.get(value)?.find((entry) => entry.width === width && entry.variant === variant);
+    if (retained !== undefined) {
+      this.#lru.delete(retained);
+      this.#lru.set(retained, value);
+      return retained;
+    }
+    const rows = render();
+    const head = rows.slice(0, EXPANDED_TOOL_DETAIL_ROWS);
+    const tail = rows.slice(-EXPANDED_TOOL_DETAIL_ROWS);
+    const bytes = Buffer.byteLength(value, "utf8") + Buffer.byteLength(JSON.stringify([head, tail]), "utf8");
+    const created = { width, variant, count: rows.length, head, tail, bytes };
+    if (bytes > MAX_TOOL_DETAIL_WRAP_CACHE_BYTES) return created;
+    while (
+      this.#lru.size >= MAX_TOOL_DETAIL_WRAP_CACHE_ENTRIES
+      || this.#bytes + bytes > MAX_TOOL_DETAIL_WRAP_CACHE_BYTES
+    ) {
+      const oldest = this.#lru.entries().next().value;
+      if (oldest === undefined) break;
+      const [entry, source] = oldest;
+      this.#lru.delete(entry);
+      const variants = this.#values.get(source);
+      if (variants !== undefined) {
+        const index = variants.indexOf(entry);
+        if (index >= 0) variants.splice(index, 1);
+        if (variants.length === 0) this.#values.delete(source);
+      }
+      this.#bytes = Math.max(0, this.#bytes - entry.bytes);
+    }
+    const selected = this.#values.get(value);
+    if (selected === undefined) this.#values.set(value, [created]);
+    else selected.push(created);
+    this.#lru.set(created, value);
+    this.#bytes += bytes;
+    return created;
+  }
+
+  clear(): void {
+    this.#values.clear();
+    this.#lru.clear();
+    this.#bytes = 0;
+  }
+}
+
+/** @internal Controller-scoped native tool-detail wrap state. */
+export class OhmNativeToolDetailCache {
+  readonly #plain = new ToolDetailWrapCache<string>();
+  readonly #markdown = new ToolDetailWrapCache<MarkdownRenderedLine>();
+
+  hasPlain(value: string, width: number): boolean {
+    return this.#plain.has(value, width, "plain");
+  }
+
+  getPlain(value: string, width: number, render: () => readonly string[]): CachedToolDetailWrap<string> {
+    return this.#plain.get(value, width, "plain", render);
+  }
+
+  hasMarkdown(value: string, width: number, codeBlockIndent: string): boolean {
+    return this.#markdown.has(value, width, codeBlockIndent);
+  }
+
+  getMarkdown(
+    value: string,
+    width: number,
+    codeBlockIndent: string,
+    render: () => readonly MarkdownRenderedLine[],
+  ): CachedToolDetailWrap<MarkdownRenderedLine> {
+    return this.#markdown.get(value, width, codeBlockIndent, render);
+  }
+
+  clear(): void {
+    this.#plain.clear();
+    this.#markdown.clear();
+  }
+}
+
+/** @internal Creates bounded tool-detail wrap state for one native view/controller. */
+export function internalCreateOhmNativeToolDetailCache(): OhmNativeToolDetailCache {
+  return new OhmNativeToolDetailCache();
+}
+
+function toolDetailContentWidth(columns: number): number {
+  const indent = columns >= 5 ? 2 : 0;
+  const contentIndent = columns >= 7 ? 4 : indent;
+  return Math.max(1, columns - contentIndent);
+}
+
+function renderMarkdownToolDetailSource(
+  source: string,
+  width: number,
+  codeBlockIndent: string,
+): MarkdownRenderedLine[] {
+  return renderMarkdownMessageLines(
+    "",
+    source,
+    width,
+    "assistant",
+    undefined,
+    { codeBlockIndent },
+  );
+}
+
+/** @internal Populates the exact bounded wrap cache used by expanded native tool details. */
+export function internalPrewarmOhmNativeToolDetail(
+  detail: OhmTuiToolDetail,
+  columns: number,
+  codeBlockIndent: string,
+  cache: OhmNativeToolDetailCache,
+): boolean {
+  const width = toolDetailContentWidth(columns);
+  if (detail.markdown === true) {
+    const retained = cache.hasMarkdown(detail.value, width, codeBlockIndent);
+    cache.getMarkdown(
+      detail.value,
+      width,
+      codeBlockIndent,
+      () => renderMarkdownToolDetailSource(detail.value, width, codeBlockIndent),
+    );
+    return !retained;
+  }
+  const retained = cache.hasPlain(detail.value, width);
+  cache.getPlain(
+    detail.value,
+    width,
+    () => wrapNativeText(detail.value, width),
+  );
+  return !retained;
 }
 
 function boundedToolDetailLines(
@@ -425,22 +607,28 @@ function boundedToolDetailLines(
   width: number,
   expanded: boolean,
   ellipsis: string,
+  cache: OhmNativeToolDetailCache,
 ): BoundedToolDetailRows<string> {
   const maximum = expanded ? EXPANDED_TOOL_DETAIL_ROWS : COLLAPSED_TOOL_DETAIL_ROWS;
-  const lines = wrapNativeText(detail.value, Math.max(1, width));
-  const collapseChanges = lines.length > COLLAPSED_TOOL_DETAIL_ROWS;
-  if (lines.length <= maximum) return { rows: lines, collapseChanges };
+  const selectedWidth = Math.max(1, width);
+  const wrapped = cache.getPlain(
+    detail.value,
+    selectedWidth,
+    () => wrapNativeText(detail.value, selectedWidth),
+  );
+  const collapseChanges = wrapped.count > COLLAPSED_TOOL_DETAIL_ROWS;
+  if (wrapped.count <= maximum) return { rows: wrapped.head.slice(0, wrapped.count), collapseChanges };
   const marker = truncateCells(
     detail.tail === true
-      ? `${ellipsis} earlier ${lines.length - maximum + 1} rows hidden`
-      : `${ellipsis} ${lines.length - maximum + 1} more rows`,
-    Math.max(1, width),
+      ? `${ellipsis} earlier ${wrapped.count - maximum + 1} rows hidden`
+      : `${ellipsis} ${wrapped.count - maximum + 1} more rows`,
+    selectedWidth,
     ellipsis,
   );
   return {
     rows: detail.tail === true
-      ? [marker, ...lines.slice(-(maximum - 1))]
-      : [...lines.slice(0, maximum - 1), marker],
+      ? [marker, ...wrapped.tail.slice(-(maximum - 1))]
+      : [...wrapped.head.slice(0, maximum - 1), marker],
     collapseChanges,
   };
 }
@@ -475,32 +663,34 @@ function boundedMarkdownToolDetailLines(
   expanded: boolean,
   ellipsis: string,
   codeBlockIndent: string,
+  cache: OhmNativeToolDetailCache,
 ): BoundedToolDetailRows<MarkdownRenderedLine> {
   const maximum = expanded ? EXPANDED_TOOL_DETAIL_ROWS : COLLAPSED_TOOL_DETAIL_ROWS;
   const available = maximum - 1;
   const headRows = Math.ceil(available * 2 / 3);
   const tailRows = available - headRows;
   const selectedWidth = Math.max(1, width);
-  const render = (source: string): MarkdownRenderedLine[] => renderMarkdownMessageLines(
-    "",
-    source,
+  const render = (source: string): MarkdownRenderedLine[] =>
+    renderMarkdownToolDetailSource(source, selectedWidth, codeBlockIndent);
+  const complete = cache.getMarkdown(
+    detail.value,
     selectedWidth,
-    "assistant",
-    undefined,
-    { codeBlockIndent },
+    codeBlockIndent,
+    () => render(detail.value),
   );
-  const complete = render(detail.value);
-  const collapseChanges = complete.length > COLLAPSED_TOOL_DETAIL_ROWS;
-  if (complete.length <= maximum) return { rows: complete, collapseChanges };
+  const collapseChanges = complete.count > COLLAPSED_TOOL_DETAIL_ROWS;
+  if (complete.count <= maximum) {
+    return { rows: complete.head.slice(0, complete.count), collapseChanges };
+  }
   const sourceBytes = Buffer.byteLength(detail.value, "utf8");
-  const smallEnough = sourceBytes + complete.length * selectedWidth <= maximum * selectedWidth;
+  const smallEnough = sourceBytes + complete.count * selectedWidth <= maximum * selectedWidth;
   if (smallEnough) {
-    const marker = truncateCells(`${ellipsis} ${complete.length - available} rows omitted`, selectedWidth, ellipsis);
+    const marker = truncateCells(`${ellipsis} ${complete.count - available} rows omitted`, selectedWidth, ellipsis);
     return {
       rows: [
-        ...complete.slice(0, headRows),
+        ...complete.head.slice(0, headRows),
         { text: marker, role: "muted", spans: [{ text: marker, role: "muted" }] },
-        ...(tailRows === 0 ? [] : complete.slice(-tailRows)),
+        ...(tailRows === 0 ? [] : complete.tail.slice(-tailRows)),
       ],
       collapseChanges,
     };
@@ -561,18 +751,19 @@ function renderToolDetail(
 ): BoundedToolDetailRows<string> {
   const indent = columns >= 5 ? 2 : 0;
   const contentIndent = columns >= 7 ? 4 : indent;
-  const width = Math.max(1, columns - contentIndent);
+  const width = toolDetailContentWidth(columns);
   const presentation = options.presentation;
   let body: readonly string[];
   let collapseChanges: boolean;
   if (detail.markdown === true) {
     const bounded = boundedMarkdownToolDetailLines(
-        detail,
-        width,
-        expanded,
-        presentation.glyphs.ellipsis,
-        options.codeBlockIndent,
-      );
+      detail,
+      width,
+      expanded,
+      presentation.glyphs.ellipsis,
+      options.codeBlockIndent,
+      options.toolDetailCache,
+    );
     body = bounded.rows.map((line) => markdownToolDetailText(
         line,
         presentation,
@@ -581,7 +772,13 @@ function renderToolDetail(
       ));
     collapseChanges = bounded.collapseChanges;
   } else {
-    const bounded = boundedToolDetailLines(detail, width, expanded, presentation.glyphs.ellipsis);
+    const bounded = boundedToolDetailLines(
+      detail,
+      width,
+      expanded,
+      presentation.glyphs.ellipsis,
+      options.toolDetailCache,
+    );
     body = bounded.rows.map((line) => {
         const role = toolDetailRole(detail, line);
         return role === "error" && presentation.theme !== undefined
@@ -1172,7 +1369,6 @@ class NativeStatusComponent implements Component {
         ? undefined
         : `W${compactNumber(this.#snapshot.telemetry.cacheWriteTokens)}`,
       this.#snapshot.telemetry.cacheHitPercent === undefined
-        || ((this.#snapshot.telemetry.cacheReadTokens ?? 0) === 0 && (this.#snapshot.telemetry.cacheWriteTokens ?? 0) === 0)
         ? undefined
         : `cache hit ${this.#snapshot.telemetry.cacheHitPercent.toFixed(1)}%`,
       this.#snapshot.telemetry.cost === undefined
@@ -1252,13 +1448,18 @@ export class OhmNativeView implements Component {
   readonly #queue: NativeQueueComponent;
   readonly #composer: NativeComposerComponent;
   readonly #status: NativeStatusComponent;
+  readonly #toolDetailCache: OhmNativeToolDetailCache;
   readonly children: readonly Component[];
   #props: OhmNativeViewProps;
   #snapshot: OhmTuiSnapshot;
   #presentation: NativePresentation;
 
-  constructor(props: OhmNativeViewProps) {
+  constructor(
+    props: OhmNativeViewProps,
+    toolDetailCache: OhmNativeToolDetailCache = internalCreateOhmNativeToolDetailCache(),
+  ) {
     this.#props = props;
+    this.#toolDetailCache = toolDetailCache;
     this.#snapshot = normalizeOhmTuiSnapshot(props.snapshot);
     this.#presentation = nativePresentation(props.theme, props.unicode);
     this.#queue = new NativeQueueComponent(this.#snapshot, props.queueRows, this.#presentation);
@@ -1283,6 +1484,7 @@ export class OhmNativeView implements Component {
       hyperlinks: this.#props.hyperlinks ?? false,
       codeBlockIndent: this.#props.codeBlockIndent ?? "",
       presentation: this.#presentation,
+      toolDetailCache: this.#toolDetailCache,
     };
     this.#transcript.update(this.#snapshot.transcript, options);
     this.#queue.update(this.#snapshot, this.#props.queueRows, this.#presentation);
@@ -1352,20 +1554,34 @@ export class OhmNativeView implements Component {
 }
 
 /** Creates a one-shot native projection for deterministic unit tests. */
-export function projectOhmNativeFrame(props: OhmNativeViewProps): OhmNativeFrameProjection {
-  return new OhmNativeView(props).project();
+export function projectOhmNativeFrame(
+  props: OhmNativeViewProps,
+  toolDetailCache: OhmNativeToolDetailCache = internalCreateOhmNativeToolDetailCache(),
+): OhmNativeFrameProjection {
+  return new OhmNativeView(props, toolDetailCache).project();
 }
 
 /** Projects independent normalized transcript entries without marker rows. */
-export function projectOhmNativeTranscriptEntries(props: OhmNativeViewProps): readonly string[][] {
-  return new OhmNativeView(props).projectTranscriptEntries();
+export function projectOhmNativeTranscriptEntries(
+  props: OhmNativeViewProps,
+  toolDetailCache: OhmNativeToolDetailCache = internalCreateOhmNativeToolDetailCache(),
+): readonly string[][] {
+  return new OhmNativeView(props, toolDetailCache).projectTranscriptEntries();
 }
 
 /** Creates one retained view closure suitable for a single TUI controller. */
-export function createOhmNativeViewProjector(): (props: OhmNativeViewProps) => OhmNativeFrameProjection {
+export function createOhmNativeViewProjector(): (
+  props: OhmNativeViewProps,
+  toolDetailCache?: OhmNativeToolDetailCache,
+) => OhmNativeFrameProjection {
   let view: OhmNativeView | undefined;
-  return (props) => {
-    if (view === undefined) view = new OhmNativeView(props);
+  let retainedCache: OhmNativeToolDetailCache | undefined;
+  const defaultCache = internalCreateOhmNativeToolDetailCache();
+  return (props, toolDetailCache = defaultCache) => {
+    if (view === undefined || retainedCache !== toolDetailCache) {
+      view = new OhmNativeView(props, toolDetailCache);
+      retainedCache = toolDetailCache;
+    }
     else view.update(props);
     return view.project();
   };

@@ -8,6 +8,16 @@ import { Value } from "typebox/value";
 
 import { isJsonObject, type JsonValue } from "../core/json.js";
 import type { CompactionResult } from "../extensions/direct.js";
+import type {
+  ExtensionWireServiceDescriptor,
+  ExtensionWireServiceRequest,
+  ExtensionWireServiceResponse,
+} from "../extensions/wire-services.js";
+import type {
+  PortablePresentationActionRequest,
+  PortablePresentationActionResult,
+  PortablePresentationEvent,
+} from "./portable-presentation.js";
 import { terminateProcessTreeAsync } from "../process/process-tree.js";
 import type { ProviderModelThinkingLevel } from "../providers/models.js";
 import type {
@@ -65,7 +75,8 @@ export type RpcStreamEvent =
   | AgentSessionEvent
   | RpcBashExecutionUpdate
   | RpcExtensionUiRequest
-  | RpcExtensionErrorEvent;
+  | RpcExtensionErrorEvent
+  | PortablePresentationEvent;
 export type RpcEventListener = (event: RpcStreamEvent) => void;
 
 interface PendingRequest {
@@ -139,6 +150,10 @@ const RPC_DATA_COMMANDS = new Set<RpcCommandType>([
   "get_last_assistant_text",
   "get_messages",
   "get_commands",
+  "get_portable_presentations",
+  "presentation_action",
+  "get_extension_wire_services",
+  "extension_wire_request",
 ]);
 
 function validateTimeout(timeout: number): void {
@@ -579,6 +594,30 @@ export class RpcClient {
   }
 
   async getState(): Promise<RpcSessionState> { return this.#data(await this.#send({ type: "get_state" })); }
+
+  async invokePortablePresentationAction(
+    request: PortablePresentationActionRequest,
+  ): Promise<PortablePresentationActionResult> {
+    return this.#data(await this.#send({ type: "presentation_action", ...request }));
+  }
+
+  async listPortablePresentations(): Promise<readonly PortablePresentationEvent[]> {
+    return this.#data<{ presentations: readonly PortablePresentationEvent[] }>(
+      await this.#send({ type: "get_portable_presentations" }),
+    ).presentations;
+  }
+
+  async listExtensionWireServices(): Promise<readonly ExtensionWireServiceDescriptor[]> {
+    return this.#data<{ services: readonly ExtensionWireServiceDescriptor[] }>(
+      await this.#send({ type: "get_extension_wire_services" }),
+    ).services;
+  }
+
+  async invokeExtensionWireService(
+    request: ExtensionWireServiceRequest,
+  ): Promise<ExtensionWireServiceResponse> {
+    return this.#data(await this.#send({ type: "extension_wire_request", request }));
+  }
 
   async getRecoveryStatus(): Promise<RpcRecoveryStatus | null> {
     return this.#data(await this.#send({ type: "get_recovery_status" }));

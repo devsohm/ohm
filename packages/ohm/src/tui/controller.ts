@@ -77,8 +77,10 @@ import { MultilineEditor, type EditorSnapshot, type TuiEditorImplementation } fr
 import { editTextExternally, parseEditorCommand } from "./external-editor.js";
 import {
   INTERNAL_TUI_FRAME_PROJECTOR,
+  INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
   INTERNAL_TUI_PERSISTENT_POINTER_MAP,
   INTERNAL_TUI_PERSISTENT_POINTER_SOURCE,
+  INTERNAL_TUI_TOOL_DETAIL_CACHE,
   INTERNAL_TUI_TRANSCRIPT_SEARCH,
   type InternalTuiControllerOptions,
   type TuiFrameProjector,
@@ -110,10 +112,19 @@ import {
   type KeybindingAction,
 } from "./keybindings.js";
 import {
+  internalToolRenderEntryKey,
+  internalToolRenderSlotsForEntry,
   renderTranscriptFrame,
   type ToolRenderSlots,
   type TranscriptRenderOptions,
 } from "./layout.js";
+import { projectOhmTuiToolEntry } from "./native-renderer/tool-entry.js";
+import type { OhmTuiToolDetail } from "./native-renderer/types.js";
+import {
+  internalCreateOhmNativeToolDetailCache,
+  internalPrewarmOhmNativeToolDetail,
+  type OhmNativeToolDetailCache,
+} from "./native-renderer/view.js";
 import { formatCompactionUsageReceipt, TuiModel } from "./model.js";
 import type { FooterDataSnapshot } from "./footer-data.js";
 import { syncPublicTheme } from "./public-theme.js";
@@ -327,6 +338,26 @@ const STREAMING_RENDER_INTERVAL_MS = 16;
 const MAX_DEFERRED_TOOL_STREAM_BYTES = 256 * 1024;
 const MAX_DEFERRED_TOOL_STREAM_EVENTS = 8_192;
 const DEFERRED_TOOL_STREAM_CHUNK_BYTES = 8 * 1024;
+const NATIVE_DETAIL_PREWARM_SLICE_MS = 2;
+const MAX_NATIVE_DETAIL_PREWARM_SLICE_ENTRIES = 32;
+const MAX_NATIVE_DETAIL_PREWARM_SLICE_DETAILS = 8;
+const MAX_NATIVE_DETAIL_PREWARM_SLICE_BYTES = 32 * 1024;
+const MAX_NATIVE_DETAIL_PREWARM_TOTAL_ENTRIES = 2_000;
+const MAX_NATIVE_DETAIL_PREWARM_TOTAL_BYTES = 2 * 1024 * 1024;
+
+interface NativeToolDetailPrewarmState {
+  readonly key: string;
+  readonly entries: readonly TranscriptEntry[];
+  readonly columns: number;
+  readonly codeBlockIndent: string;
+  readonly toolRenderBlocks: ReadonlyMap<string, ToolRenderSlots>;
+  readonly sessionRenderBlocks: ReadonlyMap<string, RuntimeUiBlock>;
+  index: number;
+  pendingDetails: readonly OhmTuiToolDetail[] | undefined;
+  pendingDetailIndex: number;
+  scannedEntries: number;
+  sourceBytes: number;
+}
 
 interface DeferredTextAccumulator {
   chunks: string[];
@@ -693,6 +724,47 @@ interface ToolRendererOwner {
   signal: AbortSignal;
   onAbort(): void;
   failureKeys: Set<string>;
+  reconciledCallIds?: ReadonlySet<string>;
+}
+
+interface CachedToolRenderBlock {
+  readonly owner: ToolRendererOwner;
+  readonly width: number;
+  readonly height: number;
+  readonly theme: Theme;
+  readonly showImages: boolean;
+  readonly callId: string;
+  readonly name: string;
+  readonly status: TranscriptEntry["status"];
+  readonly expanded: boolean;
+  readonly toolData: TranscriptEntry["toolData"];
+  readonly directResultContent: ReturnType<TuiModel["directToolResultContent"]>;
+  readonly registered: boolean;
+  readonly shell: "default" | "self" | undefined;
+  readonly call: RuntimeUiBlock | undefined;
+  readonly result: RuntimeUiBlock | undefined;
+  readonly bytes: number;
+}
+
+interface OmittedToolRenderBlock extends Omit<CachedToolRenderBlock, "call" | "result" | "bytes"> {
+  readonly bytes: number | undefined;
+  readonly reason: "budget" | "duplicate" | "empty" | "unregistered";
+}
+
+const MAX_RETAINED_TOOL_RENDER_BLOCKS = 2_048;
+const MAX_RETAINED_TOOL_RENDER_BYTES = 8 * 1024 * 1024;
+
+function cachedToolRenderBlockBytes(
+  call: RuntimeUiBlock | undefined,
+  result: RuntimeUiBlock | undefined,
+): number {
+  return 256 + Buffer.byteLength(JSON.stringify([call, result]), "utf8");
+}
+
+function sameStringSet(left: ReadonlySet<string> | undefined, right: ReadonlySet<string>): boolean {
+  return left !== undefined
+    && left.size === right.size
+    && [...left].every((value) => right.has(value));
 }
 
 interface SessionRendererOwner {
@@ -1631,6 +1703,7 @@ export class TuiController {
   readonly #openHyperlink: (url: URL) => void | Promise<void>;
   readonly #surface: LiveSurfaceRenderer;
   readonly #frameProjector: TuiFrameProjector | undefined;
+  readonly #nativeToolDetailCache: OhmNativeToolDetailCache;
   readonly #alternateInput: AlternateScreenInputParser | undefined;
   readonly #alternateInteraction: AlternateScreenInteraction | undefined;
   readonly #terminalImages = new TerminalImageRegistry();
@@ -1658,6 +1731,9 @@ export class TuiController {
   readonly #lineTextStarted = new Set<string>();
   readonly #lineToolArgumentParts = new Map<string, { bytes: number; truncated: boolean }>();
   #toolRenderers: ToolRendererOwner | undefined;
+  readonly #toolRenderBlockCache = new Map<TranscriptEntry, CachedToolRenderBlock>();
+  readonly #omittedToolRenderBlocks = new Map<TranscriptEntry, OmittedToolRenderBlock>();
+  #toolRenderBlockCacheBytes = 0;
   #sessionRenderers: SessionRendererOwner | undefined;
   #editorRenderer: EditorRendererOwner | undefined;
   readonly #sessionEntries = new Map<string, RetainedSessionEntry>();
@@ -1771,6 +1847,10 @@ export class TuiController {
   #transcriptLayoutRevision = 0;
   #renderScheduled = false;
   #renderGeneration = 0;
+  #nativeToolDetailPrewarm: NodeJS.Immediate | undefined;
+  #nativeToolDetailPrewarmCompletedKey: string | undefined;
+  #nativeToolDetailPrewarmSessionOwner: SessionRendererOwner | undefined;
+  #nativeToolDetailPrewarmSessionRevision = 0;
   #streamingRender: NodeJS.Immediate | undefined;
   #streamingRenderTimer: NodeJS.Timeout | undefined;
   #streamingUpdatePending = false;
@@ -1829,6 +1909,7 @@ export class TuiController {
   #suspendKeepAlive: NodeJS.Timeout | undefined;
 
   readonly #onData = (chunk: Buffer | string) => {
+    this.#cancelNativeToolDetailPrewarm();
     try {
       let selected = ProcessTerminal.normalizeNativeInput(chunk, { environment: this.#environment });
       if (this.#alternateInput !== undefined) {
@@ -1872,6 +1953,7 @@ export class TuiController {
   };
 
   readonly #onResize = () => {
+    this.#cancelNativeToolDetailPrewarm();
     const active = [...this.#rawBackgrounds.values()].at(-1);
     if (active !== undefined) {
       try { active.component.invalidate(); }
@@ -1926,6 +2008,8 @@ export class TuiController {
       throw new Error("Full TUI mode requires the rich frame projector");
     }
     this.#frameProjector = frameProjector;
+    this.#nativeToolDetailCache = options[INTERNAL_TUI_TOOL_DETAIL_CACHE]
+      ?? internalCreateOhmNativeToolDetailCache();
     this.#themeSetting = normalizeThemeSetting(options.theme ?? "signal");
     this.#terminalColorScheme = terminalColorSchemeFromEnvironment(this.#environment);
     this.#automaticTheme = parseAutomaticThemePair(this.#themeSetting) !== undefined;
@@ -3524,6 +3608,9 @@ export class TuiController {
     if (this.mode === "full") this.#flushDeferredToolStream();
     this.#clearPendingActiveMessages();
     this.#model.clearTranscript();
+    this.#clearToolRenderBlocks();
+    this.#nativeToolDetailCache.clear();
+    this.#frameProjector?.[INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]?.();
     this.#invalidateTranscriptLayout();
     this.#acceptedToolProgressSequences.clear();
     this.#seenToolProgressSequences.clear();
@@ -5416,10 +5503,53 @@ export class TuiController {
     }
   }
 
+  #deleteToolRenderBlock(entry: TranscriptEntry): void {
+    const retained = this.#toolRenderBlockCache.get(entry);
+    if (retained === undefined) return;
+    this.#toolRenderBlockCache.delete(entry);
+    this.#toolRenderBlockCacheBytes = Math.max(0, this.#toolRenderBlockCacheBytes - retained.bytes);
+  }
+
+  #deleteToolRenderRecord(entry: TranscriptEntry): void {
+    this.#deleteToolRenderBlock(entry);
+    this.#omittedToolRenderBlocks.delete(entry);
+  }
+
+  #clearToolRenderBlocks(): void {
+    this.#toolRenderBlockCache.clear();
+    this.#omittedToolRenderBlocks.clear();
+    this.#toolRenderBlockCacheBytes = 0;
+  }
+
+  #retainOmittedToolRenderBlock(
+    entry: TranscriptEntry,
+    value: OmittedToolRenderBlock,
+  ): void {
+    if (this.#omittedToolRenderBlocks.size >= MAX_RETAINED_TOOL_RENDER_BLOCKS) return;
+    this.#omittedToolRenderBlocks.set(entry, value);
+  }
+
+  #retainToolRenderBlock(
+    entry: TranscriptEntry,
+    value: Omit<CachedToolRenderBlock, "bytes">,
+    bytes: number,
+  ): boolean {
+    this.#deleteToolRenderRecord(entry);
+    if (
+      bytes > MAX_RETAINED_TOOL_RENDER_BYTES
+      || this.#toolRenderBlockCache.size >= MAX_RETAINED_TOOL_RENDER_BLOCKS
+      || this.#toolRenderBlockCacheBytes + bytes > MAX_RETAINED_TOOL_RENDER_BYTES
+    ) return false;
+    this.#toolRenderBlockCache.set(entry, { ...value, bytes });
+    this.#toolRenderBlockCacheBytes += bytes;
+    return true;
+  }
+
   setToolRenderers(binding?: RuntimeToolRendererBinding, signal?: AbortSignal): void {
     const previous = this.#toolRenderers;
     if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
     this.#toolRenderers = undefined;
+    this.#clearToolRenderBlocks();
     if (previous !== undefined && previous.binding !== binding) this.#disposeToolRenderers(previous);
     if (binding !== undefined) {
       if (signal === undefined) throw new Error("Runtime tool renderers require a generation signal");
@@ -5430,7 +5560,9 @@ export class TuiController {
         onAbort: () => {
           if (this.#toolRenderers !== owner) return;
           this.#toolRenderers = undefined;
+          this.#clearToolRenderBlocks();
           this.#disposeToolRenderers(owner);
+          this.#invalidateTranscriptLayout();
           this.#scheduleRender();
         },
         failureKeys: new Set(),
@@ -5439,6 +5571,7 @@ export class TuiController {
       signal.addEventListener("abort", owner.onAbort, { once: true });
       if (signal.aborted) owner.onAbort();
     }
+    this.#invalidateTranscriptLayout();
     this.#scheduleRender();
   }
 
@@ -5681,13 +5814,22 @@ export class TuiController {
   #renderToolBlocks(entries: readonly TranscriptEntry[], width: number, height: number): Map<string, ToolRenderSlots> {
     const owner = this.#toolRenderers;
     const blocks = new Map<string, ToolRenderSlots>();
-    if (owner === undefined || owner.signal.aborted) return blocks;
+    if (owner === undefined || owner.signal.aborted) {
+      this.#clearToolRenderBlocks();
+      return blocks;
+    }
+    const previousBlocks = new Map(this.#toolRenderBlockCache);
+    const previousOmissions = new Map(this.#omittedToolRenderBlocks);
+    this.#clearToolRenderBlocks();
     const liveCallIds = new Set(entries.flatMap((entry) =>
       entry.kind === "tool" && entry.callId !== undefined ? [entry.callId] : []));
-    try {
-      owner.binding.reconcile?.(liveCallIds);
-    } catch (cause) {
-      this.#reportToolRendererFailure(owner, { name: "*", slot: "reconcile", cause });
+    if (owner.binding.reconcile !== undefined && !sameStringSet(owner.reconciledCallIds, liveCallIds)) {
+      try {
+        owner.binding.reconcile(liveCallIds);
+        owner.reconciledCallIds = liveCallIds;
+      } catch (cause) {
+        this.#reportToolRendererFailure(owner, { name: "*", slot: "reconcile", cause });
+      }
     }
     const context: RuntimeUiRenderContext = {
       width,
@@ -5700,21 +5842,182 @@ export class TuiController {
         unicode: this.capabilities.unicode,
       },
     };
-    for (const entry of entries) {
+    let layoutChanged = false;
+    let frameBytes = 0;
+    const failures: Array<{
+      readonly index: number;
+      readonly sequence: number;
+      readonly failure: RuntimeToolRendererFailure;
+    }> = [];
+    let failureSequence = 0;
+    for (const { entry, index } of entries.map((entry, index) => ({ entry, index })).reverse()) {
       if (entry.kind !== "tool" || entry.callId === undefined || entry.title === undefined) continue;
+      const callId = entry.callId;
+      const blockKey = internalToolRenderEntryKey(entry.id);
       const name = entry.title;
+      const reportFailure = (failure: RuntimeToolRendererFailure): void => {
+        failures.push({ index, sequence: failureSequence++, failure });
+      };
       if (owner.signal.aborted || this.#toolRenderers !== owner) break;
+      const directResultContent = this.#model.directToolResultContent(entry);
+      const cached = previousBlocks.get(entry);
+      const omitted = previousOmissions.get(entry);
+      const matchesView = (candidate: CachedToolRenderBlock | OmittedToolRenderBlock | undefined): boolean =>
+        candidate?.owner === owner
+          && candidate.width === width
+          && candidate.height === height
+          && candidate.theme === this.#theme
+          && candidate.showImages === this.#showImages
+          && candidate.callId === entry.callId
+          && candidate.name === name
+          && candidate.status === entry.status
+          && candidate.expanded === (entry.expanded === true)
+          && candidate.toolData === entry.toolData
+          && candidate.directResultContent === directResultContent;
+      const cacheMatchesView = matchesView(cached);
+      const omissionMatchesView = matchesView(omitted);
+      let failed = false;
       let registered = false;
       try {
         registered = owner.binding.has(name);
       } catch (cause) {
-        this.#reportToolRendererFailure(owner, { name, slot: "has", cause });
+        failed = true;
+        this.#deleteToolRenderRecord(entry);
+        layoutChanged = true;
+        reportFailure({ name, slot: "has", cause });
         continue;
       }
-      if (!registered) continue;
+      const retain = (
+        shell: "default" | "self" | undefined,
+        call: RuntimeUiBlock | undefined,
+        result: RuntimeUiBlock | undefined,
+      ): { readonly bytes: number; readonly retained: boolean } => {
+        const bytes = cached !== undefined && cached.call === call && cached.result === result
+          ? cached.bytes
+          : cachedToolRenderBlockBytes(call, result);
+        if (failed) {
+          this.#deleteToolRenderRecord(entry);
+          return { bytes, retained: false };
+        }
+        const retained = this.#retainToolRenderBlock(entry, {
+          owner,
+          width,
+          height,
+          theme: this.#theme,
+          showImages: this.#showImages,
+          callId,
+          name,
+          status: entry.status,
+          expanded: entry.expanded === true,
+          toolData: entry.toolData,
+          directResultContent,
+          registered,
+          shell,
+          call,
+          result,
+        }, bytes);
+        return { bytes, retained };
+      };
+      const omit = (
+        shell: "default" | "self" | undefined,
+        bytes: number | undefined,
+        reason: OmittedToolRenderBlock["reason"],
+      ): void => {
+        this.#deleteToolRenderRecord(entry);
+        this.#retainOmittedToolRenderBlock(entry, {
+          owner,
+          width,
+          height,
+          theme: this.#theme,
+          showImages: this.#showImages,
+          callId,
+          name,
+          status: entry.status,
+          expanded: entry.expanded === true,
+          toolData: entry.toolData,
+          directResultContent,
+          registered,
+          shell,
+          bytes,
+          reason,
+        });
+      };
+      const include = (block: ToolRenderSlots | undefined, bytes: number): boolean => {
+        if (block === undefined) return true;
+        if (frameBytes + bytes > MAX_RETAINED_TOOL_RENDER_BYTES) {
+          frameBytes = MAX_RETAINED_TOOL_RENDER_BYTES;
+          layoutChanged = true;
+          return false;
+        }
+        frameBytes += bytes;
+        blocks.set(blockKey, block);
+        return true;
+      };
+      if (!registered) {
+        if (
+          omitted === undefined
+          || !omissionMatchesView
+          || omitted.reason !== "unregistered"
+        ) layoutChanged = true;
+        omit(undefined, 0, "unregistered");
+        continue;
+      }
+      let shell: "default" | "self" | undefined;
+      try {
+        shell = owner.binding.renderShell?.(name);
+      } catch (cause) {
+        failed = true;
+        layoutChanged = true;
+        reportFailure({ name, slot: "shell", cause });
+      }
+      if (blocks.has(blockKey)) {
+        omit(shell, cached?.bytes ?? omitted?.bytes, "duplicate");
+        continue;
+      }
+      if (omitted !== undefined && omissionMatchesView && omitted.registered && omitted.shell === shell && !failed) {
+        if (omitted.reason === "empty") {
+          this.#retainOmittedToolRenderBlock(entry, omitted);
+          continue;
+        }
+        if (omitted.reason === "budget" && (
+          frameBytes >= MAX_RETAINED_TOOL_RENDER_BYTES
+          || (omitted.bytes !== undefined && frameBytes + omitted.bytes > MAX_RETAINED_TOOL_RENDER_BYTES)
+        )) {
+          frameBytes = MAX_RETAINED_TOOL_RENDER_BYTES;
+          this.#retainOmittedToolRenderBlock(entry, omitted);
+          continue;
+        }
+      }
+      if (cached !== undefined && cacheMatchesView && cached.registered && cached.shell === shell && !failed) {
+        const block = shell === undefined && cached.call === undefined && cached.result === undefined ? undefined : {
+          ...optionalProperties(shell === undefined ? undefined : { shell }),
+          ...optionalProperties(cached.call === undefined ? undefined : { call: cached.call }),
+          ...optionalProperties(cached.result === undefined ? undefined : { result: cached.result }),
+        } satisfies ToolRenderSlots;
+        if (block === undefined) {
+          omit(shell, 0, "empty");
+          continue;
+        }
+        const retained = retain(shell, cached.call, cached.result);
+        if (!retained.retained) {
+          layoutChanged = true;
+          frameBytes = MAX_RETAINED_TOOL_RENDER_BYTES;
+          omit(shell, retained.bytes, "budget");
+        } else if (!include(block, retained.bytes)) omit(shell, retained.bytes, "budget");
+        continue;
+      }
+      layoutChanged = true;
+      if (frameBytes >= MAX_RETAINED_TOOL_RENDER_BYTES) {
+        omit(
+          shell,
+          omissionMatchesView && omitted !== undefined ? omitted.bytes : undefined,
+          "budget",
+        );
+        continue;
+      }
       const renderedResult = entry.toolData?.result ?? entry.toolData?.partialResult;
       const view = immutableRuntimeToolRenderView({
-        callId: entry.callId,
+        callId,
         name,
         ...optionalProperties(entry.toolData?.input === undefined ? undefined : { input: entry.toolData.input }),
         ...optionalProperties(renderedResult === undefined ? undefined : { result: renderedResult }),
@@ -5726,10 +6029,17 @@ export class TuiController {
         expanded: entry.expanded === true,
       } satisfies RuntimeToolRenderView);
       const selectedContext = { ...context, expanded: view.expanded };
+      let invalidated = false;
       const bridge = {
         theme: this.#theme,
         showImages: this.#showImages,
-        invalidate: () => this.#scheduleRender(),
+        invalidate: () => {
+          invalidated = true;
+          if (owner.signal.aborted || this.#toolRenderers !== owner) return;
+          this.#deleteToolRenderRecord(entry);
+          this.#invalidateTranscriptLayout();
+          this.#scheduleRender();
+        },
       };
       const invoke = (
         slot: "call" | "result",
@@ -5741,7 +6051,8 @@ export class TuiController {
           if (value === undefined || owner.signal.aborted || this.#toolRenderers !== owner) return undefined;
           return sanitizeRuntimeUiBlock(value, { width });
         } catch (cause) {
-          this.#reportToolRendererFailure(owner, {
+          failed = true;
+          reportFailure({
             name,
             slot,
             cause,
@@ -5749,28 +6060,41 @@ export class TuiController {
           return undefined;
         }
       };
-      let shell: "default" | "self" | undefined;
-      try {
-        shell = owner.binding.renderShell?.(name);
-      } catch (cause) {
-        this.#reportToolRendererFailure(owner, { name, slot: "shell", cause });
-      }
       const call = invoke("call", () => owner.binding.renderCall(name, view, selectedContext, bridge));
       const result = renderedResult === undefined
         ? undefined
         : invoke("result", () => {
-            const directContent = this.#model.directToolResultContent(entry);
             const direct = owner.binding[DIRECT_TOOL_RENDER_RESULT];
-            return directContent === undefined || direct === undefined
+            return directResultContent === undefined || direct === undefined
               ? owner.binding.renderResult(name, view, selectedContext, bridge)
-              : direct.call(owner.binding, name, view, directContent, selectedContext, bridge);
+              : direct.call(owner.binding, name, view, directResultContent, selectedContext, bridge);
           });
-      if (shell !== undefined || call !== undefined || result !== undefined) blocks.set(entry.callId, {
+      const block = shell === undefined && call === undefined && result === undefined ? undefined : {
         ...optionalProperties(shell === undefined ? undefined : { shell }),
         ...optionalProperties(call === undefined ? undefined : { call }),
         ...optionalProperties(result === undefined ? undefined : { result }),
-      });
+      } satisfies ToolRenderSlots;
+      if (block === undefined && !failed && !invalidated) {
+        omit(shell, 0, "empty");
+        continue;
+      }
+      const retained = invalidated
+        ? { bytes: cachedToolRenderBlockBytes(call, result), retained: false }
+        : retain(shell, call, result);
+      if (failed || invalidated) {
+        include(block, retained.bytes);
+        this.#deleteToolRenderRecord(entry);
+      } else if (!retained.retained) {
+        frameBytes = MAX_RETAINED_TOOL_RENDER_BYTES;
+        omit(shell, retained.bytes, "budget");
+      } else if (!include(block, retained.bytes)) {
+        omit(shell, retained.bytes, "budget");
+      }
     }
+    failures
+      .sort((left, right) => left.index - right.index || left.sequence - right.sequence)
+      .forEach(({ failure }) => this.#reportToolRendererFailure(owner, failure));
+    if (layoutChanged) this.#invalidateTranscriptLayout();
     return blocks;
   }
 
@@ -6034,7 +6358,163 @@ export class TuiController {
     return [...this.#hiddenReasoningLabels.values()].at(-1);
   }
 
+  #cancelNativeToolDetailPrewarm(): void {
+    if (this.#nativeToolDetailPrewarm !== undefined) clearImmediate(this.#nativeToolDetailPrewarm);
+    this.#nativeToolDetailPrewarm = undefined;
+  }
+
+  #nativeToolDetailPrewarmAllowed(generation: number): boolean {
+    return generation === this.#renderGeneration
+      && this.mode === "full"
+      && this.#started
+      && !this.#closed
+      && !this.#suspended
+      && this.#secretAbort === undefined
+      && !this.#externalEditing
+      && !this.#renderScheduled
+      && !this.#streamingUpdatePending
+      && this.#model.context.active !== true
+      && !this.#model.toolOutputExpanded;
+  }
+
+  #prewarmNativeToolDetails(state: NativeToolDetailPrewarmState): boolean {
+    const startedAt = performance.now();
+    let sliceEntries = 0;
+    let sliceDetails = 0;
+    let sliceBytes = 0;
+    while (state.pendingDetails !== undefined || state.index >= 0) {
+      if (
+        (state.pendingDetails === undefined && state.scannedEntries >= MAX_NATIVE_DETAIL_PREWARM_TOTAL_ENTRIES)
+        || state.sourceBytes >= MAX_NATIVE_DETAIL_PREWARM_TOTAL_BYTES
+      ) return false;
+      if (
+        sliceEntries >= MAX_NATIVE_DETAIL_PREWARM_SLICE_ENTRIES
+        || sliceDetails >= MAX_NATIVE_DETAIL_PREWARM_SLICE_DETAILS
+        || performance.now() - startedAt >= NATIVE_DETAIL_PREWARM_SLICE_MS
+      ) return true;
+
+      if (state.pendingDetails === undefined) {
+        const entry = state.entries[state.index];
+        state.index -= 1;
+        state.scannedEntries += 1;
+        sliceEntries += 1;
+        if (
+          entry === undefined
+          || entry.kind !== "tool"
+          || (entry.status !== "completed" && entry.status !== "failed" && entry.status !== "in_doubt")
+          || entry.streaming === true
+          || entry.expanded === true
+          || entry.extension !== undefined
+          || (entry.images?.length ?? 0) > 0
+          || state.sessionRenderBlocks.has(entry.id)
+          || internalToolRenderSlotsForEntry(state.toolRenderBlocks, entry) !== undefined
+        ) continue;
+        try {
+          const projected = projectOhmTuiToolEntry(entry);
+          const details = projected?.details?.filter((detail) => detail.preview !== true && detail.markdown !== true) ?? [];
+          if (details.length === 0) continue;
+          state.pendingDetails = details;
+          state.pendingDetailIndex = 0;
+        } catch {
+          continue;
+        }
+      }
+
+      const detail = state.pendingDetails[state.pendingDetailIndex];
+      if (detail === undefined) {
+        state.pendingDetails = undefined;
+        state.pendingDetailIndex = 0;
+        continue;
+      }
+      if (detail.value.length > MAX_NATIVE_DETAIL_PREWARM_SLICE_BYTES) {
+        state.pendingDetailIndex += 1;
+        continue;
+      }
+      const bytes = Buffer.byteLength(detail.value, "utf8");
+      if (bytes > MAX_NATIVE_DETAIL_PREWARM_SLICE_BYTES) {
+        state.pendingDetailIndex += 1;
+        continue;
+      }
+      if (state.sourceBytes + bytes > MAX_NATIVE_DETAIL_PREWARM_TOTAL_BYTES) return false;
+      if (sliceDetails > 0 && sliceBytes + bytes > MAX_NATIVE_DETAIL_PREWARM_SLICE_BYTES) return true;
+
+      state.pendingDetailIndex += 1;
+      state.sourceBytes += bytes;
+      sliceDetails += 1;
+      sliceBytes += bytes;
+      try {
+        internalPrewarmOhmNativeToolDetail(
+          detail,
+          state.columns,
+          state.codeBlockIndent,
+          this.#nativeToolDetailCache,
+        );
+      } catch {
+        // Idle warming is an optional optimization; normal rendering remains authoritative.
+      }
+    }
+    return false;
+  }
+
+  #scheduleNativeToolDetailPrewarm(
+    entries: readonly TranscriptEntry[],
+    columns: number,
+    toolRenderBlocks: ReadonlyMap<string, ToolRenderSlots>,
+    sessionRenderBlocks: ReadonlyMap<string, RuntimeUiBlock>,
+  ): void {
+    const generation = this.#renderGeneration;
+    if (entries.length === 0 || !this.#nativeToolDetailPrewarmAllowed(generation)) return;
+    if (this.#nativeToolDetailPrewarmSessionOwner !== this.#sessionRenderers) {
+      this.#nativeToolDetailPrewarmSessionOwner = this.#sessionRenderers;
+      this.#nativeToolDetailPrewarmSessionRevision += 1;
+    }
+    const selectedColumns = Math.max(1, columns);
+    const key = JSON.stringify([
+      this.#transcriptLayoutRevision,
+      selectedColumns,
+      this.#codeBlockIndent,
+      this.#nativeToolDetailPrewarmSessionRevision,
+      toolRenderBlocks.size,
+      sessionRenderBlocks.size,
+    ]);
+    if (this.#nativeToolDetailPrewarmCompletedKey === key) return;
+    this.#nativeToolDetailPrewarmCompletedKey = undefined;
+    const state: NativeToolDetailPrewarmState = {
+      key,
+      entries,
+      columns: selectedColumns,
+      codeBlockIndent: this.#codeBlockIndent,
+      toolRenderBlocks,
+      sessionRenderBlocks,
+      index: entries.length - 1,
+      pendingDetails: undefined,
+      pendingDetailIndex: 0,
+      scannedEntries: 0,
+      sourceBytes: 0,
+    };
+    const run = (): void => {
+      this.#nativeToolDetailPrewarm = undefined;
+      if (!this.#nativeToolDetailPrewarmAllowed(generation)) return;
+      let more = false;
+      try {
+        more = this.#prewarmNativeToolDetails(state);
+      } catch {
+        return;
+      }
+      if (!more) {
+        this.#nativeToolDetailPrewarmCompletedKey = state.key;
+        return;
+      }
+      if (!this.#nativeToolDetailPrewarmAllowed(generation)) return;
+      this.#nativeToolDetailPrewarm = setImmediate(run);
+      this.#nativeToolDetailPrewarm.unref();
+    };
+    this.#nativeToolDetailPrewarm = setImmediate(run);
+    this.#nativeToolDetailPrewarm.unref();
+  }
+
   renderNow(): void {
+    this.#cancelNativeToolDetailPrewarm();
     if (!this.#started || this.#closed || this.#suspended || this.#secretAbort !== undefined || this.#externalEditing || this.mode !== "full") return;
     this.#renderGeneration += 1;
     if (this.#streamingRender !== undefined) clearImmediate(this.#streamingRender);
@@ -6483,6 +6963,7 @@ export class TuiController {
         outputPad: this.#outputPad,
         codeBlockIndent: this.#codeBlockIndent,
         transcriptRevision: this.#transcriptLayoutRevision,
+        [INTERNAL_TUI_TOOL_DETAIL_CACHE]: this.#nativeToolDetailCache,
       });
       if (projected === undefined) {
         throw new Error("TUI frame projector returned no frame");
@@ -6612,10 +7093,21 @@ export class TuiController {
       : { ...frame, text: this.#alternateInteraction.decorateFrame(frame.text) };
     const update = this.#surface.render(selectedFrame, size);
     if (update.output !== "") this.#write(`${HIDE_CURSOR}${update.output}${this.#showHardwareCursor ? SHOW_CURSOR : HIDE_CURSOR}`);
+    if (frame.transcriptNavigation !== undefined) {
+      const scrollbarReserved = this.#fullscreenScrollbar === "always"
+        || frame.transcriptNavigation.pointerRegion?.scrollbar !== undefined;
+      this.#scheduleNativeToolDetailPrewarm(
+        transcript,
+        size.columns - (scrollbarReserved ? 1 : 0),
+        toolRenderBlocks,
+        sessionRenderBlocks,
+      );
+    }
   }
 
   close(): void {
     if (this.#closed || this.#closing) return;
+    this.#cancelNativeToolDetailPrewarm();
     if (this.mode === "full") this.#flushDeferredToolStream();
     this.#clearPendingActiveMessages();
     this.#acceptedToolProgressSequences.clear();
@@ -6641,6 +7133,9 @@ export class TuiController {
       this.#disposeToolRenderers(this.#toolRenderers);
     }
     this.#toolRenderers = undefined;
+    this.#clearToolRenderBlocks();
+    this.#nativeToolDetailCache.clear();
+    this.#frameProjector?.[INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]?.();
     if (this.#sessionRenderers !== undefined) this.#sessionRenderers.signal.removeEventListener("abort", this.#sessionRenderers.onAbort);
     this.#sessionRenderers = undefined;
     if (this.#editorRenderer !== undefined) this.#editorRenderer.signal.removeEventListener("abort", this.#editorRenderer.onAbort);
@@ -6786,6 +7281,7 @@ export class TuiController {
 
   #leaveTerminalSurface(): void {
     if (this.mode !== "full") return;
+    this.#cancelNativeToolDetailPrewarm();
     this.#flushDeferredToolStream();
     if (this.#streamingRender !== undefined) clearImmediate(this.#streamingRender);
     this.#streamingRender = undefined;
@@ -6905,6 +7401,7 @@ export class TuiController {
   }
 
   #scheduleRender(): void {
+    this.#cancelNativeToolDetailPrewarm();
     if (this.#streamingRender !== undefined || this.#streamingRenderTimer !== undefined) {
       if (this.#streamingRender !== undefined) clearImmediate(this.#streamingRender);
       this.#streamingRender = undefined;
@@ -6926,6 +7423,7 @@ export class TuiController {
   }
 
   #scheduleStreamingRender(): void {
+    this.#cancelNativeToolDetailPrewarm();
     if (this.mode !== "full" || !this.#started || this.#closed || this.#suspended || this.#secretAbort !== undefined || this.#externalEditing) return;
     this.#streamingUpdatePending = true;
     if (this.#renderScheduled) return;

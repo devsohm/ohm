@@ -135,6 +135,18 @@ test("native renderer renders the exact narrow frame without overflowing", () =>
   for (const line of frame.split("\n")) assert.ok(line.length <= 12, line);
 });
 
+test("cache hit telemetry renders without aggregate cache counters", () => {
+  const snapshot: OhmTuiSnapshot = {
+    transcript: [],
+    queuedMessages: [],
+    composer: { value: "" },
+    status: { connection: "connected" },
+    telemetry: { cacheHitPercent: 0 },
+  };
+
+  assert.match(rendered(snapshot, 40), /cache hit 0\.0%/u);
+});
+
 test("notice rows render exact distinct status, warning, and error tones", () => {
   const theme = createTheme("notice-tones", { color: true, unicode: true }, {
     schemaVersion: 1,

@@ -25,26 +25,26 @@ One command detects the current x64 or arm64 platform, verifies the matching Git
 pinned runtime, and creates a per-user launcher:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
 ```
 
 Neither command needs Node.js, npm, an npm account, or the npm registry. Linux and macOS need `curl`, `tar`, and a
 SHA-256 utility. Current Windows includes the required PowerShell and `tar.exe`.
 
 For a portable manual installation, download the standalone archive for your platform from the
-[v0.1.0 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.0), verify it against `SHA256SUMS`, and
+[v0.1.1 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.1), verify it against `SHA256SUMS`, and
 extract it.
 
 ```sh
-tar -xzf ohm-v0.1.0-linux-x64.tar.gz
+tar -xzf ohm-v0.1.1-linux-x64.tar.gz
 cd /path/to/your/project
-/path/to/ohm-v0.1.0-linux-x64/bin/ohm
+/path/to/ohm-v0.1.1-linux-x64/bin/ohm
 ```
 
 Use `bin/ohm` on Linux or macOS and `bin\ohm.cmd` on Windows. The

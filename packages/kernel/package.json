@@ -1,6 +1,6 @@
 {
   "name": "@ohm/kernel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Durable runtime engine, session primitives, and execution environment for ohm",
   "type": "module",
@@ -57,7 +57,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@ohm/models": "0.1.0",
+    "@ohm/models": "0.1.1",
     "ignore": "7.0.6",
     "typebox": "1.3.17",
     "yaml": "2.9.0"

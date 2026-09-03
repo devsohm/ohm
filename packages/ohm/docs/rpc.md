@@ -76,9 +76,9 @@ Construction options are:
 | `provider`, `model` | Added as initial CLI selection arguments. |
 | `args` | Additional CLI arguments appended after the generated RPC arguments. |
 
-The public state is `started` and `pendingRequestCount`. `started` is true while the owned child is starting, running, or stopping, and false after it exits. Starting again after an exit first finishes bounded cleanup of the previous process tree. Lifecycle and observation methods are `start()`, `stop()`, `onEvent(listener)`, `respondToExtensionUi(response)`, and `getStderr()`. Every protocol command has a camel-case method: `prompt`, `steer`, `followUp`, `abort`, `clearQueue`, `newSession`, `getState`, `getRecoveryStatus`, `recoverInterruptedRun`, `setModel`, `cycleModel`, `getAvailableModels`, `setThinkingLevel`, `cycleThinkingLevel`, `getAvailableThinkingLevels`, `setSteeringMode`, `setFollowUpMode`, `compact`, `setAutoCompaction`, `setAutoRetry`, `abortRetry`, `bash`, `abortBash`, `getSessionStats`, `exportHtml`, `switchSession`, `fork`, `clone`, `getForkMessages`, `getEntries`, `getEntriesPage`, `getTree`, `getTreePage`, `getLastAssistantText`, `setSessionName`, `getMessages`, `getMessagesPage`, and `getCommands`.
+The public state is `started` and `pendingRequestCount`. `started` is true while the owned child is starting, running, or stopping, and false after it exits. Starting again after an exit first finishes bounded cleanup of the previous process tree. Lifecycle and observation methods are `start()`, `stop()`, `onEvent(listener)`, `respondToExtensionUi(response)`, and `getStderr()`. Every protocol command has a camel-case method, including `listPortablePresentations`, `invokePortablePresentationAction`, `listExtensionWireServices`, and `invokeExtensionWireService`; the existing prompt, queue, model, session, shell, history, and recovery methods retain their current contracts.
 
-`onEvent()` receives the exact `RpcStreamEvent` union: `AgentSessionEvent`, `RpcBashExecutionUpdate`, `RpcExtensionUiRequest`, or `RpcExtensionErrorEvent`.
+`onEvent()` receives the exact `RpcStreamEvent` union: `AgentSessionEvent`, `RpcBashExecutionUpdate`, `RpcExtensionUiRequest`, `RpcExtensionErrorEvent`, or `PortablePresentationEvent`.
 
 The event helpers are `waitForIdle(timeout?)`, `collectEvents(timeout?)`, and `promptAndWait(message, images?, timeout?)`. `promptAndWait()` subscribes before sending the prompt, so it cannot miss a fast completion. All three settle on the raw `agent_settled` event, after terminal cleanup and queued work have finished; their default timeout is 60 seconds. At most 256 event waiters may be active. A collection retains at most 4,096 records or 32 MiB of wire records; use `onEvent()` to consume a larger stream incrementally.
 
@@ -222,6 +222,26 @@ not require a result. Verify external state before sending any resolution.
 ### Discoverable commands
 
 `get_commands` returns `{ commands }` containing extension commands, prompt templates, and skills. Each record is `{ name, description?, source, sourceInfo }`, where `source` is `extension`, `prompt`, or `skill` and `sourceInfo` contains `path`, `source`, `scope`, `origin`, and optional `baseDir`.
+
+### Portable presentations and extension wire services
+
+`get_portable_presentations` returns the bounded current `show` snapshot for
+late clients. Subsequent `portable_presentation` events carry `show` updates
+or removals; an initial snapshot and an identical live event are emitted once.
+`presentation_action` accepts the exact versioned owner, presentation ID,
+revision, action ID, and JSON input record and returns the bounded JSON result.
+The complete retained presentation snapshot is capped at 8 MiB, below the RPC
+record ceiling, and admission fails rather than truncating a snapshot.
+
+`get_extension_wire_services` returns the generation-owned catalog. Each
+descriptor includes owner, name, service version, detached request and response
+JSON schemas, and request/response byte limits. `extension_wire_request` wraps
+the versioned service envelope in its `request` field. The broker validates the
+envelope and schema before dispatch. Handler failures return a generic bounded
+message; extension exception details are not sent over the wire. Catalogs are
+limited to 256 entries and 2 MiB, individual schemas to 64 KiB, and payloads to
+1 MiB. Generation replacement cancels its endpoints; the RPC connection has no
+separate per-wire-call cancellation command.
 
 ## Raw events
 

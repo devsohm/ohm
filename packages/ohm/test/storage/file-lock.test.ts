@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { withFileLock } from "../../src/storage/file-lock.js";
+import { tryWithFileLockSync, withFileLock } from "../../src/storage/file-lock.js";
 
 const MAX_CONTROL_FILE_BYTES = 4 * 1024;
 const STALE_TOKEN = "00000000-0000-4000-8000-000000000001";
@@ -124,6 +124,55 @@ test("asynchronous file locks serialize operations and clean up", async (context
   await Promise.all([first, second]);
   assert.deepEqual(order, ["first-enter", "first-exit", "second-enter"]);
   await assert.rejects(stat(`${value.target}.lock`), { code: "ENOENT" });
+});
+
+test("a synchronous lock attempt defers to a live asynchronous owner", async (context) => {
+  const value = await fixture(context);
+  let releaseHolder!: () => void;
+  const holderGate = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  let holderEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { holderEntered = resolve; });
+  const holder = withFileLock(value.target, async () => {
+    holderEntered();
+    await holderGate;
+  });
+  await entered;
+
+  let operationRan = false;
+  assert.deepEqual(tryWithFileLockSync(value.target, () => { operationRan = true; }), { acquired: false });
+  assert.equal(operationRan, false);
+
+  releaseHolder();
+  await holder;
+  assert.deepEqual(tryWithFileLockSync(value.target, () => "acquired"), {
+    acquired: true,
+    value: "acquired",
+  });
+  await assert.rejects(stat(`${value.target}.lock`), { code: "ENOENT" });
+});
+
+test("a synchronous lock attempt reclaims dead and stale incomplete owners", async (context) => {
+  const value = await fixture(context);
+  const deadTarget = `${value.target}-dead`;
+  const deadLock = `${deadTarget}.lock`;
+  await mkdir(deadLock);
+  await writeLockControls(deadLock, STALE_TOKEN, STALE_TOKEN, "999999999");
+  assert.deepEqual(tryWithFileLockSync(deadTarget, () => "dead-reclaimed"), {
+    acquired: true,
+    value: "dead-reclaimed",
+  });
+
+  const incompleteTarget = `${value.target}-incomplete`;
+  const incompleteLock = `${incompleteTarget}.lock`;
+  await mkdir(incompleteLock);
+  await writeFile(join(incompleteLock, `claim-${STALE_TOKEN}`), STALE_TOKEN);
+  assert.deepEqual(tryWithFileLockSync(incompleteTarget, () => "too-early"), { acquired: false });
+  const stale = new Date(Date.now() - 60_000);
+  await utimes(incompleteLock, stale, stale);
+  assert.deepEqual(tryWithFileLockSync(incompleteTarget, () => "stale-reclaimed"), {
+    acquired: true,
+    value: "stale-reclaimed",
+  });
 });
 
 test("an asynchronous waiter observes cancellation while a live lock is contended", async (context) => {

@@ -128,9 +128,12 @@ if (enabled) {
   await writeFile(join(prefix, "node_modules", ".bin", "fixture"), "managed package binary");
 }
 const destination = join(prefix, "node_modules", manifest.name);
+const dependency = join(prefix, "node_modules", "fixture-dependency");
 await rm(destination, { recursive: true, force: true });
 await mkdir(join(prefix, "node_modules"), { recursive: true });
 await cp(sourceDirectory, destination, { recursive: true });
+await mkdir(dependency, { recursive: true });
+await writeFile(join(dependency, "package.json"), JSON.stringify({ name: "fixture-dependency", version: manifest.version }));
 `);
   await writeFile(join(agentDirectory, "config.json"), JSON.stringify({
     npmCommand: [process.execPath, fakeNpm, capture, lifecycleMarker, sourceDirectory],

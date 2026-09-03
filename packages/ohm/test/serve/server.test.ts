@@ -1,13 +1,34 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { EventEnvelope } from "../../src/core/events.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
+import { loadDirectExtensions } from "../../src/extensions/runtime.js";
+import {
+  EXTENSION_WIRE_SERVICE_LIMITS,
+  type ExtensionWireServiceDescriptor,
+  type ExtensionWireServiceRequest,
+  type ExtensionWireServiceResponse,
+} from "../../src/extensions/wire-services.js";
+import { REPLICATED_JSON_STATE_LIMITS } from "../../src/extensions/replicated-state.js";
+import {
+  PORTABLE_PRESENTATION_LIMITS,
+  type PortablePresentationActionRequest,
+  type PortablePresentationActionResult,
+  type PortablePresentationEvent,
+} from "../../src/interfaces/portable-presentation.js";
+import { ProviderRegistry } from "../../src/providers/registry.js";
 import type {
   AgentSessionRecoveryOptions,
   AgentSessionRecoveryResult,
   AgentSessionSuspendedRun,
 } from "../../src/service/agent-session.js";
+import { AgentSession } from "../../src/service/agent-session.js";
+import { SessionManager } from "../../src/storage/session-manager.js";
 import {
   assertValidServeToken,
   startServeServer,
@@ -45,11 +66,26 @@ class FakeSession implements ServeSessionRuntime {
     options: Parameters<ServeSessionRuntime["prompt"]>[1],
   ) => void | Promise<void>) | undefined;
   readonly recoveryCalls: AgentSessionRecoveryOptions[] = [];
+  readonly wireRequests: ExtensionWireServiceRequest[] = [];
+  readonly presentationActions: PortablePresentationActionRequest[] = [];
+  readonly presentations: PortablePresentationEvent[] = [];
+  readonly wireServices: ExtensionWireServiceDescriptor[] = [{
+    protocolVersion: 1,
+    name: "fixture.echo",
+    version: 1,
+    owner: "fixture.extension",
+    requestSchema: { type: "object" },
+    responseSchema: { type: "object" },
+    maxRequestBytes: 1024,
+    maxResponseBytes: 2048,
+  }];
   recoveryResult: AgentSessionRecoveryResult = { recovered: false, blocked: [] };
+  portablePresentationsReady = false;
   startCalls = 0;
   startHandler: ((signal: AbortSignal) => void | Promise<void>) | undefined;
   suspendedRun: AgentSessionSuspendedRun | undefined;
   readonly #listeners = new Set<(event: EventEnvelope) => void | Promise<void>>();
+  readonly #presentationListeners = new Set<(event: PortablePresentationEvent) => void>();
 
   constructor(
     readonly sessionId: string,
@@ -68,6 +104,52 @@ class FakeSession implements ServeSessionRuntime {
   onEvent(listener: (event: EventEnvelope) => void | Promise<void>): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  onPortablePresentation(listener: (event: PortablePresentationEvent) => void): () => void {
+    if (!this.portablePresentationsReady) return () => undefined;
+    this.#presentationListeners.add(listener);
+    return () => this.#presentationListeners.delete(listener);
+  }
+
+  listPortablePresentations(): readonly PortablePresentationEvent[] {
+    return this.portablePresentationsReady ? this.presentations : [];
+  }
+
+  listExtensionWireServices(): readonly ExtensionWireServiceDescriptor[] {
+    return this.wireServices;
+  }
+
+  async invokeExtensionWireService(
+    request: ExtensionWireServiceRequest,
+    signal?: AbortSignal,
+  ): Promise<ExtensionWireServiceResponse> {
+    signal?.throwIfAborted();
+    this.wireRequests.push(request);
+    return {
+      protocolVersion: 1,
+      service: request.service,
+      serviceVersion: request.serviceVersion,
+      id: request.id,
+      ok: true,
+      payload: request.payload,
+    };
+  }
+
+  async invokePortablePresentationAction(
+    request: PortablePresentationActionRequest,
+    signal?: AbortSignal,
+  ): Promise<PortablePresentationActionResult> {
+    signal?.throwIfAborted();
+    this.presentationActions.push(request);
+    return {
+      protocolVersion: request.protocolVersion,
+      owner: request.owner,
+      presentationId: request.presentationId,
+      revision: request.revision,
+      actionId: request.actionId,
+      result: { accepted: true },
+    };
   }
 
   async prompt(
@@ -112,6 +194,7 @@ class FakeSession implements ServeSessionRuntime {
 
   async start(signal: AbortSignal): Promise<void> {
     this.startCalls += 1;
+    this.portablePresentationsReady = true;
     await this.startHandler?.(signal);
   }
 
@@ -130,6 +213,17 @@ class FakeSession implements ServeSessionRuntime {
 
   async emitEnvelope(event: EventEnvelope): Promise<void> {
     for (const listener of this.#listeners) await listener(event);
+  }
+
+  emitPresentation(event: PortablePresentationEvent): void {
+    const id = event.operation === "show" ? event.presentation.id : event.presentationId;
+    const index = this.presentations.findIndex((candidate) =>
+      candidate.operation === "show" && candidate.owner === event.owner && candidate.presentation.id === id);
+    if (event.operation === "show") {
+      if (index < 0) this.presentations.push(event);
+      else this.presentations[index] = event;
+    } else if (index >= 0) this.presentations.splice(index, 1);
+    for (const listener of this.#presentationListeners) listener(event);
   }
 }
 
@@ -242,7 +336,7 @@ test("serve closes early error connections and retains strict HTTP parsing", asy
       "Host: localhost",
       `Authorization: Bearer ${TOKEN}`,
       "Content-Type: application/json",
-      "Content-Length: 999999",
+      "Content-Length: 9999999",
       "",
       "",
     ].join("\r\n"));
@@ -293,6 +387,112 @@ test("serve rejects oversized and non-JSON request bodies", async () => {
       body: "{}",
     });
     assert.equal(wrongType.status, 415);
+  });
+});
+
+test("serve default request admission covers advertised action, wire, and state payload limits", async () => {
+  const session = new FakeSession("request-limits");
+  const server = await startServeServer({
+    token: TOKEN,
+    sessionFactory: {
+      async create() { return session; },
+      async open() { return undefined; },
+    },
+  });
+  await closeAfter(server, async () => {
+    const created = await fetch(`${server.origin}/v1/sessions`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: "{}",
+    });
+    assert.equal(created.status, 201);
+
+    const wirePayload = "w".repeat(EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes - 2);
+    assert.equal(
+      Buffer.byteLength(JSON.stringify(wirePayload), "utf8"),
+      EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+    );
+    const wireRequest: ExtensionWireServiceRequest = {
+      protocolVersion: 1,
+      service: `s${"x".repeat(95)}`,
+      serviceVersion: Number.MAX_SAFE_INTEGER,
+      id: `i${"x".repeat(127)}`,
+      payload: wirePayload,
+    };
+    const wireBody = JSON.stringify(wireRequest);
+    assert.ok(Buffer.byteLength(wireBody, "utf8") > EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes);
+    const wire = await fetch(`${server.origin}/v1/sessions/request-limits/wire-services`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: wireBody,
+    });
+    assert.equal(wire.status, 200);
+    await wire.arrayBuffer();
+
+    const actionInput = "a".repeat(PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes - 2);
+    assert.equal(
+      Buffer.byteLength(JSON.stringify(actionInput), "utf8"),
+      PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes,
+    );
+    const action: PortablePresentationActionRequest = {
+      protocolVersion: 1,
+      owner: `o${"x".repeat(255)}`,
+      presentationId: `p${"x".repeat(127)}`,
+      revision: Number.MAX_SAFE_INTEGER,
+      actionId: `a${"x".repeat(127)}`,
+      input: actionInput,
+    };
+    const acted = await fetch(`${server.origin}/v1/sessions/request-limits/presentation-actions`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: JSON.stringify(action),
+    });
+    assert.equal(acted.status, 200);
+    await acted.arrayBuffer();
+
+    const emptyDelta = {
+      protocolVersion: 1,
+      baseRevision: 0,
+      revision: 1,
+      operations: [{ type: "replace", value: "" }],
+    } as const;
+    const stateValue = "s".repeat(
+      REPLICATED_JSON_STATE_LIMITS.maxDeltaBytes
+        - Buffer.byteLength(JSON.stringify(emptyDelta), "utf8"),
+    );
+    const delta = {
+      ...emptyDelta,
+      operations: [{ type: "replace", value: stateValue }],
+    } as const;
+    assert.equal(
+      Buffer.byteLength(JSON.stringify(delta), "utf8"),
+      REPLICATED_JSON_STATE_LIMITS.maxDeltaBytes,
+    );
+    const state = await fetch(`${server.origin}/v1/sessions/request-limits/wire-services`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: JSON.stringify({
+        protocolVersion: 1,
+        service: "ohm.state.fixture.shared",
+        serviceVersion: 1,
+        id: "state-limit",
+        payload: { operation: "apply", delta },
+      }),
+    });
+    assert.equal(state.status, 200);
+    await state.arrayBuffer();
+
+    const beyondHeadroom = await fetch(`${server.origin}/v1/sessions/request-limits/wire-services`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: JSON.stringify({
+        ...wireRequest,
+        payload: "x".repeat(
+          EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes + 64 * 1024,
+        ),
+      }),
+    });
+    assert.equal(beyondHeadroom.status, 413);
   });
 });
 
@@ -892,6 +1092,227 @@ async function readUntil(
     await reader.cancel();
   }
 }
+
+test("serve projects portable presentations and brokers versioned extension services over HTTP", async () => {
+  const session = new FakeSession("extension-broker");
+  const presentation: PortablePresentationEvent = {
+    type: "portable_presentation",
+    protocolVersion: 1,
+    operation: "show",
+    owner: "fixture.extension",
+    presentation: {
+      protocolVersion: 1,
+      id: "status",
+      revision: 2,
+      blocks: [{ type: "text", text: "Ready" }],
+      actions: [],
+    },
+  };
+  session.presentations.push(presentation);
+  session.startHandler = () => session.emitPresentation(presentation);
+  const server = await startServeServer({
+    token: TOKEN,
+    sessionFactory: {
+      async create() { return session; },
+      async open() { return undefined; },
+    },
+  });
+  await closeAfter(server, async () => {
+    const created = await fetch(`${server.origin}/v1/sessions`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: "{}",
+    });
+    assert.equal(created.status, 201);
+
+    const catalog = await fetch(
+      `${server.origin}/v1/sessions/extension-broker/wire-services`,
+      { headers: authHeaders() },
+    );
+    assert.equal(catalog.status, 200);
+    assert.deepEqual(await catalog.json(), {
+      sessionId: "extension-broker",
+      services: session.wireServices,
+    });
+
+    const wireRequest: ExtensionWireServiceRequest = {
+      protocolVersion: 1,
+      service: "fixture.echo",
+      serviceVersion: 1,
+      id: "wire-http-1",
+      payload: { text: "hello" },
+    };
+    const invoked = await fetch(
+      `${server.origin}/v1/sessions/extension-broker/wire-services`,
+      {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify(wireRequest),
+      },
+    );
+    assert.equal(invoked.status, 200);
+    assert.deepEqual(await invoked.json(), {
+      sessionId: "extension-broker",
+      result: {
+        ...wireRequest,
+        ok: true,
+      },
+    });
+    assert.deepEqual(session.wireRequests, [wireRequest]);
+
+    const snapshot = await fetch(
+      `${server.origin}/v1/sessions/extension-broker/presentations`,
+      { headers: authHeaders() },
+    );
+    assert.equal(snapshot.status, 200);
+    assert.deepEqual(await snapshot.json(), {
+      sessionId: "extension-broker",
+      presentations: [presentation],
+    });
+    const stream = await fetch(
+      `${server.origin}/v1/sessions/extension-broker/events`,
+      { headers: authHeaders() },
+    );
+    const text = await readUntil(stream, (value) => value.includes("event: portable_presentation"));
+    assert.match(text, /event: portable_presentation/u);
+    assert.ok(text.includes(`data: ${JSON.stringify(presentation)}`));
+    assert.equal(text.match(/event: portable_presentation/gu)?.length, 1);
+
+    const action: PortablePresentationActionRequest = {
+      protocolVersion: 1,
+      owner: "fixture.extension",
+      presentationId: "status",
+      revision: 2,
+      actionId: "acknowledge",
+      input: { accepted: true },
+    };
+    const acted = await fetch(
+      `${server.origin}/v1/sessions/extension-broker/presentation-actions`,
+      {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify(action),
+      },
+    );
+    assert.equal(acted.status, 200);
+    assert.deepEqual(await acted.json(), {
+      sessionId: "extension-broker",
+      result: {
+        protocolVersion: 1,
+        owner: "fixture.extension",
+        presentationId: "status",
+        revision: 2,
+        actionId: "acknowledge",
+        result: { accepted: true },
+      },
+    });
+
+    for (const [path, body] of [
+      ["wire-services", { ...wireRequest, protocolVersion: 2 }],
+      ["presentation-actions", { ...action, unexpected: true }],
+    ] as const) {
+      const invalid = await fetch(`${server.origin}/v1/sessions/extension-broker/${path}`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify(body),
+      });
+      assert.equal(invalid.status, 400);
+    }
+  });
+});
+
+test("serve snapshots presentations created while a real AgentSession starts", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "ohm-serve-portable-session-"));
+  context.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const host = await loadDirectExtensions([], {
+    workspace,
+    mode: "serve",
+    activationFailure: "throw",
+    inlineExtensions: [{
+      name: "serve-portable-session",
+      async factory(extension) {
+        await extension.facets.register({
+          apiVersion: 1,
+          kind: "worker",
+          name: "view",
+          setup(facet) {
+            facet.presentation.show({
+              id: "real-session",
+              blocks: [{ type: "text", text: "Bound" }],
+            });
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(workspace, { id: "serve-portable" }),
+    providers: new ProviderRegistry([]),
+    settingsManager: SettingsManager.inMemory(),
+    extensionRunner: host,
+    tools: [],
+  });
+  context.after(async () => await session.close());
+  const runtime: ServeSessionRuntime = {
+    sessionId: "serve-portable",
+    summary: {
+      thinkingLevel: "off",
+      isStreaming: false,
+      isCompacting: false,
+      isRetrying: false,
+      pendingMessageCount: 0,
+      messageCount: 0,
+      toolCount: 0,
+      hasSuspendedRun: false,
+    },
+    suspendedRun: undefined,
+    onEvent(listener) { return session.onEvent(listener); },
+    onPortablePresentation(listener) { return session.onPortablePresentation(listener); },
+    listPortablePresentations() { return session.listPortablePresentations(); },
+    listExtensionWireServices() { return session.listExtensionWireServices(); },
+    async invokeExtensionWireService(request, signal) {
+      return await session.invokeExtensionWireService(request, signal);
+    },
+    async invokePortablePresentationAction(request, signal) {
+      return await session.invokePortablePresentationAction(request, signal);
+    },
+    async start(signal) { await session.bindExtensions({ mode: "serve" }, signal); },
+    async prompt(text, options) { return await session.prompt(text, options); },
+    async recoverInterruptedRun(options) { return await session.recoverInterruptedRun(options); },
+    async abort(reason) { await session.abort(reason); },
+    async close() { await session.close(); },
+  };
+  const server = await startServeServer({
+    token: TOKEN,
+    sessionFactory: {
+      async create() { return runtime; },
+      async open() { return undefined; },
+    },
+  });
+  await closeAfter(server, async () => {
+    const created = await fetch(`${server.origin}/v1/sessions`, {
+      method: "POST",
+      headers: authHeaders(true),
+      body: "{}",
+    });
+    assert.equal(created.status, 201);
+    const snapshot = await fetch(
+      `${server.origin}/v1/sessions/serve-portable/presentations`,
+      { headers: authHeaders() },
+    );
+    assert.equal(snapshot.status, 200);
+    const body = await snapshot.json() as { presentations: PortablePresentationEvent[] };
+    assert.equal(body.presentations.length, 1);
+    assert.equal(body.presentations[0]?.operation, "show");
+    assert.equal(
+      body.presentations[0]?.operation === "show"
+        ? body.presentations[0].presentation.id
+        : undefined,
+      "real-session",
+    );
+  });
+});
 
 test("serve replays retained SSE events after Last-Event-ID and reports replay gaps", async () => {
   const session = new FakeSession("events");

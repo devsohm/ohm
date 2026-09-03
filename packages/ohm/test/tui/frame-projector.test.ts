@@ -9,6 +9,7 @@ import { TuiController } from "../../src/tui/controller.js";
 import { MAX_TERMINAL_IMAGE_AGGREGATE_BYTES } from "../../src/tui/terminal-image.js";
 import {
   INTERNAL_TUI_FRAME_PROJECTOR,
+  INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
   INTERNAL_TUI_PERSISTENT_POINTER_MAP,
   INTERNAL_TUI_PERSISTENT_POINTER_SOURCE,
   type InternalTuiControllerOptions,
@@ -17,6 +18,7 @@ import {
   type TuiPersistentPointerBlock,
   type TuiPersistentPointerMap,
 } from "../../src/tui/frame-projector.js";
+import { internalToolRenderEntryKey } from "../../src/tui/layout.js";
 import type { TuiControllerOptions, TuiViewState } from "../../src/tui/types.js";
 import { createTheme } from "../../src/tui/theme.js";
 import { stripAnsi } from "../../src/tui/unicode.js";
@@ -273,6 +275,20 @@ function request(view: TuiViewState, overrides: Partial<TuiFrameProjectionReques
     ...overrides,
   };
 }
+
+test("the rich projector hides cache hit telemetry while compaction is active", async () => {
+  const { projectRichTuiFrame } = await richFrameProjector();
+  const view = baseView();
+  view.context = {
+    ...view.context,
+    active: true,
+    activity: { phase: "Compacting context", startedAt: Date.now(), cancellable: true },
+  };
+  view.usage = { ...view.usage!, latestCacheHitRate: 0 };
+
+  const frame = projectRichTuiFrame(request(view));
+  assert.doesNotMatch(stripAnsi(frame?.text ?? ""), /cache hit/u);
+});
 
 test("the rich projector preserves user color, cursor geometry, telemetry, and explicit fallbacks", async () => {
   const { projectRichTuiFrame } = await richFrameProjector();
@@ -973,6 +989,488 @@ test("the retained native projector windows a bounded transcript without changin
   assert.match(stripAnsi(retained(tail).text), /updated-live-tail/u);
 });
 
+test("retained completed tools reuse both explicit global expansion variants", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  let detailReads = 0;
+  const tool = (expanded: boolean): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: "global-tool-layout",
+      callId: "global-tool-layout",
+      kind: "tool",
+      title: "read",
+      status: "completed",
+      expanded,
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        detailReads += 1;
+        return Array.from({ length: 20 }, (_, index) => `global-tool-detail-${index + 1}`).join("\n");
+      },
+    });
+    return entry;
+  };
+  const collapsed = request({ ...baseView(), transcript: [tool(false)] }, {
+    size: { columns: 60, rows: 80 },
+    transcriptRevision: 1,
+    toolDetailsExpanded: false,
+    transcriptOptions: { expandKeyHint: "Ctrl+O" },
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  const firstCollapsed = stripAnsi(projector(collapsed).text);
+  const collapsedReads = detailReads;
+  assert.ok(collapsedReads > 0);
+  assert.doesNotMatch(firstCollapsed, /global-tool-detail-20/u);
+
+  const expanded = {
+    ...collapsed,
+    transcriptRevision: 2,
+    toolDetailsExpanded: true,
+    view: { ...collapsed.view, transcript: [tool(true)] },
+  };
+  const firstExpanded = stripAnsi(projector(expanded).text);
+  const expandedReads = detailReads;
+  assert.ok(expandedReads > collapsedReads);
+  assert.match(firstExpanded, /global-tool-detail-20/u);
+
+  assert.doesNotMatch(stripAnsi(projector({
+    ...collapsed,
+    transcriptRevision: 3,
+    view: { ...collapsed.view, transcript: [tool(false)] },
+  }).text), /global-tool-detail-20/u);
+  assert.equal(detailReads, expandedReads, "collapsing re-rendered the retained completed tool");
+
+  assert.match(stripAnsi(projector({
+    ...expanded,
+    transcriptRevision: 4,
+    view: { ...expanded.view, transcript: [tool(true)] },
+  }).text), /global-tool-detail-20/u);
+  assert.equal(detailReads, expandedReads, "re-expanding re-rendered the retained completed tool");
+
+  projector[INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]?.();
+  projector({
+    ...collapsed,
+    transcriptRevision: 5,
+    view: { ...collapsed.view, transcript: [tool(false)] },
+  });
+  assert.ok(detailReads > expandedReads, "clearing the retained projector kept prior transcript renders");
+});
+
+test("a near-budget Ctrl+O expansion preserves the collapsed render working set", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  const theme = createTheme("mono", { color: false, unicode: true });
+  const detail = Array.from(
+    { length: 120 },
+    (_, index) => `near-budget-detail-${index + 1} ${"x".repeat(445)}`,
+  ).join("\n");
+  let detailReads = 0;
+  const transcript = (expanded: boolean): TuiViewState["transcript"] => Array.from(
+    { length: 145 },
+    (_, index) => {
+      const entry: TuiViewState["transcript"][number] = {
+        id: `near-budget-tool-${index}`,
+        callId: `near-budget-tool-${index}`,
+        kind: "tool",
+        title: "read",
+        status: "completed",
+        expanded,
+        text: "",
+      };
+      Object.defineProperty(entry, "text", {
+        enumerable: false,
+        get() {
+          detailReads += 1;
+          return detail;
+        },
+      });
+      return entry;
+    },
+  );
+  const collapsed = request({ ...baseView(), transcript: transcript(false) }, {
+    size: { columns: 500, rows: 40 },
+    theme,
+    themeName: "mono",
+    color: false,
+    transcriptRevision: 1,
+    toolDetailsExpanded: false,
+    transcriptOptions: { expandKeyHint: "Ctrl+O" },
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  projector(collapsed);
+  const collapsedReads = detailReads;
+  assert.ok(collapsedReads > 0);
+
+  const expanded = {
+    ...collapsed,
+    transcriptRevision: 2,
+    toolDetailsExpanded: true,
+    view: { ...collapsed.view, transcript: transcript(true) },
+  };
+  projector(expanded);
+  const expandedReads = detailReads;
+  assert.ok(expandedReads > collapsedReads);
+
+  projector({
+    ...collapsed,
+    transcriptRevision: 3,
+    view: { ...collapsed.view, transcript: transcript(false) },
+  });
+  assert.equal(detailReads, expandedReads, "near-budget expansion evicted the collapsed working set");
+
+  projector({
+    ...expanded,
+    transcriptRevision: 4,
+    view: { ...expanded.view, transcript: transcript(true) },
+  });
+  assert.ok(detailReads > expandedReads, "fixture did not reach the retained render cache budget");
+  const saturatedReads = detailReads;
+  const appendedTool = (): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: "near-budget-appended-tool",
+      callId: "near-budget-appended-tool",
+      kind: "tool",
+      title: "read",
+      status: "completed",
+      expanded: true,
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        detailReads += 1;
+        return detail;
+      },
+    });
+    return entry;
+  };
+  const appended = (): TuiViewState["transcript"] => [
+    ...transcript(true),
+    appendedTool(),
+  ];
+
+  projector({
+    ...expanded,
+    transcriptRevision: 5,
+    view: { ...expanded.view, transcript: appended() },
+  });
+  const appendedReads = detailReads;
+  assert.ok(appendedReads > saturatedReads);
+  projector({
+    ...expanded,
+    transcriptRevision: 6,
+    view: { ...expanded.view, transcript: transcript(true) },
+  });
+  assert.equal(detailReads, appendedReads);
+  projector({
+    ...expanded,
+    transcriptRevision: 7,
+    view: { ...expanded.view, transcript: appended() },
+  });
+  assert.equal(
+    detailReads,
+    appendedReads,
+    "a newly appended key was starved after retained render cache saturation",
+  );
+});
+
+test("tool-tail expansion retains unrelated history and both completed variants", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  let historyReads = 0;
+  let toolReads = 0;
+  const history = Array.from({ length: 64 }, (_, index): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: `unrelated-global-tool-${index}`,
+      kind: "status",
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        historyReads += 1;
+        return `unrelated retained history ${index}`;
+      },
+    });
+    return entry;
+  });
+  const tail = (expanded: boolean): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: "unrelated-global-tool-tail",
+      callId: "unrelated-global-tool-tail",
+      kind: "tool",
+      title: "read",
+      status: "completed",
+      expanded,
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        toolReads += 1;
+        return Array.from({ length: 20 }, (_, index) => `tool-tail-detail-${index + 1}`).join("\n");
+      },
+    });
+    return entry;
+  };
+  const collapsed = request({ ...baseView(), transcript: [...history, tail(false)] }, {
+    size: { columns: 60, rows: 80 },
+    transcriptRevision: 1,
+    toolDetailsExpanded: false,
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  projector(collapsed);
+  const initialReads = historyReads;
+  const collapsedToolReads = toolReads;
+  assert.ok(initialReads > 0);
+  assert.ok(collapsedToolReads > 0);
+
+  const expanded = {
+    ...collapsed,
+    transcriptRevision: 2,
+    toolDetailsExpanded: true,
+    view: { ...collapsed.view, transcript: [...history, tail(true)] },
+  };
+  projector(expanded);
+  const expandedToolReads = toolReads;
+  assert.ok(expandedToolReads > collapsedToolReads);
+  assert.equal(historyReads, initialReads, "expanding the tool tail re-rendered unrelated history");
+
+  projector({
+    ...collapsed,
+    transcriptRevision: 3,
+    view: { ...collapsed.view, transcript: [...history, tail(false)] },
+  });
+  assert.equal(historyReads, initialReads, "collapsing the tool tail re-rendered unrelated history");
+  assert.equal(toolReads, expandedToolReads, "collapsing missed the completed tool variant cache");
+
+  projector({
+    ...expanded,
+    transcriptRevision: 4,
+    view: { ...expanded.view, transcript: [...history, tail(true)] },
+  });
+  assert.equal(historyReads, initialReads, "re-expanding the tool tail re-rendered unrelated history");
+  assert.equal(toolReads, expandedToolReads, "re-expanding missed the completed tool variant cache");
+});
+
+test("tool-prefix expansion retains the stable suffix and both completed variants", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  let historyReads = 0;
+  let toolReads = 0;
+  const history = Array.from({ length: 64 }, (_, index): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: `tool-prefix-history-${index}`,
+      kind: "status",
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        historyReads += 1;
+        return `stable suffix history ${index}`;
+      },
+    });
+    return entry;
+  });
+  const tool = (expanded: boolean): TuiViewState["transcript"][number] => {
+    const entry: TuiViewState["transcript"][number] = {
+      id: "tool-prefix",
+      callId: "tool-prefix",
+      kind: "tool",
+      title: "read",
+      status: "completed",
+      expanded,
+      text: "",
+    };
+    Object.defineProperty(entry, "text", {
+      enumerable: false,
+      get() {
+        toolReads += 1;
+        return Array.from({ length: 20 }, (_, index) => `tool-prefix-detail-${index + 1}`).join("\n");
+      },
+    });
+    return entry;
+  };
+  const collapsed = request({ ...baseView(), transcript: [tool(false), ...history] }, {
+    size: { columns: 60, rows: 80 },
+    transcriptRevision: 1,
+    toolDetailsExpanded: false,
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  projector(collapsed);
+  const initialReads = historyReads;
+  const collapsedToolReads = toolReads;
+  assert.ok(initialReads > 0);
+  assert.ok(collapsedToolReads > 0);
+
+  const expanded = {
+    ...collapsed,
+    transcriptRevision: 2,
+    toolDetailsExpanded: true,
+    view: { ...collapsed.view, transcript: [tool(true), ...history] },
+  };
+  projector(expanded);
+  const expandedToolReads = toolReads;
+  assert.ok(expandedToolReads > collapsedToolReads);
+  assert.equal(historyReads, initialReads, "expanding the tool prefix re-rendered the stable suffix");
+
+  projector({
+    ...collapsed,
+    transcriptRevision: 3,
+    view: { ...collapsed.view, transcript: [tool(false), ...history] },
+  });
+  assert.equal(historyReads, initialReads, "collapsing the tool prefix re-rendered the stable suffix");
+  assert.equal(toolReads, expandedToolReads, "collapsing missed the completed tool variant cache");
+
+  projector({
+    ...expanded,
+    transcriptRevision: 4,
+    view: { ...expanded.view, transcript: [tool(true), ...history] },
+  });
+  assert.equal(historyReads, initialReads, "re-expanding the tool prefix re-rendered the stable suffix");
+  assert.equal(toolReads, expandedToolReads, "re-expanding missed the completed tool variant cache");
+});
+
+test("retained Markdown transforms sample once per relevant chunk and replay the sampled output", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  let pass = 1;
+  const calls: Array<{
+    pass: number;
+    input: string;
+    messageType: "user" | "assistant" | "assistant-thinking";
+    isStreaming: boolean;
+    availableWidth: number;
+  }> = [];
+  const projection = request({
+    ...baseView(),
+    transcript: [{
+      id: "transform-user",
+      kind: "user",
+      text: "user source",
+    }, {
+      id: "transform-assistant-one",
+      kind: "assistant",
+      text: "same assistant source",
+    }, {
+      id: "transform-assistant-two",
+      kind: "assistant",
+      text: "same assistant source",
+    }, {
+      id: "transform-reasoning-one",
+      kind: "reasoning",
+      text: "thought one",
+      sourceMessageId: "transform-reasoning-source",
+    }, {
+      id: "transform-reasoning-two",
+      kind: "reasoning",
+      text: "thought two",
+      sourceMessageId: "transform-reasoning-source",
+    }, {
+      id: "transform-empty",
+      kind: "assistant",
+      text: "",
+    }, {
+      id: "transform-tool",
+      kind: "tool",
+      title: "read",
+      status: "completed",
+      text: "done",
+    }],
+  }, {
+    size: { columns: 60, rows: 100 },
+    thinkingExpanded: true,
+    transcriptRevision: 1,
+    transcriptOptions: {
+      outputPad: 1,
+      transformMarkdown: (input, context) => {
+        const ordinal = calls.filter((call) => call.pass === pass).length + 1;
+        calls.push({ pass, input, ...context });
+        return input === "user source" ? "**stable-user**" : `**frame-${pass}-call-${ordinal}**`;
+      },
+    },
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  const first = stripAnsi(projector(projection).text);
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls, [{
+    pass: 1,
+    input: "user source",
+    messageType: "user",
+    isStreaming: false,
+    availableWidth: 58,
+  }, {
+    pass: 1,
+    input: "same assistant source",
+    messageType: "assistant",
+    isStreaming: false,
+    availableWidth: 58,
+  }, {
+    pass: 1,
+    input: "same assistant source",
+    messageType: "assistant",
+    isStreaming: false,
+    availableWidth: 58,
+  }, {
+    pass: 1,
+    input: "thought one\n\nthought two",
+    messageType: "assistant-thinking",
+    isStreaming: false,
+    availableWidth: 58,
+  }]);
+  assert.match(first, /stable-user[\s\S]*frame-1-call-2[\s\S]*frame-1-call-3[\s\S]*frame-1-call-4/u);
+
+  pass = 2;
+  const second = stripAnsi(projector(projection).text);
+  assert.equal(calls.length, 8);
+  assert.deepEqual(calls.slice(4).map((call) => call.pass), [2, 2, 2, 2]);
+  assert.match(second, /stable-user[\s\S]*frame-2-call-2[\s\S]*frame-2-call-3[\s\S]*frame-2-call-4/u);
+  assert.doesNotMatch(second, /frame-1-call/u);
+});
+
+test("oversized aggregate Markdown transforms stay single-sampled and bypass retained projection caches", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  const largeHiddenOutput = `<!--${"x".repeat(4 * 1024 * 1024 + 1_024)}-->`;
+  let pass = 1;
+  const calls: Array<{ pass: number; ordinal: number; input: string }> = [];
+  const projection = request({
+    ...baseView(),
+    transcript: Array.from({ length: 4 }, (_, index) => ({
+      id: `aggregate-transform-${index}`,
+      kind: "assistant" as const,
+      text: `aggregate source ${index + 1}`,
+    })),
+  }, {
+    size: { columns: 60, rows: 40 },
+    transcriptRevision: 1,
+    transcriptOptions: {
+      transformMarkdown: (input) => {
+        const ordinal = calls.filter((call) => call.pass === pass).length + 1;
+        calls.push({ pass, ordinal, input });
+        return ordinal <= 2 ? largeHiddenOutput : `**aggregate-frame-${pass}-call-${ordinal}**`;
+      },
+    },
+  });
+  const projector = internalCreateRichTuiFrameProjector();
+
+  const first = stripAnsi(projector(projection).text);
+  assert.deepEqual(calls.map((call) => [call.pass, call.ordinal]), [
+    [1, 1], [1, 2], [1, 3], [1, 4],
+  ]);
+  assert.match(first, /aggregate-frame-1-call-3[\s\S]*aggregate-frame-1-call-4/u);
+
+  pass = 2;
+  const second = stripAnsi(projector(projection).text);
+  assert.deepEqual(calls.slice(4).map((call) => [call.pass, call.ordinal]), [
+    [2, 1], [2, 2], [2, 3], [2, 4],
+  ]);
+  assert.match(second, /aggregate-frame-2-call-3[\s\S]*aggregate-frame-2-call-4/u);
+  assert.doesNotMatch(second, /aggregate-frame-1/u);
+});
+
 test("the retained native projector keeps reused provider call IDs as distinct tool rows", async () => {
   const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
   const frame = internalCreateRichTuiFrameProjector()(request({
@@ -989,6 +1487,38 @@ test("the retained native projector keeps reused provider call IDs as distinct t
   }, { transcriptRevision: 1 }));
   assert.equal(stripAnsi(frame.text).match(/✓ read · done/gu)?.length, 2);
   assert.match(stripAnsi(frame.text), /first[\s\S]*second/u);
+});
+
+test("the retained projector binds reused provider call IDs to exact custom tool rows", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  const transcript: TuiViewState["transcript"] = ["first", "second"].map((summary, index) => ({
+    id: `reused-custom-row-${index}`,
+    callId: "reused-custom-provider-call",
+    kind: "tool" as const,
+    title: "custom_read",
+    status: "completed" as const,
+    summary,
+    text: summary,
+  }));
+  const frame = internalCreateRichTuiFrameProjector()(request({
+    ...baseView(),
+    transcript,
+  }, {
+    transcriptRevision: 1,
+    transcriptOptions: {
+      toolRenderBlocks: new Map(transcript.map((entry, index) => [
+        internalToolRenderEntryKey(entry.id),
+        {
+          call: { lines: [{ spans: [{ text: `custom call ${index + 1}` }] }] },
+          result: { lines: [{ spans: [{ text: `custom result ${index + 1}` }] }] },
+        },
+      ])),
+    },
+  }));
+  const text = stripAnsi(frame.text);
+  assert.match(text, /custom call 1[\s\S]*custom result 1[\s\S]*custom call 2[\s\S]*custom result 2/u);
+  assert.equal(text.match(/custom call [12]/gu)?.length, 2);
+  assert.equal(text.match(/custom result [12]/gu)?.length, 2);
 });
 
 test("the rich projector keeps built-in tool details collapsed until Ctrl+O expansion", async () => {

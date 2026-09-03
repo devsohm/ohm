@@ -98,11 +98,14 @@ export function formatCompactionUsageReceipt(usage: NormalizedUsage | undefined)
   const prompt = normalizedContextTokens(usage);
   const output = usage.outputTokens;
   const cacheHitRate = normalizedCacheHitRate(usage);
-  if (prompt === undefined && output === undefined && cacheHitRate === undefined) return undefined;
+  const reportedCacheHitRate = cacheHitRate === undefined || Math.round(cacheHitRate * 10) === 0
+    ? undefined
+    : cacheHitRate;
+  if (prompt === undefined && output === undefined && reportedCacheHitRate === undefined) return undefined;
   return [
     "summary request",
     prompt === undefined ? "prompt not reported" : `prompt ${formatUsageTokens(prompt)}`,
-    cacheHitRate === undefined ? undefined : `cache hit ${cacheHitRate.toFixed(1)}%`,
+    reportedCacheHitRate === undefined ? undefined : `cache hit ${reportedCacheHitRate.toFixed(1)}%`,
     output === undefined ? "output not reported" : `output ${formatUsageTokens(output)}`,
   ].filter((value): value is string => value !== undefined).join(" · ");
 }

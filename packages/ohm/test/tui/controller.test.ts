@@ -13,9 +13,15 @@ import type { RuntimeToolRendererBinding } from "../../src/tui/components.js";
 import { TuiController, TuiSelectionCancelledError } from "../../src/tui/controller.js";
 import {
   INTERNAL_TUI_FRAME_PROJECTOR,
+  INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
+  INTERNAL_TUI_TOOL_DETAIL_CACHE,
   type TuiFrameProjector,
 } from "../../src/tui/frame-projector.js";
 import { Keybindings } from "../../src/tui/keybindings.js";
+import {
+  internalCreateOhmNativeToolDetailCache,
+  internalPrewarmOhmNativeToolDetail,
+} from "../../src/tui/native-renderer/view.js";
 import { internalCreateRichTuiFrameProjector } from "../../src/tui/rich-frame-projector.js";
 import { parseThemeDefinition } from "../../src/tui/theme.js";
 import type {
@@ -68,6 +74,7 @@ function fullController(options: {
 } = {}) {
   const input = new FakeInput();
   const output = new FakeOutput();
+  const toolDetailCache = internalCreateOhmNativeToolDetailCache();
   const controller = new TuiController({
     input,
     output,
@@ -90,8 +97,9 @@ function fullController(options: {
     ...optionalProperties(options.keybindings === undefined ? undefined : { keybindings: options.keybindings }),
     ...optionalProperties(options.openHyperlink === undefined ? undefined : { openHyperlink: options.openHyperlink }),
     [INTERNAL_TUI_FRAME_PROJECTOR]: options.frameProjector ?? createFixtureFrameProjector(),
+    [INTERNAL_TUI_TOOL_DETAIL_CACHE]: toolDetailCache,
   });
-  return { input, output, controller };
+  return { input, output, controller, toolDetailCache };
 }
 
 function png(width = 20, height = 10): Buffer {
@@ -6122,7 +6130,7 @@ test("append-only modes report one plain compaction receipt with verified counte
     assert.equal(lines.length, 1, `${mode}: ${output.text}`);
     assert.match(
       lines[0] ?? "",
-      /^\[status\] Context compacted · 2 messages · 230,607 tokens before · summary request · prompt 29,092 · cache hit 0\.0% · output 1,359$/u,
+      /^\[status\] Context compacted · 2 messages · 230,607 tokens before · summary request · prompt 29,092 · output 1,359$/u,
     );
     assert.doesNotMatch(output.text, terminalPattern("retained summary remains private|(?:->|→)|\\u001b", "u"));
     controller.close();
@@ -7962,6 +7970,420 @@ test("runtime overlay options reject unsafe dimensions before mounting", async (
   controller.close();
 });
 
+test("custom tool renderers retain unchanged blocks and honor targeted invalidation", async (context) => {
+  const { controller } = fullController();
+  const generation = new AbortController();
+  context.after(() => {
+    generation.abort();
+    controller.close();
+  });
+  let hasChecks = 0;
+  let shellRenders = 0;
+  let callRenders = 0;
+  let resultRenders = 0;
+  let label = "initial";
+  const bridges = new Map<string, { invalidate(): void }>();
+  controller.setToolRenderers({
+    has: (name) => {
+      hasChecks += 1;
+      return name === "custom_cached";
+    },
+    renderShell: () => {
+      shellRenders += 1;
+      return "default";
+    },
+    renderCall: (_name, view, _renderContext, bridge) => {
+      callRenders += 1;
+      if (bridge !== undefined) bridges.set(view.callId, bridge);
+      return { lines: [{ spans: [{ text: `${label} call ${view.callId}` }] }] };
+    },
+    renderResult: (_name, view) => {
+      resultRenders += 1;
+      return { lines: [{ spans: [{ text: `${label} result ${view.callId}` }] }] };
+    },
+  }, generation.signal);
+  controller.start();
+  let sequence = 0;
+  for (let index = 0; index < 100; index += 1) {
+    const callId = `cached-custom-${index}`;
+    controller.render(envelope({
+      type: "tool_requested",
+      callId,
+      name: "custom_cached",
+      input: { index },
+      index,
+    }, ++sequence));
+    controller.render(envelope({
+      type: "tool_completed",
+      callId,
+      name: "custom_cached",
+      index,
+      isError: false,
+      preview: "done",
+      result: { type: "tool_result", callId, name: "custom_cached", content: "done", isError: false },
+    }, ++sequence));
+  }
+  const liveCallId = "cached-custom-live";
+  controller.render(envelope({
+    type: "tool_requested",
+    callId: liveCallId,
+    name: "custom_cached",
+    input: { live: true },
+    index: 100,
+  }, ++sequence));
+  controller.render(envelope({
+    type: "tool_started",
+    callId: liveCallId,
+    name: "custom_cached",
+    input: { live: true },
+    index: 100,
+    recoveryMode: "never_repeat",
+  }, ++sequence));
+  await tick();
+  controller.renderNow();
+
+  hasChecks = 0;
+  shellRenders = 0;
+  callRenders = 0;
+  resultRenders = 0;
+  controller.renderNow();
+  assert.deepEqual(
+    { hasChecks, shellRenders, callRenders, resultRenders },
+    { hasChecks: 101, shellRenders: 101, callRenders: 0, resultRenders: 0 },
+  );
+
+  controller.render(envelope({
+    type: "tool_progress",
+    callId: liveCallId,
+    name: "custom_cached",
+    index: 100,
+    sequence: 0,
+    progress: {
+      type: "output",
+      stream: "stdout",
+      delta: "live update",
+      stdoutBytes: 11,
+      stderrBytes: 0,
+    },
+  }, ++sequence));
+  hasChecks = 0;
+  shellRenders = 0;
+  controller.renderNow();
+  assert.deepEqual(
+    { hasChecks, shellRenders, callRenders, resultRenders },
+    { hasChecks: 101, shellRenders: 101, callRenders: 1, resultRenders: 0 },
+  );
+
+  hasChecks = 0;
+  shellRenders = 0;
+  callRenders = 0;
+  resultRenders = 0;
+  label = "invalidated";
+  bridges.get("cached-custom-0")?.invalidate();
+  controller.renderNow();
+  assert.deepEqual(
+    { hasChecks, shellRenders, callRenders, resultRenders },
+    { hasChecks: 101, shellRenders: 101, callRenders: 1, resultRenders: 1 },
+  );
+});
+
+test("custom tool renderers keep reused provider call IDs bound to chronological rows", async (context) => {
+  const { output, controller } = fullController({ frameProjector: internalCreateRichTuiFrameProjector() });
+  const generation = new AbortController();
+  context.after(() => {
+    generation.abort();
+    controller.close();
+  });
+  output.resize(100, 40);
+  const terminal = new FocusedVirtualTerminal(output.columns, output.rows);
+  let renderedChunks = 0;
+  const flush = (): void => {
+    for (const chunk of output.chunks.slice(renderedChunks)) terminal.write(chunk.toString("utf8"));
+    renderedChunks = output.chunks.length;
+  };
+  controller.setToolRenderers({
+    has: (name) => name === "custom_reused",
+    renderCall: (_name, view) => {
+      const path = isRecordValue(view.input) && isStringValue(view.input.path)
+        ? view.input.path
+        : "missing";
+      return { lines: [{ spans: [{ text: `custom call ${path}` }] }] };
+    },
+    renderResult: (_name, view) => ({
+      lines: [{ spans: [{ text: `custom result ${view.result?.content ?? "missing"}` }] }],
+    }),
+  }, generation.signal);
+  controller.start();
+  const appendCall = (messageId: string, path: string, sequence: number): void => {
+    controller.render(envelope({
+      type: "message_appended",
+      message: {
+        id: messageId,
+        role: "assistant",
+        content: [{ type: "tool_call", callId: "reused-custom-call", name: "custom_reused", arguments: { path } }],
+        createdAt: `2026-01-01T00:00:0${sequence}.000Z`,
+      },
+    }, sequence));
+    controller.render(envelope({ type: "assistant_completed", finishReason: "tool_calls" }, sequence + 1));
+  };
+  const appendResult = (messageId: string, content: string, sequence: number): void => {
+    controller.render(envelope({
+      type: "message_appended",
+      message: {
+        id: messageId,
+        role: "tool",
+        content: [{
+          type: "tool_result",
+          callId: "reused-custom-call",
+          name: "custom_reused",
+          content,
+          isError: false,
+        }],
+        createdAt: `2026-01-01T00:00:0${sequence}.000Z`,
+      },
+    }, sequence));
+  };
+  appendCall("custom-first-call", "first.ts", 1);
+  appendResult("custom-first-result", "first output", 3);
+  appendCall("custom-second-call", "second.ts", 4);
+  appendResult("custom-second-result", "second output", 6);
+  await tick();
+  controller.renderNow();
+  flush();
+
+  const viewport = terminal.viewport().join("\n");
+  assert.match(
+    viewport,
+    /custom call first\.ts[\s\S]*custom result first output[\s\S]*custom call second\.ts[\s\S]*custom result second output/u,
+  );
+  assert.equal(occurrences(viewport, "custom call first.ts"), 1);
+  assert.equal(occurrences(viewport, "custom call second.ts"), 1);
+});
+
+test("custom tool renderer shell changes refresh retained call and result content", async (context) => {
+  const { output, controller } = fullController({ frameProjector: internalCreateRichTuiFrameProjector() });
+  const generation = new AbortController();
+  context.after(() => {
+    generation.abort();
+    controller.close();
+  });
+  output.resize(100, 30);
+  const terminal = new FocusedVirtualTerminal(output.columns, output.rows);
+  let renderedChunks = 0;
+  const flush = (): void => {
+    for (const chunk of output.chunks.slice(renderedChunks)) terminal.write(chunk.toString("utf8"));
+    renderedChunks = output.chunks.length;
+  };
+  let shell: "default" | "self" = "default";
+  let label = "before";
+  let callRenders = 0;
+  let resultRenders = 0;
+  controller.setToolRenderers({
+    has: (name) => name === "dynamic_shell",
+    renderShell: () => shell,
+    renderCall: (_name, view) => {
+      callRenders += 1;
+      return { lines: [{ spans: [{ text: `${label} ${shell} call ${view.callId}` }] }] };
+    },
+    renderResult: (_name, view) => {
+      resultRenders += 1;
+      return { lines: [{ spans: [{ text: `${label} ${shell} result ${view.callId}` }] }] };
+    },
+  }, generation.signal);
+  controller.start();
+  controller.render(envelope({
+    type: "tool_requested",
+    callId: "dynamic-shell-call",
+    name: "dynamic_shell",
+    input: { value: 1 },
+    index: 0,
+  }, 1));
+  controller.render(envelope({
+    type: "tool_completed",
+    callId: "dynamic-shell-call",
+    name: "dynamic_shell",
+    index: 0,
+    isError: false,
+    preview: "native fallback",
+    result: {
+      type: "tool_result",
+      callId: "dynamic-shell-call",
+      name: "dynamic_shell",
+      content: "done",
+      isError: false,
+    },
+  }, 2));
+  await tick();
+  flush();
+  assert.match(terminal.viewport().join("\n"), /before default (?:call|result) dynamic-shell-call/u);
+
+  callRenders = 0;
+  resultRenders = 0;
+  shell = "self";
+  label = "after";
+  controller.renderNow();
+  flush();
+  assert.deepEqual({ callRenders, resultRenders }, { callRenders: 1, resultRenders: 1 });
+  const viewport = terminal.viewport().join("\n");
+  assert.match(viewport, /after self call dynamic-shell-call/u);
+  assert.match(viewport, /after self result dynamic-shell-call/u);
+  assert.doesNotMatch(viewport, /before default/u);
+});
+
+test("unregistered and empty tool renderer decisions stay retained without output bytes", async (context) => {
+  const delegate = createFixtureFrameProjector();
+  const revisions: number[] = [];
+  const { controller } = fullController({
+    frameProjector: (request) => {
+      revisions.push(request.transcriptRevision ?? -1);
+      return delegate(request);
+    },
+  });
+  const generation = new AbortController();
+  context.after(() => {
+    generation.abort();
+    controller.close();
+  });
+  let callRenders = 0;
+  let resultRenders = 0;
+  controller.setToolRenderers({
+    has: (name) => name === "empty_custom",
+    renderCall: () => {
+      callRenders += 1;
+      return undefined;
+    },
+    renderResult: () => {
+      resultRenders += 1;
+      return undefined;
+    },
+  }, generation.signal);
+  controller.start();
+  controller.render(envelope({
+    type: "tool_requested",
+    callId: "unregistered-fallback",
+    name: "native_only",
+    input: {},
+    index: 0,
+  }, 1));
+  controller.render(envelope({
+    type: "tool_requested",
+    callId: "empty-custom",
+    name: "empty_custom",
+    input: {},
+    index: 1,
+  }, 2));
+  controller.render(envelope({
+    type: "tool_completed",
+    callId: "empty-custom",
+    name: "empty_custom",
+    index: 1,
+    isError: false,
+    preview: "native empty fallback",
+    result: { type: "tool_result", callId: "empty-custom", name: "empty_custom", content: "done", isError: false },
+  }, 3));
+  await tick();
+  controller.renderNow();
+  assert.ok(callRenders > 0);
+  assert.ok(resultRenders > 0);
+
+  const settledRevision = revisions.at(-1);
+  callRenders = 0;
+  resultRenders = 0;
+  revisions.length = 0;
+  controller.renderNow();
+  controller.renderNow();
+  assert.deepEqual({ callRenders, resultRenders }, { callRenders: 0, resultRenders: 0 });
+  assert.ok(revisions.length > 0 && revisions.every((revision) => revision === settledRevision));
+});
+
+test("custom tool renderer budget keeps newest blocks stable and reconsiders invalidated omissions", async (context) => {
+  const delegate = createFixtureFrameProjector();
+  const revisions: number[] = [];
+  const { output, controller } = fullController({
+    frameProjector: (request) => {
+      revisions.push(request.transcriptRevision ?? -1);
+      return delegate(request);
+    },
+  });
+  const generation = new AbortController();
+  context.after(() => {
+    generation.abort();
+    controller.close();
+  });
+  output.resize(500, 30);
+  const renderedCalls: string[] = [];
+  const renderedResults: string[] = [];
+  const bridges = new Map<string, { invalidate(): void }>();
+  const compact = new Set<string>();
+  const filler = "𐍈".repeat(440);
+  const block = (callId: string, slot: string) => ({
+    lines: Array.from({ length: compact.has(callId) ? 1 : 128 }, (_, line) => ({
+      spans: [{ text: `${callId} ${slot} ${line} ${compact.has(callId) ? "small" : filler}` }],
+    })),
+  });
+  controller.setToolRenderers({
+    has: (name) => name === "budgeted",
+    renderShell: () => "self",
+    renderCall: (_name, view, _renderContext, bridge) => {
+      renderedCalls.push(view.callId);
+      if (bridge !== undefined) bridges.set(view.callId, bridge);
+      return block(view.callId, "call");
+    },
+    renderResult: (_name, view) => {
+      renderedResults.push(view.callId);
+      return block(view.callId, "result");
+    },
+  }, generation.signal);
+  controller.start();
+  let sequence = 0;
+  for (let index = 0; index < 20; index += 1) {
+    const callId = `budgeted-${index}`;
+    controller.render(envelope({
+      type: "tool_requested",
+      callId,
+      name: "budgeted",
+      input: { index },
+      index,
+    }, ++sequence));
+    controller.render(envelope({
+      type: "tool_completed",
+      callId,
+      name: "budgeted",
+      index,
+      isError: false,
+      preview: `native ${callId}`,
+      result: { type: "tool_result", callId, name: "budgeted", content: "done", isError: false },
+    }, ++sequence));
+  }
+  await tick();
+  controller.renderNow();
+  assert.ok(
+    renderedCalls.includes("budgeted-19"),
+    `the newest custom block was not admitted first: ${JSON.stringify(renderedCalls)}`,
+  );
+  assert.equal(renderedCalls.includes("budgeted-0"), false, "an oldest block displaced newer custom output");
+
+  const settledRevision = revisions.at(-1);
+  renderedCalls.length = 0;
+  renderedResults.length = 0;
+  revisions.length = 0;
+  controller.renderNow();
+  controller.renderNow();
+  assert.equal(renderedCalls.length, 0);
+  assert.equal(renderedResults.length, 0);
+  assert.ok(revisions.length > 0 && revisions.every((revision) => revision === settledRevision));
+
+  const boundaryCallId = [...bridges.keys()].findLast((callId) => callId !== "budgeted-19");
+  assert.notEqual(boundaryCallId, undefined);
+  compact.add(boundaryCallId!);
+  renderedCalls.length = 0;
+  renderedResults.length = 0;
+  bridges.get(boundaryCallId!)?.invalidate();
+  controller.renderNow();
+  assert.ok(renderedCalls.includes(boundaryCallId!), "an invalidated omitted call was not reconsidered");
+  assert.ok(renderedResults.includes(boundaryCallId!), "an invalidated omitted result was not reconsidered");
+});
+
 test("full TUI owns generation-bound tool renderers and falls back after expiry or failure", async () => {
   const { output, controller } = fullController();
   controller.start();
@@ -8377,6 +8799,295 @@ test("full TUI replaces a large transcript in one redraw and renders only live e
   controller.close();
 });
 
+test("native detail prewarming yields until after paint and cancels across resize and suspend", async (context) => {
+  const { output, controller, toolDetailCache } = fullController();
+  context.after(() => controller.close());
+  controller.start();
+  let sequence = 0;
+  const renderCompleted = (callId: string, payload: string, index: number): { payload: string } => {
+    const input = { payload };
+    controller.render(envelope({
+      type: "tool_requested",
+      callId,
+      name: "native_lifecycle_probe",
+      input,
+      index,
+    }, ++sequence));
+    controller.render(envelope({
+      type: "tool_completed",
+      callId,
+      name: "native_lifecycle_probe",
+      index,
+      isError: false,
+      preview: "",
+      result: { type: "tool_result", callId, name: "native_lifecycle_probe", content: "", isError: false },
+    }, ++sequence));
+    return input;
+  };
+  const detail = (input: { payload: string }) => ({
+    kind: "input" as const,
+    label: "Input",
+    value: JSON.stringify(input, null, 2),
+  });
+
+  const synchronous = renderCompleted("native-lifecycle-sync", `sync-${"s".repeat(700)}`, 0);
+  const idle = renderCompleted("native-lifecycle-idle", `idle-${"i".repeat(700)}`, 1);
+  controller.renderNow();
+  assert.equal(
+    internalPrewarmOhmNativeToolDetail(detail(synchronous), 80, "", toolDetailCache),
+    true,
+    "hidden details were warmed synchronously before the visible frame returned",
+  );
+  for (let turn = 0; turn < 3; turn += 1) await tick();
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(idle), 80, "", toolDetailCache), false);
+
+  const resized = renderCompleted("native-lifecycle-resize", `resize-${"r".repeat(700)}`, 2);
+  controller.renderNow();
+  output.resize(100, 30);
+  for (let turn = 0; turn < 3; turn += 1) await tick();
+  assert.equal(
+    internalPrewarmOhmNativeToolDetail(detail(resized), 80, "", toolDetailCache),
+    true,
+    "the stale-width idle task survived resize cancellation",
+  );
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(resized), 100, "", toolDetailCache), false);
+
+  const suspended = renderCompleted("native-lifecycle-suspend", `suspend-${"u".repeat(700)}`, 3);
+  controller.renderNow();
+  controller.suspend(() => undefined);
+  await tick();
+  assert.equal(
+    internalPrewarmOhmNativeToolDetail(detail(suspended), 100, "", toolDetailCache),
+    true,
+    "idle work continued after terminal suspension",
+  );
+
+  const closing = fullController();
+  context.after(() => closing.controller.close());
+  closing.controller.start();
+  const closingInput = { payload: `close-${"q".repeat(700)}` };
+  closing.controller.render(envelope({
+    type: "tool_requested",
+    callId: "native-lifecycle-close",
+    name: "native_lifecycle_probe",
+    input: closingInput,
+    index: 0,
+  }, 1));
+  closing.controller.render(envelope({
+    type: "tool_completed",
+    callId: "native-lifecycle-close",
+    name: "native_lifecycle_probe",
+    index: 0,
+    isError: false,
+    preview: "",
+    result: { type: "tool_result", callId: "native-lifecycle-close", name: "native_lifecycle_probe", content: "", isError: false },
+  }, 2));
+  closing.controller.renderNow();
+  closing.input.write("x");
+  closing.controller.close();
+  await tick();
+  assert.equal(
+    internalPrewarmOhmNativeToolDetail(detail(closingInput), 80, "", closing.toolDetailCache),
+    true,
+    "idle work continued after terminal input and close",
+  );
+});
+
+test("native detail caches are controller-scoped and cleared with transcript lifecycle", () => {
+  let projectorClears = 0;
+  const frameProjector = Object.assign(createFixtureFrameProjector(), {
+    [INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]: () => { projectorClears += 1; },
+  });
+  const first = fullController({ frameProjector });
+  const second = fullController();
+  const detail = {
+    kind: "output" as const,
+    label: "Output",
+    value: `controller-cache-lifecycle ${"x".repeat(180)}`,
+  };
+
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", first.toolDetailCache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", first.toolDetailCache), false);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", second.toolDetailCache), true);
+
+  first.controller.clearTranscript();
+  assert.equal(projectorClears, 1);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", first.toolDetailCache), true);
+  first.controller.close();
+  assert.equal(projectorClears, 2);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", first.toolDetailCache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 80, "", second.toolDetailCache), false);
+  second.controller.close();
+});
+
+test("native detail prewarming survives dynamic Markdown and skips custom renderers and live tools", async (context) => {
+  const controllers: TuiController[] = [];
+  const generations: AbortController[] = [];
+  context.after(() => {
+    for (const generation of generations) generation.abort();
+    for (const controller of controllers) controller.close();
+  });
+  const detail = (input: { payload: string }) => ({
+    kind: "input" as const,
+    label: "Input",
+    value: JSON.stringify(input, null, 2),
+  });
+  const waitForIdleTurns = async (): Promise<void> => {
+    for (let turn = 0; turn < 4; turn += 1) await tick();
+  };
+
+  const dynamic = fullController();
+  controllers.push(dynamic.controller);
+  const dynamicGeneration = new AbortController();
+  generations.push(dynamicGeneration);
+  dynamic.controller.setSessionRenderers({
+    renderEntry: () => undefined,
+    renderMessage: () => undefined,
+    transformMarkdown: (markdown) => markdown,
+  }, dynamicGeneration.signal);
+  dynamic.controller.start();
+  const dynamicInput = { payload: `dynamic-${"d".repeat(700)}` };
+  dynamic.controller.render(envelope({
+    type: "tool_requested",
+    callId: "native-dynamic-skip",
+    name: "native_dynamic_probe",
+    input: dynamicInput,
+    index: 0,
+  }, 1));
+  dynamic.controller.render(envelope({
+    type: "tool_completed",
+    callId: "native-dynamic-skip",
+    name: "native_dynamic_probe",
+    index: 0,
+    isError: false,
+    preview: "",
+    result: { type: "tool_result", callId: "native-dynamic-skip", name: "native_dynamic_probe", content: "", isError: false },
+  }, 2));
+  await waitForIdleTurns();
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(dynamicInput), 80, "", dynamic.toolDetailCache), false);
+
+  const custom = fullController();
+  controllers.push(custom.controller);
+  const customGeneration = new AbortController();
+  generations.push(customGeneration);
+  custom.controller.setToolRenderers({
+    has: (name) => name === "native_custom_probe",
+    renderCall: (_name, view) => ({ lines: [{ spans: [{ text: `custom ${view.callId}` }] }] }),
+    renderResult: () => undefined,
+  }, customGeneration.signal);
+  custom.controller.start();
+  const customInput = { payload: `custom-${"c".repeat(700)}` };
+  custom.controller.render(envelope({
+    type: "tool_requested",
+    callId: "native-custom-skip",
+    name: "native_custom_probe",
+    input: customInput,
+    index: 0,
+  }, 1));
+  custom.controller.render(envelope({
+    type: "tool_completed",
+    callId: "native-custom-skip",
+    name: "native_custom_probe",
+    index: 0,
+    isError: false,
+    preview: "",
+    result: { type: "tool_result", callId: "native-custom-skip", name: "native_custom_probe", content: "", isError: false },
+  }, 2));
+  const fallbackInput = { payload: `fallback-${"f".repeat(700)}` };
+  custom.controller.render(envelope({
+    type: "tool_requested",
+    callId: "native-fallback-warm",
+    name: "native_fallback_probe",
+    input: fallbackInput,
+    index: 1,
+  }, 3));
+  custom.controller.render(envelope({
+    type: "tool_completed",
+    callId: "native-fallback-warm",
+    name: "native_fallback_probe",
+    index: 1,
+    isError: false,
+    preview: "",
+    result: { type: "tool_result", callId: "native-fallback-warm", name: "native_fallback_probe", content: "", isError: false },
+  }, 4));
+  await waitForIdleTurns();
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(customInput), 80, "", custom.toolDetailCache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(fallbackInput), 80, "", custom.toolDetailCache), false);
+
+  const live = fullController();
+  controllers.push(live.controller);
+  live.controller.start();
+  const liveInput = { payload: `live-${"l".repeat(700)}` };
+  live.controller.render(envelope({
+    type: "tool_requested",
+    callId: "native-live-skip",
+    name: "native_live_probe",
+    input: liveInput,
+    index: 0,
+  }, 1));
+  live.controller.render(envelope({
+    type: "tool_started",
+    callId: "native-live-skip",
+    name: "native_live_probe",
+    input: liveInput,
+    index: 0,
+    recoveryMode: "never_repeat",
+  }, 2));
+  await waitForIdleTurns();
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail(liveInput), 80, "", live.toolDetailCache), true);
+});
+
+test("idle native detail prewarming covers the full retained tool history without evicting visible wraps", async (context) => {
+  const { controller, toolDetailCache } = fullController();
+  context.after(() => controller.close());
+  controller.start();
+  let sequence = 0;
+  const inputs = Array.from({ length: 2_000 }, (_, index) => ({
+    payload: `idle-prewarm-${index}-${"x".repeat(96)}`,
+  }));
+  for (const [index, input] of inputs.entries()) {
+    const callId = `idle-prewarm-${index}`;
+    const output = `idle-output-${index}-${"y".repeat(96)}`;
+    controller.render(envelope({
+      type: "tool_requested",
+      callId,
+      name: "native_hidden_probe",
+      input,
+      index,
+    }, ++sequence));
+    controller.render(envelope({
+      type: "tool_completed",
+      callId,
+      name: "native_hidden_probe",
+      index,
+      isError: false,
+      preview: output,
+      result: { type: "tool_result", callId, name: "native_hidden_probe", content: output, isError: false },
+    }, ++sequence));
+  }
+  await tick();
+  for (let turn = 0; turn < 300; turn += 1) await tick();
+
+  for (const input of [inputs[0]!, inputs.at(-1)!]) {
+    assert.equal(internalPrewarmOhmNativeToolDetail({
+      kind: "input",
+      label: "Input",
+      value: JSON.stringify(input, null, 2),
+    }, 80, "", toolDetailCache), false, "the bounded idle pass did not reach both ends of the retained history");
+  }
+  for (const [index, output] of [
+    [0, `idle-output-0-${"y".repeat(96)}`],
+    [inputs.length - 1, `idle-output-${inputs.length - 1}-${"y".repeat(96)}`],
+  ] as const) {
+    assert.equal(internalPrewarmOhmNativeToolDetail({
+      kind: "output",
+      label: "Output",
+      value: output,
+      preview: true,
+    }, 80, "", toolDetailCache), false, `visible detail ${index} was evicted while hidden history warmed`);
+  }
+});
+
 test("first tool expansion and expanded history updates stay responsive", async () => {
   const { output, controller } = fullController();
   controller.start();
@@ -8425,6 +9136,19 @@ test("first tool expansion and expanded history updates stay responsive", async 
   samples.sort((left, right) => left - right);
   assert.ok(samples[3]! < 75, `expanded unchanged frame took ${samples[3]!.toFixed(1)}ms`);
 
+  const collapseStartedAt = performance.now();
+  assert.equal(controller.toggleTool(), true);
+  controller.renderNow();
+  const collapseElapsedMs = performance.now() - collapseStartedAt;
+  const warmToggleBudgetMs = process.env.NODE_V8_COVERAGE === undefined ? 75 : 150;
+  assert.ok(collapseElapsedMs < warmToggleBudgetMs, `tool collapse took ${collapseElapsedMs.toFixed(1)}ms`);
+
+  const reexpandStartedAt = performance.now();
+  assert.equal(controller.toggleTool(), true);
+  controller.renderNow();
+  const reexpandElapsedMs = performance.now() - reexpandStartedAt;
+  assert.ok(reexpandElapsedMs < warmToggleBudgetMs, `warm tool re-expansion took ${reexpandElapsedMs.toFixed(1)}ms`);
+
   const liveCallId = "cached-live-shell";
   controller.render(envelope({
     type: "tool_requested",
@@ -8463,7 +9187,7 @@ test("first tool expansion and expanded history updates stay responsive", async 
 
 test("global detail toggles reuse unrelated long rich history", async () => {
   const { controller } = fullController({ frameProjector: internalCreateRichTuiFrameProjector() });
-  const history = Array.from({ length: 1_000 }, (_, index) => envelope({
+  const history: TuiTranscriptItem[] = Array.from({ length: 1_000 }, (_, index) => envelope({
     type: "message_appended" as const,
     message: {
       id: `toggle-cache-${index}`,
@@ -8472,10 +9196,34 @@ test("global detail toggles reuse unrelated long rich history", async () => {
       createdAt: "2026-01-01T00:00:00.000Z",
     },
   }, index + 1));
+  const toolTail = Array.from({ length: 20 }, (_, index) =>
+    `collapsed tool tail ${index + 1} ${"x".repeat(44)}`).join("\n");
+  history.push(envelope({
+    type: "tool_requested",
+    callId: "toggle-cache-tool-tail",
+    name: "read",
+    input: { path: "toggle-cache-tail.txt" },
+    index: 0,
+  }, 1_001), envelope({
+    type: "tool_completed",
+    callId: "toggle-cache-tool-tail",
+    name: "read",
+    index: 0,
+    isError: false,
+    preview: toolTail,
+    result: {
+      type: "tool_result",
+      callId: "toggle-cache-tool-tail",
+      name: "read",
+      content: toolTail,
+      isError: false,
+    },
+  }, 1_002));
   controller.start();
   controller.replaceTranscript(history, "toggle-cache");
   await tick();
   controller.renderNow();
+  assert.equal(controller.getToolOutputExpanded(), false);
 
   const detailsStartedAt = performance.now();
   assert.equal(controller.toggleTool(), true);
@@ -8491,7 +9239,7 @@ test("global detail toggles reuse unrelated long rich history", async () => {
       content: [{ type: "thinking", thinking: "reasoning tail sentinel", visibility: "summary" }],
       createdAt: "2026-01-01T00:00:01.000Z",
     },
-  }, 1_001)], "toggle-cache-reasoning");
+  }, 1_003)], "toggle-cache-reasoning");
   await tick();
   controller.renderNow();
   const reasoningStartedAt = performance.now();
@@ -8500,14 +9248,14 @@ test("global detail toggles reuse unrelated long rich history", async () => {
   const reasoningElapsedMs = performance.now() - reasoningStartedAt;
   assert.ok(reasoningElapsedMs < 75, `reasoning-tail Ctrl+T took ${reasoningElapsedMs.toFixed(1)}ms`);
 
-  controller.render(envelope({ type: "run_started", provider: "openai", model: "gpt-test" }, 1_002));
+  controller.render(envelope({ type: "run_started", provider: "openai", model: "gpt-test" }, 1_004));
   controller.render(envelope({
     type: "tool_requested",
     callId: "toggle-cache-live-tool",
     name: "bash",
     input: { command: "stream output" },
     index: 0,
-  }, 1_003));
+  }, 1_005));
   controller.render(envelope({
     type: "tool_started",
     callId: "toggle-cache-live-tool",
@@ -8515,7 +9263,7 @@ test("global detail toggles reuse unrelated long rich history", async () => {
     input: { command: "stream output" },
     index: 0,
     recoveryMode: "never_repeat",
-  }, 1_004));
+  }, 1_006));
   await tick();
   controller.renderNow();
   const progressStartedAt = performance.now();
@@ -8533,7 +9281,7 @@ test("global detail toggles reuse unrelated long rich history", async () => {
       stderrBytes: 0,
       elapsedMs: 10,
     },
-  }, 1_005));
+  }, 1_007));
   controller.renderNow();
   const progressElapsedMs = performance.now() - progressStartedAt;
   assert.ok(progressElapsedMs < 75, `native long-history update took ${progressElapsedMs.toFixed(1)}ms`);

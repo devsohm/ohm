@@ -129,7 +129,7 @@ test("user_bash replaces or handles shortcuts without breaking hidden transcript
   child.stdout.on("data", (chunk: string) => { output += chunk; });
   child.stderr.on("data", (chunk: string) => { output += chunk; });
   const submit = (value: string) => child.stdin.write(`${value}\r`);
-  await waitFor(() => output.includes("ohm 0.1.0 · ready"), () => output.slice(-16 * 1024));
+  await waitFor(() => output.includes("ohm 0.1.1 · ready"), () => output.slice(-16 * 1024));
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
 
   const visibleOutputOffset = output.length;

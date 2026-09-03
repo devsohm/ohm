@@ -286,6 +286,21 @@ async function createProductServeSessionFactory(
         onEvent(listener) {
           return runtime.session.onEvent(listener);
         },
+        onPortablePresentation(listener) {
+          return runtime.session.onPortablePresentation(listener);
+        },
+        listPortablePresentations() {
+          return runtime.session.listPortablePresentations();
+        },
+        async invokePortablePresentationAction(request, signal) {
+          return await runtime.session.invokePortablePresentationAction(request, signal);
+        },
+        listExtensionWireServices() {
+          return runtime.session.listExtensionWireServices();
+        },
+        async invokeExtensionWireService(request, signal) {
+          return await runtime.session.invokeExtensionWireService(request, signal);
+        },
         async start(startSignal) {
           startSignal.throwIfAborted();
           await runtime.session.bindExtensions(

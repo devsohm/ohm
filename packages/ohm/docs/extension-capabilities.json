@@ -274,6 +274,33 @@
       "tests": ["test/extensions/direct-example-packages.test.ts", "test/extensions/direct-factory-contract.test.ts", "test/extensions/foundation-conformance.test.ts", "test/extensions/managed-process-runtime.test.ts", "test/process/command.test.ts", "test/process/managed-process.test.ts"]
     },
     {
+      "id": "durable-jobs-and-child-sessions",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["jobs", "childSessions"],
+      "docs": ["docs/extension-api.md"],
+      "examples": [],
+      "tests": ["test/extensions/durable-jobs.test.ts"]
+    },
+    {
+      "id": "optional-facets-portable-presentations-and-wire-services",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["facets"],
+      "docs": ["docs/facets-and-presentations.md", "docs/extensions.md", "docs/rpc.md", "docs/serve.md"],
+      "examples": [],
+      "tests": [
+        "test/extensions/facets.test.ts",
+        "test/extensions/replicated-state.test.ts",
+        "test/extensions/wire-services.test.ts",
+        "test/interfaces/portable-presentation.test.ts",
+        "test/interfaces/extension-broker-rpc.test.ts",
+        "test/serve/server.test.ts"
+      ]
+    },
+    {
       "id": "dynamic-and-unified-resource-discovery",
       "status": "implemented",
       "authoring": true,

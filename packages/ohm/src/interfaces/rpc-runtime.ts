@@ -30,6 +30,11 @@ import {
 } from "../tools/coordinator.js";
 import { normalizeShellTerminalState } from "../tools/shell-result.js";
 import { WorkspaceBoundary } from "../tools/paths.js";
+import {
+  portablePresentationRemoveEvent,
+  validatePortablePresentationActionRequest,
+  type PortablePresentationEvent,
+} from "./portable-presentation.js";
 import { MAX_RPC_LINE_BYTES, type RpcUnknownCommand } from "./rpc.js";
 import { boundedRpcErrorMessage } from "./rpc-error.js";
 import type {
@@ -152,6 +157,21 @@ const SET_SESSION_NAME_COMMAND_VALUE = Type.Object({
   id: Type.Optional(Type.String()),
   name: Type.String(),
 }, { additionalProperties: true });
+const PRESENTATION_ACTION_COMMAND_VALUE = Type.Object({
+  type: Type.Literal("presentation_action"),
+  id: Type.Optional(Type.String()),
+  protocolVersion: Type.Number(),
+  owner: Type.String(),
+  presentationId: Type.String(),
+  revision: Type.Number(),
+  actionId: Type.String(),
+  input: Type.Unknown(),
+}, { additionalProperties: false });
+const EXTENSION_WIRE_REQUEST_COMMAND_VALUE = Type.Object({
+  type: Type.Literal("extension_wire_request"),
+  id: Type.Optional(Type.String()),
+  request: Type.Unknown(),
+}, { additionalProperties: false });
 const HISTORY_CURSOR_VALUE = Type.Object({
   version: Type.Literal(1),
   resource: Type.Union([Type.Literal("tree"), Type.Literal("messages")]),
@@ -446,7 +466,7 @@ export interface RpcSessionRuntime {
   setBeforeSessionInvalidate(callback?: () => void): void;
 }
 
-type RpcOutputRecord = RpcResponse | RpcBashExecutionUpdate | AgentSessionEvent;
+type RpcOutputRecord = RpcResponse | RpcBashExecutionUpdate | AgentSessionEvent | PortablePresentationEvent;
 type RpcSuccessResponse = Extract<RpcResponse, { success: true }>;
 type RpcResponseData = RpcSuccessResponse extends infer Response
   ? Response extends { data: infer Data }
@@ -569,6 +589,11 @@ export class RpcRuntimeDispatcher {
   readonly #bindSession: RpcRuntimeDispatcherOptions["bindSession"];
   readonly #promptOptions: RpcRuntimeDispatcherOptions["promptOptions"];
   #unsubscribe: (() => void) | undefined;
+  #unsubscribePresentation: (() => void) | undefined;
+  readonly #presentations = new Map<
+    string,
+    Extract<PortablePresentationEvent, { operation: "show" }>
+  >();
   #bindingGeneration = 0;
   #modelControlTail: Promise<void> = Promise.resolve();
   #closed = false;
@@ -582,7 +607,7 @@ export class RpcRuntimeDispatcher {
 
   async start(): Promise<void> {
     if (this.#closed) throw new Error("RPC dispatcher is closed");
-    this.#runtime.setBeforeSessionInvalidate(() => this.#unsubscribeSession());
+    this.#runtime.setBeforeSessionInvalidate(() => this.#resetPortablePresentations());
     this.#runtime.setRebindSession(async (session) => await this.#rebind(session));
     await this.#rebind();
   }
@@ -1048,6 +1073,43 @@ export class RpcRuntimeDispatcher {
           ];
           return success(id, "get_commands", { commands });
         }
+        case "presentation_action": {
+          const selected = Value.Parse(PRESENTATION_ACTION_COMMAND_VALUE, command);
+          try {
+            return success(
+              id,
+              "presentation_action",
+              await this.#runtime.session.invokePortablePresentationAction(
+                validatePortablePresentationActionRequest({
+                  protocolVersion: selected.protocolVersion,
+                  owner: selected.owner,
+                  presentationId: selected.presentationId,
+                  revision: selected.revision,
+                  actionId: selected.actionId,
+                  input: selected.input,
+                }),
+              ),
+            );
+          } catch {
+            return failure(id, "presentation_action", "Portable presentation action was rejected");
+          }
+        }
+        case "get_portable_presentations":
+          return success(id, "get_portable_presentations", {
+            presentations: this.#runtime.session.listPortablePresentations(),
+          });
+        case "get_extension_wire_services":
+          return success(id, "get_extension_wire_services", {
+            services: this.#runtime.session.listExtensionWireServices(),
+          });
+        case "extension_wire_request": {
+          const selected = Value.Parse(EXTENSION_WIRE_REQUEST_COMMAND_VALUE, command);
+          return success(
+            id,
+            "extension_wire_request",
+            await this.#runtime.session.invokeExtensionWireService(selected.request as never),
+          );
+        }
         default:
           return failure(id, command.type, `Unknown command: ${command.type}`);
       }
@@ -1060,6 +1122,7 @@ export class RpcRuntimeDispatcher {
     if (this.#closed) return;
     this.#closed = true;
     this.#unsubscribeSession();
+    this.#presentations.clear();
     this.#runtime.setBeforeSessionInvalidate(undefined);
     this.#runtime.setRebindSession(undefined);
   }
@@ -1078,9 +1141,22 @@ export class RpcRuntimeDispatcher {
 
   async #rebind(session: AgentSession = this.#runtime.session): Promise<void> {
     const generation = ++this.#bindingGeneration;
-    this.#unsubscribeSession();
-    await this.#bindSession?.(session);
+    this.#resetPortablePresentations();
+    try {
+      await this.#bindSession?.(session);
+    } catch (error) {
+      this.#unsubscribeSession();
+      throw error;
+    }
     if (generation !== this.#bindingGeneration || this.#closed) return;
+    if (typeof session.onPortablePresentation === "function") {
+      this.#unsubscribePresentation = session.onPortablePresentation((event) => {
+        this.#publishPortablePresentation(event);
+      });
+    }
+    if (typeof session.listPortablePresentations === "function") {
+      for (const event of session.listPortablePresentations()) this.#publishPortablePresentation(event);
+    }
     this.#unsubscribe = session.subscribe((event) => {
       // RPC owns a separately bounded and command-correlated bash stream.
       if (event.type === "bash_execution_update") return;
@@ -1088,8 +1164,38 @@ export class RpcRuntimeDispatcher {
     });
   }
 
+  #publishPortablePresentation(event: PortablePresentationEvent): void {
+    const key = event.operation === "show"
+      ? `${event.owner}\u0000${event.presentation.id}`
+      : `${event.owner}\u0000${event.presentationId}`;
+    const current = this.#presentations.get(key);
+    if (event.operation === "show") {
+      if (current?.presentation.revision === event.presentation.revision) return;
+      this.#presentations.set(key, event);
+    } else {
+      if (current === undefined) return;
+      this.#presentations.delete(key);
+    }
+    void Promise.resolve(this.#output(event)).catch(() => undefined);
+  }
+
+  #resetPortablePresentations(): void {
+    this.#unsubscribeSession();
+    const current = [...this.#presentations.values()];
+    this.#presentations.clear();
+    for (const event of current) {
+      void Promise.resolve(this.#output(portablePresentationRemoveEvent(
+        event.owner,
+        event.presentation.id,
+        event.presentation.revision,
+      ))).catch(() => undefined);
+    }
+  }
+
   #unsubscribeSession(): void {
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
+    this.#unsubscribePresentation?.();
+    this.#unsubscribePresentation = undefined;
   }
 }

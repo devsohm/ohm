@@ -43,6 +43,7 @@ import {
 import {
   OhmTranscriptLayout,
   type OhmTranscriptChunk as RetainedTranscriptChunk,
+  type OhmTranscriptChunkRender,
 } from "./native-renderer/transcript-layout.js";
 import {
   searchOhmTranscript,
@@ -51,8 +52,10 @@ import {
 import { TuiController } from "./controller.js";
 import {
   INTERNAL_TUI_FRAME_PROJECTOR,
+  INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
   INTERNAL_TUI_PERSISTENT_POINTER_MAP,
   INTERNAL_TUI_PERSISTENT_POINTER_SOURCE,
+  INTERNAL_TUI_TOOL_DETAIL_CACHE,
   INTERNAL_TUI_TRANSCRIPT_SEARCH,
   type InternalTuiControllerOptions,
   type TuiFrameProjectionRequest,
@@ -60,6 +63,7 @@ import {
   type TuiPersistentPointerMap,
   type TuiProjectedFrame,
 } from "./frame-projector.js";
+import { internalToolRenderSlotsForEntry } from "./layout.js";
 import { elapsedText } from "./model.js";
 import {
   MAX_TERMINAL_IMAGE_AGGREGATE_BYTES,
@@ -251,6 +255,12 @@ function activity(view: TuiViewState, unicode: boolean): string | undefined {
   ].filter((value): value is string => value !== undefined && value !== "").join(unicode ? " · " : " | ");
 }
 
+function compactionActive(view: TuiViewState): boolean {
+  if (view.context.active !== true) return false;
+  const phase = view.context.activity?.phase;
+  return phase === "Compacting context" || phase === "Retrying compaction";
+}
+
 function hasMarkdown(value: string): boolean {
   return /(?:^|\n)\s{0,3}(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|```|~~~|_{3,}\s*$|-{3,}\s*$)/mu.test(value)
     || /(?:\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\([^\n)]+\)|<https?:\/\/[^\s>]+>)/u.test(value)
@@ -263,7 +273,7 @@ function entryNeedsHostTranscript(
 ): boolean {
   const options = request.transcriptOptions;
   if (entry.kind === "tool") {
-    const custom = entry.callId === undefined ? undefined : options.toolRenderBlocks?.get(entry.callId);
+    const custom = internalToolRenderSlotsForEntry(options.toolRenderBlocks, entry);
     return custom?.shell === "self";
   }
   if (entry.kind === "startup" || entry.card !== undefined) return false;
@@ -330,7 +340,11 @@ function snapshotFor(request: Readonly<TuiFrameProjectionRequest>): OhmTuiSnapsh
       ...optionalProperties(total?.outputTokens === undefined ? undefined : { outputTokens: total.outputTokens }),
       ...optionalProperties(total?.cacheReadTokens === undefined ? undefined : { cacheReadTokens: total.cacheReadTokens }),
       ...optionalProperties(total?.cacheWriteTokens === undefined ? undefined : { cacheWriteTokens: total.cacheWriteTokens }),
-      ...optionalProperties(usage?.latestCacheHitRate === undefined ? undefined : { cacheHitPercent: usage.latestCacheHitRate }),
+      ...optionalProperties(
+        usage?.latestCacheHitRate === undefined || compactionActive(view)
+          ? undefined
+          : { cacheHitPercent: usage.latestCacheHitRate },
+      ),
       ...optionalProperties(total?.cost?.total === undefined ? undefined : { cost: total.cost.total }),
       ...optionalProperties(view.context.subscription === true ? { subscription: true } : undefined),
     },
@@ -354,9 +368,25 @@ function fitsViewport(frame: TuiProjectedFrame, size: Readonly<{ columns: number
   return rowCount <= size.rows && hasValidFrameGeometry(frame, size);
 }
 
+type MarkdownTransformer = NonNullable<TuiFrameProjectionRequest["transcriptOptions"]["transformMarkdown"]>;
+type MarkdownTransformContext = Parameters<MarkdownTransformer>[1];
+
+interface PreparedMarkdownTransform {
+  readonly input: string;
+  readonly output: string;
+  readonly context: MarkdownTransformContext;
+}
+
 interface TranscriptChunk {
   readonly host: boolean;
   readonly entries: readonly TranscriptEntry[];
+  readonly markdownTransform?: PreparedMarkdownTransform;
+  readonly markdownTransformPending?: boolean;
+}
+
+interface PreparedTranscriptChunks {
+  readonly chunks: TranscriptChunk[];
+  readonly overflow: boolean;
 }
 
 interface RichTranscriptRowRange {
@@ -415,6 +445,7 @@ interface RetainedRichTranscriptValue {
   readonly request: Readonly<TuiFrameProjectionRequest>;
   readonly shell: OhmTuiSnapshot;
   readonly chunk: TranscriptChunk;
+  readonly retainMatchingRender: boolean;
 }
 
 interface RetainedRichTranscriptSlot {
@@ -423,6 +454,7 @@ interface RetainedRichTranscriptSlot {
   readonly key: string;
   readonly layout: OhmTranscriptLayout<RetainedRichTranscriptValue>;
   revision: number;
+  transformerActive: boolean;
   overflow: boolean;
   searchQuery?: string;
   searchResult?: OhmTranscriptSearchResult;
@@ -432,14 +464,111 @@ interface RetainedRichTranscriptSlot {
 const MAX_RICH_TRANSCRIPT_PREFIX_ENTRIES = 2_000;
 const MAX_RICH_TRANSCRIPT_PREFIX_ROWS = 32_768;
 const MAX_RICH_TRANSCRIPT_PREFIX_BYTES = 8 * 1024 * 1024;
+const MAX_RICH_TRANSCRIPT_RENDER_CACHE_ENTRIES = MAX_RICH_TRANSCRIPT_PREFIX_ENTRIES * 2;
+const MAX_RICH_TRANSCRIPT_RENDER_CACHE_BYTES = MAX_RICH_TRANSCRIPT_PREFIX_BYTES;
+
+interface CachedRichTranscriptRender {
+  readonly fingerprint: string;
+  readonly render: OhmTranscriptChunkRender;
+  readonly bytes: number;
+}
+
+class RetainedRichTranscriptRenderCache {
+  readonly #values = new Map<string, CachedRichTranscriptRender[]>();
+  readonly #lru = new Map<string, true>();
+  #entries = 0;
+  #bytes = 0;
+
+  get(key: string, fingerprint: string): OhmTranscriptChunkRender | undefined {
+    const retained = this.#values.get(key)?.find((variant) => variant.fingerprint === fingerprint);
+    if (retained !== undefined) this.#touch(key);
+    return retained?.render;
+  }
+
+  #touch(key: string): void {
+    this.#lru.delete(key);
+    this.#lru.set(key, true);
+  }
+
+  #deleteKey(key: string): void {
+    const variants = this.#values.get(key);
+    if (variants === undefined) return;
+    this.#values.delete(key);
+    this.#lru.delete(key);
+    this.#entries = Math.max(0, this.#entries - variants.length);
+    this.#bytes = Math.max(0, this.#bytes - variants.reduce((total, variant) => total + variant.bytes, 0));
+  }
+
+  set(
+    key: string,
+    fingerprint: string,
+    render: OhmTranscriptChunkRender,
+    maximumVariants: 1 | 2,
+  ): void {
+    const variants = this.#values.get(key);
+    if (variants?.some((variant) => variant.fingerprint === fingerprint) === true) {
+      this.#touch(key);
+      return;
+    }
+    const bytes = Buffer.byteLength(key, "utf8")
+      + Buffer.byteLength(fingerprint, "utf8")
+      + render.rows.reduce((total, row) => total + Buffer.byteLength(row, "utf8"), 0)
+      + (render.entryRanges ?? []).reduce((total, range) =>
+        total + range.entryIds.reduce((ids, id) => ids + Buffer.byteLength(id, "utf8"), 0), 0)
+      + (render.promptRows?.length ?? 0) * 8;
+    if (bytes > MAX_RICH_TRANSCRIPT_RENDER_CACHE_BYTES) return;
+    if (variants === undefined) {
+      // Admit new transcript keys by evicting old keys as units. Existing-key
+      // variants use admission below so a global toggle cannot scan-evict the
+      // opposite variant immediately before it is reused.
+      while (
+        this.#entries >= MAX_RICH_TRANSCRIPT_RENDER_CACHE_ENTRIES
+        || this.#bytes + bytes > MAX_RICH_TRANSCRIPT_RENDER_CACHE_BYTES
+      ) {
+        const oldest = this.#lru.keys().next().value;
+        if (oldest === undefined) return;
+        this.#deleteKey(oldest);
+      }
+      this.#values.set(key, [{ fingerprint, render, bytes }]);
+      this.#entries += 1;
+      this.#bytes += bytes;
+      this.#touch(key);
+      return;
+    }
+    this.#touch(key);
+    const removed = variants.length >= maximumVariants
+      ? variants[0]
+      : undefined;
+    const retainedEntries = this.#entries - (removed === undefined ? 0 : 1);
+    const retainedBytes = this.#bytes - (removed?.bytes ?? 0);
+    if (
+      retainedEntries >= MAX_RICH_TRANSCRIPT_RENDER_CACHE_ENTRIES
+      || retainedBytes + bytes > MAX_RICH_TRANSCRIPT_RENDER_CACHE_BYTES
+    ) return;
+    if (removed !== undefined) variants.shift();
+    variants.push({ fingerprint, render, bytes });
+    this.#entries = retainedEntries + 1;
+    this.#bytes = retainedBytes + bytes;
+  }
+}
 
 function createRichTranscriptLayoutCache(): RichTranscriptLayoutCache {
   return { revision: -1, layouts: [], prefixes: [], retained: [] };
 }
 
+function clearRichTranscriptLayoutCache(cache: RichTranscriptLayoutCache): void {
+  for (const slot of cache.retained) slot.layout.clear();
+  cache.revision = -1;
+  cache.layouts = [];
+  cache.prefixes = [];
+  cache.retained = [];
+}
+
 function richTranscriptLayoutKey(request: Readonly<TuiFrameProjectionRequest>): string {
   const options = request.transcriptOptions;
   return JSON.stringify([
+    request.thinkingExpanded,
+    request.toolDetailsExpanded,
     request.hideReasoningBlock,
     request.view.hiddenReasoningLabel,
     request.outputPad,
@@ -475,8 +604,6 @@ function richTranscriptCanReuse(
   return revision !== undefined
     && Number.isSafeInteger(revision)
     && revision >= 0
-    && request.transcriptOptions.transformMarkdown === undefined
-    && (request.transcriptOptions.toolRenderBlocks?.size ?? 0) === 0
     && (request.transcriptOptions.sessionRenderBlocks?.size ?? 0) === 0
     && entries.every((entry) => entry.extension === undefined && (entry.images?.length ?? 0) === 0);
 }
@@ -505,6 +632,103 @@ function transcriptChunks(
     index += 1;
   }
   return chunks;
+}
+
+function richTranscriptWidth(columns: number): number {
+  return Number.isSafeInteger(columns) && columns > 0 ? Math.min(columns, 500) : 80;
+}
+
+function visibleReasoningMarkdown(value: string): string {
+  return value.replace(/<!--[\s\S]*?-->/gu, " ");
+}
+
+function markdownTransformInput(
+  request: Readonly<TuiFrameProjectionRequest>,
+  chunk: TranscriptChunk,
+  columns: number,
+): Readonly<{ input: string; context: MarkdownTransformContext }> | undefined {
+  const entry = chunk.entries[0];
+  if (entry === undefined) return undefined;
+  if (entry.card !== undefined || (!chunk.host && entry.extension !== undefined)) return undefined;
+  const width = richTranscriptWidth(columns);
+  if (entry.kind === "user" || entry.kind === "assistant") {
+    if (entry.text === "") return undefined;
+    const outputPad = request.transcriptOptions.outputPad ?? (entry.kind === "user" ? 1 : 0);
+    return {
+      input: entry.text,
+      context: {
+        messageType: entry.kind,
+        isStreaming: entry.streaming === true,
+        availableWidth: Math.max(1, width - (2 * outputPad)),
+      },
+    };
+  }
+  if (entry.kind !== "reasoning") return undefined;
+  if (chunk.host) {
+    if (request.transcriptOptions.hideReasoningBlock === true) return undefined;
+    const input = chunk.entries
+      .map((candidate) => visibleReasoningMarkdown(candidate.text).trim())
+      .filter(Boolean)
+      .join("\n\n");
+    if (input === "") return undefined;
+    return {
+      input,
+      context: {
+        messageType: "assistant-thinking",
+        isStreaming: chunk.entries.some((candidate) => candidate.streaming === true),
+        availableWidth: Math.max(1, width - 4),
+      },
+    };
+  }
+  const input = chunk.entries.map((candidate) => candidate.text).filter((text) => text !== "").join("\n\n");
+  if (input === "") return undefined;
+  const indent = columns >= 4 ? 2 : 0;
+  return {
+    input,
+    context: {
+      messageType: "assistant-thinking",
+      isStreaming: chunk.entries.some((candidate) => candidate.streaming === true),
+      availableWidth: Math.max(1, columns - indent),
+    },
+  };
+}
+
+function prepareTranscriptChunks(
+  request: Readonly<TuiFrameProjectionRequest>,
+  entries: readonly TranscriptEntry[],
+  columns: number,
+): PreparedTranscriptChunks {
+  const chunks = transcriptChunks(request, entries);
+  const transform = request.transcriptOptions.transformMarkdown;
+  if (transform === undefined) return { chunks, overflow: false };
+  const prepared: TranscriptChunk[] = [];
+  let preparedBytes = 0;
+  let overflow = false;
+  for (const chunk of chunks) {
+    if (overflow) {
+      prepared.push({ ...chunk, markdownTransformPending: true });
+      continue;
+    }
+    const selected = markdownTransformInput(request, chunk, columns);
+    if (selected === undefined) {
+      prepared.push(chunk);
+      continue;
+    }
+    let output = selected.input;
+    try {
+      const transformed = transform(selected.input, selected.context);
+      if (isStringValue(transformed)) output = transformed;
+    } catch {
+      // Display transformations are isolated from transcript rendering.
+    }
+    prepared.push({
+      ...chunk,
+      markdownTransform: { ...selected, output },
+    });
+    preparedBytes += Buffer.byteLength(output, "utf8");
+    if (preparedBytes > MAX_RICH_TRANSCRIPT_PREFIX_BYTES) overflow = true;
+  }
+  return { chunks: prepared, overflow };
 }
 
 interface TrimmedLines {
@@ -633,17 +857,21 @@ function richTranscriptChunkCanCache(chunk: TranscriptChunk): boolean {
       && entry.status !== "running");
 }
 
+function richTranscriptChunkHasToolExpansion(chunk: TranscriptChunk): boolean {
+  return chunk.entries.some((entry) => (
+    entry.kind === "tool"
+    || entry.kind === "startup"
+    || entry.expandable === true
+  ));
+}
+
 function richTranscriptChunkFingerprint(
   request: Readonly<TuiFrameProjectionRequest>,
   chunk: TranscriptChunk,
 ): string | undefined {
   try {
     const reasoning = chunk.entries.some((entry) => entry.kind === "reasoning");
-    const expandable = chunk.entries.some((entry) => (
-      entry.kind === "tool"
-      || entry.kind === "startup"
-      || entry.expandable === true
-    ));
+    const expandable = richTranscriptChunkHasToolExpansion(chunk);
     const inheritsToolExpansion = chunk.entries.some((entry) => (
       entry.kind === "tool"
       || entry.kind === "startup"
@@ -651,6 +879,11 @@ function richTranscriptChunkFingerprint(
     ) && entry.expanded === undefined);
     const serialized = JSON.stringify([
       chunk.entries,
+      chunk.entries.map((entry) => internalToolRenderSlotsForEntry(
+        request.transcriptOptions.toolRenderBlocks,
+        entry,
+      )),
+      chunk.markdownTransform?.output,
       reasoning ? [
         request.thinkingExpanded,
         request.hideReasoningBlock,
@@ -800,9 +1033,7 @@ function customToolProjection(
   entry: TranscriptEntry,
   columns: number,
 ): CustomToolProjection {
-  const custom = entry.callId === undefined
-    ? undefined
-    : request.transcriptOptions.toolRenderBlocks?.get(entry.callId);
+  const custom = internalToolRenderSlotsForEntry(request.transcriptOptions.toolRenderBlocks, entry);
   if (custom === undefined || custom.shell === "self") {
     return { callLines: undefined, resultLines: undefined, failed: false };
   }
@@ -843,7 +1074,7 @@ function nativeTranscriptProjection(
     codeBlockIndent: request.codeBlockIndent,
     theme: request.theme,
     unicode: request.theme.unicode,
-  });
+  }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
   return {
     lines: trimExactEmptyLines(chunkFrame.text.split("\n").slice(0, chunkFrame.composer.top)).lines,
     images: [],
@@ -860,12 +1091,14 @@ function batchNativeChunkProjections(
     const source = chunk.entries[0];
     if (
       chunk.host
+      || chunk.markdownTransform !== undefined
+      || chunk.markdownTransformPending === true
       || chunk.entries.length !== 1
       || source === undefined
       || source.extension !== undefined
       || (source.images?.length ?? 0) > 0
-      || (source.kind === "tool" && source.callId !== undefined
-        && request.transcriptOptions.toolRenderBlocks?.has(source.callId) === true)
+      || (source.kind === "tool"
+        && internalToolRenderSlotsForEntry(request.transcriptOptions.toolRenderBlocks, source) !== undefined)
     ) return [];
     const projected = projectTranscript(chunk.entries, request.hideReasoningBlock);
     const entry = projected[0];
@@ -887,7 +1120,7 @@ function batchNativeChunkProjections(
       codeBlockIndent: request.codeBlockIndent,
       theme: request.theme,
       unicode: request.theme.unicode,
-    });
+    }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
     if (blocks === undefined || blocks.length !== selected.length) return new Map();
     return new Map(selected.map(({ index }, selectedIndex) => [
       index,
@@ -945,7 +1178,7 @@ function nativeReasoningProjection(
     codeBlockIndent: request.codeBlockIndent,
     theme: request.theme,
     unicode: request.theme.unicode,
-  });
+  }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
   const lines = trimExactEmptyLines(headerFrame.text.split("\n").slice(0, headerFrame.composer.top)).lines;
   if (!expanded) return { lines, images: [] };
   try {
@@ -980,7 +1213,7 @@ function nativeReasoningProjection(
       codeBlockIndent: request.codeBlockIndent,
       theme: request.theme,
       unicode: request.theme.unicode,
-    });
+    }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
     return {
       lines: trimExactEmptyLines(frame.text.split("\n").slice(0, frame.composer.top)).lines,
       images: [],
@@ -1033,6 +1266,33 @@ function nativeChunkProjection(
   return selected;
 }
 
+function markdownTransformMatches(
+  prepared: PreparedMarkdownTransform,
+  input: string,
+  context: MarkdownTransformContext,
+): boolean {
+  return input === prepared.input
+    && context.messageType === prepared.context.messageType
+    && context.isStreaming === prepared.context.isStreaming
+    && context.availableWidth === prepared.context.availableWidth;
+}
+
+function requestWithPreparedMarkdown(
+  request: Readonly<TuiFrameProjectionRequest>,
+  chunk: TranscriptChunk,
+): Readonly<TuiFrameProjectionRequest> {
+  const prepared = chunk.markdownTransform;
+  if (prepared === undefined) return request;
+  return {
+    ...request,
+    transcriptOptions: {
+      ...request.transcriptOptions,
+      transformMarkdown: (input, context) =>
+        markdownTransformMatches(prepared, input, context) ? prepared.output : input,
+    },
+  };
+}
+
 function projectTranscriptChunk(
   request: Readonly<TuiFrameProjectionRequest>,
   shell: OhmTuiSnapshot,
@@ -1040,11 +1300,12 @@ function projectTranscriptChunk(
   columns: number,
   imageBudget: ImageProjectionBudget,
 ): LocalTranscriptProjection {
+  const projectionRequest = requestWithPreparedMarkdown(request, chunk);
   let local: LocalTranscriptProjection;
   if (chunk.host) {
     try {
       const projected = projectOhmTuiTranscriptContent(withoutTranscriptImages(chunk.entries), {
-        ...request.transcriptOptions,
+        ...projectionRequest.transcriptOptions,
         ...optionalProperties(request.hideReasoningBlock || request.view.hiddenReasoningLabel !== undefined ? { hiddenReasoningLabel: request.view.hiddenReasoningLabel ?? "Thinking..." } : undefined),
         columns,
         theme: request.theme,
@@ -1057,10 +1318,10 @@ function projectTranscriptChunk(
           .filter((image) => image.row >= 0),
       };
     } catch {
-      local = nativeChunkProjection(request, shell, chunk.entries, columns);
+      local = nativeChunkProjection(projectionRequest, shell, chunk.entries, columns);
     }
   } else {
-    local = nativeChunkProjection(request, shell, chunk.entries, columns);
+    local = nativeChunkProjection(projectionRequest, shell, chunk.entries, columns);
   }
   appendLocalProjection(local, imageOnlyProjection(request, chunk.entries, columns, imageBudget));
   return local;
@@ -1069,7 +1330,7 @@ function projectTranscriptChunk(
 function projectMixedTranscript(
   request: Readonly<TuiFrameProjectionRequest>,
   shell: OhmTuiSnapshot,
-  entries: readonly TranscriptEntry[],
+  chunks: readonly TranscriptChunk[],
   columns: number,
   prefix?: CachedRichTranscriptPrefix,
 ): RichTranscriptProjection {
@@ -1078,7 +1339,6 @@ function projectMixedTranscript(
   const messageRows: number[] = [];
   const ranges: RichTranscriptRowRange[] = [];
   const imageBudget: ImageProjectionBudget = { count: 0, bytes: 0 };
-  const chunks = transcriptChunks(request, entries);
   let reusePrefix = prefix !== undefined;
   let prefixEligible = prefix !== undefined;
   interface TranscriptChunkPlan {
@@ -1151,10 +1411,12 @@ function projectMixedTranscript(
 function retainedTranscriptSources(
   request: Readonly<TuiFrameProjectionRequest>,
   shell: OhmTuiSnapshot,
-  entries: readonly TranscriptEntry[],
+  chunks: readonly TranscriptChunk[],
 ): RetainedTranscriptChunk<RetainedRichTranscriptValue>[] | undefined {
   const selected: RetainedTranscriptChunk<RetainedRichTranscriptValue>[] = [];
-  for (const chunk of transcriptChunks(request, entries)) {
+  let retainMatchingRender = false;
+  for (const chunk of chunks) {
+    if (richTranscriptChunkHasToolExpansion(chunk)) retainMatchingRender = true;
     const fingerprint = richTranscriptChunkFingerprint(request, chunk);
     if (fingerprint === undefined) return undefined;
     const itemKeys = chunk.entries.map((entry) => `entry:${entry.id}`);
@@ -1164,7 +1426,7 @@ function retainedTranscriptSources(
       itemKeys,
       entryIds,
       fingerprint,
-      value: { request, shell, chunk },
+      value: { request, shell, chunk, retainMatchingRender },
       ...optionalProperties(chunk.entries.some((entry) => entry.kind === "user") ? { isUserPrompt: true } : undefined),
     });
   }
@@ -1176,21 +1438,30 @@ function createRetainedTranscriptSlot(
   request: Readonly<TuiFrameProjectionRequest>,
   key: string,
 ): RetainedRichTranscriptSlot {
+  const matchingRenders = new RetainedRichTranscriptRenderCache();
   const slot: RetainedRichTranscriptSlot = {
     columns,
     theme: request.theme,
     key,
     revision: -1,
+    transformerActive: false,
     overflow: false,
     layout: new OhmTranscriptLayout<RetainedRichTranscriptValue>((source) => {
+      const chunk = source.value.chunk;
+      const retainVariant = richTranscriptChunkCanCache(chunk)
+        && source.value.retainMatchingRender;
+      const retained = retainVariant
+        ? matchingRenders.get(source.key, source.fingerprint)
+        : undefined;
+      if (retained !== undefined) return retained;
       const local = projectTranscriptChunk(
         source.value.request,
         source.value.shell,
-        source.value.chunk,
+        chunk,
         columns,
         { count: 0, bytes: 0 },
       );
-      return {
+      const rendered = {
         rows: local.lines,
         ...optionalProperties(local.lines.length === 0 ? undefined : {
           entryRanges: [{ entryIds: source.entryIds, start: 0, end: local.lines.length }],
@@ -1199,6 +1470,15 @@ function createRetainedTranscriptSlot(
           source.isUserPrompt === true && local.lines.length > 0 ? { promptRows: [0] } : undefined,
         ),
       };
+      if (retainVariant) {
+        matchingRenders.set(
+          source.key,
+          source.fingerprint,
+          rendered,
+          richTranscriptChunkHasToolExpansion(chunk) ? 2 : 1,
+        );
+      }
+      return rendered;
     }, { interChunkGapRows: 1 }),
   };
   return slot;
@@ -1208,7 +1488,7 @@ function retainedRichTranscriptProjection(
   cache: RichTranscriptLayoutCache,
   request: Readonly<TuiFrameProjectionRequest> & { readonly transcriptRevision: number },
   shell: OhmTuiSnapshot,
-  entries: readonly TranscriptEntry[],
+  chunks: readonly TranscriptChunk[],
   columns: number,
 ): RichTranscriptProjection | undefined {
   const key = richTranscriptPrefixKey(request);
@@ -1225,21 +1505,27 @@ function retainedRichTranscriptProjection(
     cache.retained.splice(slotIndex, 1);
     cache.retained.push(slot);
   }
-  if (slot.revision !== request.transcriptRevision) {
-    const sources = retainedTranscriptSources(request, shell, entries);
+  const revisionChanged = slot.revision !== request.transcriptRevision;
+  const transformerActive = request.transcriptOptions.transformMarkdown !== undefined;
+  if (revisionChanged || transformerActive || slot.transformerActive) {
+    const sources = retainedTranscriptSources(request, shell, chunks);
     if (sources === undefined) return undefined;
     try {
-      slot.layout.reconcile(sources, columns, key);
+      const reconciled = slot.layout.reconcile(sources, columns, key);
       slot.overflow = slot.layout.totalRows > MAX_RICH_TRANSCRIPT_PREFIX_ROWS
         || slot.layout.totalBytes > MAX_RICH_TRANSCRIPT_PREFIX_BYTES;
       if (slot.overflow) slot.layout.clear();
       slot.revision = request.transcriptRevision;
-      delete slot.searchQuery;
-      delete slot.searchResult;
+      slot.transformerActive = transformerActive;
+      if (revisionChanged || reconciled.renderedChunks > 0) {
+        delete slot.searchQuery;
+        delete slot.searchResult;
+      }
     } catch {
       slot.layout.clear();
       slot.overflow = true;
       slot.revision = request.transcriptRevision;
+      slot.transformerActive = transformerActive;
     }
   }
   if (slot.overflow) return undefined;
@@ -1269,14 +1555,26 @@ function projectCachedMixedTranscript(
   entries: readonly TranscriptEntry[],
   columns: number,
 ): RichTranscriptProjection {
+  const prepared = prepareTranscriptChunks(request, entries, columns);
+  const chunks = prepared.chunks;
+  if (prepared.overflow) return projectMixedTranscript(request, shell, chunks, columns);
   if (cache === undefined || !richTranscriptCanReuse(request, entries)) {
-    return projectMixedTranscript(request, shell, entries, columns);
+    return projectMixedTranscript(request, shell, chunks, columns);
   }
-  const retained = retainedRichTranscriptProjection(cache, request, shell, entries, columns);
+  const retained = retainedRichTranscriptProjection(cache, request, shell, chunks, columns);
   if (retained !== undefined) return retained;
   if (cache.revision !== request.transcriptRevision) {
     cache.revision = request.transcriptRevision;
     cache.layouts = [];
+  }
+  if (request.transcriptOptions.transformMarkdown !== undefined) {
+    return projectMixedTranscript(
+      request,
+      shell,
+      chunks,
+      columns,
+      richTranscriptPrefix(cache, request, columns),
+    );
   }
   const key = richTranscriptLayoutKey(request);
   const cachedLayout = cache.layouts.find((layout) =>
@@ -1287,7 +1585,7 @@ function projectCachedMixedTranscript(
   const content = projectMixedTranscript(
     request,
     shell,
-    entries,
+    chunks,
     columns,
     richTranscriptPrefix(cache, request, columns),
   );
@@ -2421,7 +2719,7 @@ function projectRichRecoveryFrame(request: Readonly<TuiFrameProjectionRequest>):
       theme: request.theme,
       unicode: request.theme.unicode,
       ...richShellBudgets(size.rows),
-    });
+    }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
     return boundedRecoveryFrame(full, request);
   } catch {
     return minimalRecoveryFrame(request);
@@ -2462,7 +2760,7 @@ function projectRichTuiFrameInternal(
         theme: request.theme,
         unicode: request.theme.unicode,
         ...shellBudgets,
-      }), request, transcriptContent, scrollbarVisible,
+      }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]), request, transcriptContent, scrollbarVisible,
       "fullscreenScrollbarHovered" in request.transcriptOptions
         && request.transcriptOptions.fullscreenScrollbarHovered === true);
     };
@@ -2497,8 +2795,17 @@ export const projectRichTuiFrame: TuiFrameProjector = (request) => projectRichTu
 /** @internal Creates one controller-scoped projector with bounded retained layout state. */
 export function internalCreateRichTuiFrameProjector(): TuiFrameProjector {
   const transcriptCache = createRichTranscriptLayoutCache();
-  const shellProjector = createOhmNativeViewProjector();
-  return (request) => projectRichTuiFrameInternal(request, transcriptCache, shellProjector);
+  let shellProjector = createOhmNativeViewProjector();
+  return Object.assign(
+    (request: Readonly<TuiFrameProjectionRequest>) =>
+      projectRichTuiFrameInternal(request, transcriptCache, shellProjector),
+    {
+      [INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]: () => {
+        clearRichTranscriptLayoutCache(transcriptCache);
+        shellProjector = createOhmNativeViewProjector();
+      },
+    },
+  );
 }
 
 /** Constructs the shipping interactive controller with the rich frame as its sole projector. */

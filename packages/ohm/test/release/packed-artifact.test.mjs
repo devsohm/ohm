@@ -76,6 +76,7 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/extension-capabilities.md",
   "docs/extension-events.md",
   "docs/extensions.md",
+  "docs/facets-and-presentations.md",
   "docs/api-aliases.md",
   "docs/getting-started.md",
   "docs/image-generation.md",

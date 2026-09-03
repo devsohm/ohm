@@ -4,11 +4,21 @@ import type { Api, ImageContent, Model } from "@ohm/models";
 import type { SourceInfo } from "../core/source-info.js";
 import type { CompactionResult } from "../extensions/direct.js";
 import type {
+	ExtensionWireServiceDescriptor,
+	ExtensionWireServiceRequest,
+	ExtensionWireServiceResponse,
+} from "../extensions/wire-services.js";
+import type {
 	ExtensionSessionProvenance,
 	SessionEntry,
 	SessionTreeNode,
 } from "../extensions/session-contract.js";
 import type { ProviderModelThinkingLevel } from "../providers/models.js";
+import type {
+	PortablePresentationActionRequest,
+	PortablePresentationActionResult,
+	PortablePresentationEvent,
+} from "./portable-presentation.js";
 import type {
 	AgentSessionBashResult,
 	AgentSessionRecoveryResult,
@@ -81,6 +91,10 @@ type RpcCommandPayloads = {
 	set_session_name: { name: string };
 	get_messages: { cursor?: string; limit?: number };
 	get_commands: object;
+	get_portable_presentations: object;
+	presentation_action: PortablePresentationActionRequest;
+	get_extension_wire_services: object;
+	extension_wire_request: { request: ExtensionWireServiceRequest };
 };
 
 type RpcCommandOf<K extends keyof RpcCommandPayloads> = {
@@ -174,7 +188,13 @@ type RpcResponseData = {
 	get_last_assistant_text: { text: string | null };
 	get_messages: RpcMessagePage;
 	get_commands: { commands: RpcSlashCommand[] };
+	get_portable_presentations: { presentations: readonly PortablePresentationEvent[] };
+	presentation_action: PortablePresentationActionResult;
+	get_extension_wire_services: { services: readonly ExtensionWireServiceDescriptor[] };
+	extension_wire_request: ExtensionWireServiceResponse;
 };
+
+export type RpcPortablePresentationEvent = PortablePresentationEvent;
 
 type RpcResponseWithoutData = Exclude<RpcCommandType, keyof RpcResponseData>;
 

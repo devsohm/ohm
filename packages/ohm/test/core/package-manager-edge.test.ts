@@ -837,10 +837,11 @@ test("configured package-manager argv selects exact npm and pnpm install convent
             "--config.auto-install-peers=false",
             "--config.strict-peer-dependencies=false",
             "--config.strict-dep-builds=false",
+            "--config.node-linker=hoisted",
           ]
       : [
             "--", "npm", "install", "fixture", "--prefix", installRoot, "--legacy-peer-deps",
-            "--ignore-scripts=true", "--bin-links=false",
+            "--ignore-scripts=true", "--bin-links=false", "--install-links=true",
           ];
     assert.deepEqual(args, expected);
     assert.equal(recorded.ignoreScripts, "true");

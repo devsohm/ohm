@@ -17,13 +17,13 @@ include PowerShell, `Get-FileHash`, and `tar.exe`.
 On Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
 ```
 
 For a portable manual copy, download `ohm-v<version>-<platform>-<arch>.tar.gz` and `SHA256SUMS` from the same

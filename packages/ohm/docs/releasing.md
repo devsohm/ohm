@@ -143,9 +143,9 @@ Manual workflow dispatch performs the regression guards, staging, and full platf
 Download `SHA256SUMS`, the SBOM, and the artifact you plan to use from one tag. Then verify the bytes locally:
 
 ```sh
-tag=v0.1.0
-artifact=ohm-v0.1.0-linux-x64.tar.gz
-source=ohm-v0.1.0-source.tar.gz
+tag=v0.1.1
+artifact=ohm-v0.1.1-linux-x64.tar.gz
+source=ohm-v0.1.1-source.tar.gz
 gh release download "$tag" --repo devsohm/ohm --pattern SHA256SUMS --pattern '*.spdx.json' --pattern "$artifact" --pattern "$source"
 sha256sum --check --ignore-missing SHA256SUMS
 ```

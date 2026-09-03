@@ -58,9 +58,20 @@ providing a confidentiality or sandbox boundary. Protocol bridges and delegated
 agents remain trusted extension code; untrusted packages must not be loaded as
 direct extensions.
 
-The trusted service registry is also process-local rather than an isolation
-boundary. It lets cooperating extensions share callback-bearing objects by
-reference; durable or cross-process coordination needs a different contract.
+Durable jobs add host-owned identity, atomic bounded metadata, cancellation,
+and explicit recovery without moving workflow policy into the host. Durable
+child sessions use the same ownership plus a private V4 journal and the public
+Ohm RPC protocol. A restarted host reports prior live work as interrupted and
+requires explicit reattachment; it never claims that a process survived. A
+second live host cannot take ownership from the first. Child sessions inherit
+the host's Ohm environment for provider authentication and remain in the same
+trust boundary; extensions cannot inject an executable, raw argv, or environment.
+
+The trusted `ohm.services` registry remains process-local and is not an
+isolation boundary. Optional facets add a separate versioned, JSON-only wire
+service contract for RPC and serve clients, generation-owned named state with
+bounded delta replay, and portable presentation snapshots. See
+[Facets, portable presentations, and wire services](facets-and-presentations.md).
 
 The HTTP service keeps session identity under its endpoint registry. Extension
 commands can navigate the current tree and refresh resources there, but

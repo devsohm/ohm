@@ -83,7 +83,7 @@ test("Windows-simulated default package operations execute npm-cli.js through No
   const { args } = recorded;
   assert.deepEqual(args, [
     "install", "fixture", "--prefix", args[3],
-    "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false",
+    "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false", "--install-links=true",
   ]);
   assert.match(args[3] ?? "", /\.ohm-package-stage-/u);
 });

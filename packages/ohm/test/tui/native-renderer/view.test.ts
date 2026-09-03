@@ -3,8 +3,10 @@ import test from "node:test";
 
 import { cellWidth, stripAnsi } from "@ohm/terminal";
 
-import type { OhmTuiSnapshot } from "../../../src/tui/native-renderer/types.js";
+import type { OhmTuiSnapshot, OhmTuiToolDetail } from "../../../src/tui/native-renderer/types.js";
 import {
+  internalCreateOhmNativeToolDetailCache,
+  internalPrewarmOhmNativeToolDetail,
   projectOhmNativeFrame,
   projectOhmNativeTranscriptEntries,
   OhmNativeView,
@@ -382,6 +384,36 @@ test("native transcript batch projection returns exact independent entry blocks"
     ],
     ["! warning Catalog", "  temporarily unavailable"],
   ]);
+});
+
+test("native tool detail prewarming populates the exact width-keyed render cache", () => {
+  const cache = internalCreateOhmNativeToolDetailCache();
+  const isolated = internalCreateOhmNativeToolDetailCache();
+  const detail: OhmTuiToolDetail = {
+    kind: "source",
+    label: "Source",
+    value: `native-prewarm-cache-sentinel ${"x".repeat(180)}`,
+  };
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", cache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", cache), false);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 55, "", cache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", isolated), true);
+
+  const frame = stripAnsi(projectOhmNativeFrame({
+    snapshot: {
+      transcript: [{ id: "prewarmed", kind: "tool", name: "write", status: "completed", details: [detail], expanded: true }],
+      queuedMessages: [],
+      composer: { value: "" },
+      status: { connection: "connected" },
+      telemetry: {},
+    },
+    columns: 54,
+  }, cache).text);
+  assert.match(frame, /native-prewarm-cache-sentinel/u);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", cache), false);
+  cache.clear();
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", cache), true);
+  assert.equal(internalPrewarmOhmNativeToolDetail(detail, 54, "", isolated), false);
 });
 
 test("controller-scoped native view retains unchanged transcript components", () => {

@@ -32,6 +32,7 @@ data locations, updates, and removal in one workflow.
 - [Provider authoring](provider-authoring.md) — custom providers, model metadata, authentication, streaming, request hooks, and testing.
 - [Package authoring and local gallery](packages.md) — package formats, install sources, dependencies, project locks, provenance, testing, and release guidance.
 - [Extension capability matrix](extension-capabilities.md) — public extension surfaces, supported hosts, examples, and conformance coverage.
+- [Facets, portable presentations, and wire services](facets-and-presentations.md) — optional worker/session/UI facets, shared JSON state, and cross-process view/service contracts.
 - [Extension TUI](tui.md) — structural components, ordered session slots, overlays, tool and session renderers, themes, input, focus, and lifecycle.
 - [Runtime extension events](extension-events.md) — event payloads, ordering, bounds, cancellation, and failure isolation.
 - [Package discovery index](package-gallery.md) — public gallery metadata and deterministic discovery checks.

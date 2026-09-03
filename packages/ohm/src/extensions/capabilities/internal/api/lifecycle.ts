@@ -1,4 +1,9 @@
 import type { ExtensionConfigStore } from "../../../config-store.js";
+import type {
+  ExtensionChildSessionService,
+  ExtensionJobService,
+} from "../../../durable-jobs.js";
+import type { ExtensionFacetService } from "../../../facets.js";
 import type { ExtensionProcessService } from "../../../../process/managed-process.js";
 import type { JsonValue } from "../../../../core/json.js";
 import type { ExtensionEventMap, ExtensionHandler } from "../../events.js";
@@ -6,6 +11,9 @@ import type { ExtensionRegistrationHandle } from "./registration.js";
 
 export interface ExtensionLifecycleCapabilities {
   readonly config: ExtensionConfigStore;
+  readonly facets: ExtensionFacetService;
+  readonly jobs: ExtensionJobService;
+  readonly childSessions: ExtensionChildSessionService;
   readonly processes: ExtensionProcessService;
   readonly services: {
     register<Service extends object>(name: string, service: Service): ExtensionRegistrationHandle;

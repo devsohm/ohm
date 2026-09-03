@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { opendirSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  opendirSync,
+  rmdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import {
   mkdir,
   lstat,
@@ -38,6 +45,12 @@ function controlPath(path: string, name: ControlName, token: string): string {
 
 async function directoryIdentity(path: string): Promise<LockDirectoryIdentity> {
   const value = await lstat(lockDirectory(path), { bigint: true });
+  if (!value.isDirectory() || value.isSymbolicLink()) throw new Error("File lock is not a real directory");
+  return { dev: value.dev, ino: value.ino };
+}
+
+function directoryIdentitySync(path: string): LockDirectoryIdentity {
+  const value = lstatSync(lockDirectory(path), { bigint: true });
   if (!value.isDirectory() || value.isSymbolicLink()) throw new Error("File lock is not a real directory");
   return { dev: value.dev, ino: value.ino };
 }
@@ -105,6 +118,146 @@ function lockOwnerIsAlive(path: string): boolean {
       return true;
     } catch (error) {
       return !hasErrorCode(error, "ESRCH");
+    }
+  } catch {
+    return false;
+  }
+}
+
+function canonicalDeadOwner(path: string, token: string): { pid: string } | undefined {
+  try {
+    if (readControlFileSync(controlPath(path, "owner", token)) !== token) return undefined;
+    const pidText = readControlFileSync(controlPath(path, "pid", token));
+    const pid = Number(pidText);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pidText !== String(pid)) return undefined;
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch (error) {
+      return hasErrorCode(error, "ESRCH") ? { pid: pidText } : undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function removeExpectedControlSync(path: string, name: ControlName, token: string, expected: string): boolean {
+  const selected = controlPath(path, name, token);
+  try {
+    if (readControlFileSync(selected) !== expected) return false;
+    unlinkSync(selected);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return true;
+    return false;
+  }
+}
+
+function removeStaleControlSync(path: string, name: Exclude<ControlName, "claim">, token: string): boolean {
+  const selected = controlPath(path, name, token);
+  try {
+    const metadata = lstatSync(selected);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) rmdirSync(selected);
+    else unlinkSync(selected);
+    return true;
+  } catch (error) {
+    return hasErrorCode(error, "ENOENT");
+  }
+}
+
+function directoryMatchesSync(
+  path: string,
+  created: LockDirectoryIdentity,
+  token: string,
+  complete: boolean,
+): boolean {
+  try {
+    return sameIdentity(directoryIdentitySync(path), created)
+      && readControlFileSync(controlPath(path, "claim", token)) === token
+      && (!complete || (
+        readControlFileSync(controlPath(path, "owner", token)) === token
+        && readControlFileSync(controlPath(path, "pid", token)) === String(process.pid)
+      ));
+  } catch {
+    return false;
+  }
+}
+
+function removeClaimedSync(
+  path: string,
+  created: LockDirectoryIdentity,
+  token: string,
+  controls: readonly Exclude<ControlName, "claim">[],
+  complete: boolean,
+): boolean {
+  if (!directoryMatchesSync(path, created, token, complete)) return false;
+  let controlsRemoved = true;
+  for (const name of controls) {
+    const expected = name === "owner" ? token : String(process.pid);
+    if (!removeExpectedControlSync(path, name, token, expected)) controlsRemoved = false;
+  }
+  if (!controlsRemoved) return false;
+  try {
+    unlinkSync(controlPath(path, "claim", token));
+    rmdirSync(lockDirectory(path));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function rollBackWrittenControlsSync(
+  path: string,
+  created: LockDirectoryIdentity,
+  token: string,
+  controls: readonly Exclude<ControlName, "claim">[],
+): boolean {
+  const ownedDirectory = directoryMatchesSync(path, created, token, false);
+  let success = true;
+  for (const name of controls) {
+    const expected = name === "owner" ? token : String(process.pid);
+    if (!removeExpectedControlSync(path, name, token, expected)) success = false;
+  }
+  if (!removeExpectedControlSync(path, "claim", token, token)) success = false;
+  if (success && ownedDirectory) {
+    try {
+      rmdirSync(lockDirectory(path));
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT")) success = false;
+    }
+  }
+  return success;
+}
+
+function removeDeadOrStaleSync(path: string): boolean {
+  try {
+    const metadata = lstatSync(lockDirectory(path), { bigint: true });
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+    const created = { dev: metadata.dev, ino: metadata.ino };
+    const token = claimTokenSync(path);
+    if (token === undefined) {
+      if (Date.now() - Number(metadata.mtimeMs) <= STALE_AFTER_MS) return false;
+      rmdirSync(lockDirectory(path));
+      return true;
+    }
+    const deadOwner = canonicalDeadOwner(path, token);
+    if (deadOwner === undefined) {
+      if (Date.now() - Number(metadata.mtimeMs) <= STALE_AFTER_MS || lockOwnerIsAlive(path)) return false;
+    }
+    if (!directoryMatchesSync(path, created, token, false)) return false;
+    const ownerRemoved = deadOwner !== undefined
+      ? removeExpectedControlSync(path, "owner", token, token)
+      : removeStaleControlSync(path, "owner", token);
+    const pidRemoved = deadOwner !== undefined
+      ? removeExpectedControlSync(path, "pid", token, deadOwner.pid)
+      : removeStaleControlSync(path, "pid", token);
+    if (!ownerRemoved || !pidRemoved) return false;
+    if (!removeExpectedControlSync(path, "claim", token, token)) return false;
+    try {
+      rmdirSync(lockDirectory(path));
+      return true;
+    } catch {
+      return false;
     }
   } catch {
     return false;
@@ -203,17 +356,24 @@ async function removeStale(path: string): Promise<boolean> {
   try {
     const metadata = await lstat(lockDirectory(path), { bigint: true });
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
-    if (Date.now() - Number(metadata.mtimeMs) <= STALE_AFTER_MS) return false;
     const created = { dev: metadata.dev, ino: metadata.ino };
     const token = claimTokenSync(path);
     if (token === undefined) {
+      if (Date.now() - Number(metadata.mtimeMs) <= STALE_AFTER_MS) return false;
       await rmdir(lockDirectory(path));
       return true;
     }
-    if (lockOwnerIsAlive(path)) return false;
+    const deadOwner = canonicalDeadOwner(path, token);
+    if (deadOwner === undefined) {
+      if (Date.now() - Number(metadata.mtimeMs) <= STALE_AFTER_MS || lockOwnerIsAlive(path)) return false;
+    }
     if (!(await directoryMatches(path, created, token, false))) return false;
-    const ownerRemoved = await removeStaleControl(path, "owner", token);
-    const pidRemoved = await removeStaleControl(path, "pid", token);
+    const ownerRemoved = deadOwner === undefined
+      ? await removeStaleControl(path, "owner", token)
+      : await removeExpectedControl(path, "owner", token, token);
+    const pidRemoved = deadOwner === undefined
+      ? await removeStaleControl(path, "pid", token)
+      : await removeExpectedControl(path, "pid", token, deadOwner.pid);
     if (!ownerRemoved || !pidRemoved) return false;
     try {
       await unlink(controlPath(path, "claim", token));
@@ -238,6 +398,67 @@ async function waitForRetry(signal: AbortSignal | undefined): Promise<void> {
     signal.throwIfAborted();
     throw error;
   }
+}
+
+export function tryWithFileLockSync<T>(
+  path: string,
+  operation: () => T,
+): { acquired: false } | { acquired: true; value: T } {
+  const token = randomUUID();
+  let reclaimed = false;
+  let acquired: LockDirectoryIdentity;
+  while (true) {
+    let createdDirectory = false;
+    try {
+      mkdirSync(lockDirectory(path));
+      createdDirectory = true;
+      acquired = directoryIdentitySync(path);
+      const written: Exclude<ControlName, "claim">[] = [];
+      let claimed = false;
+      try {
+        writeFileSync(controlPath(path, "claim", token), token, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        claimed = true;
+        writeFileSync(controlPath(path, "owner", token), token, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        written.push("owner");
+        writeFileSync(controlPath(path, "pid", token), String(process.pid), { encoding: "utf8", flag: "wx", mode: 0o600 });
+        written.push("pid");
+        if (!directoryMatchesSync(path, acquired, token, true)) {
+          throw new Error(`File lock was replaced for ${path}`);
+        }
+      } catch (error) {
+        if (claimed && !rollBackWrittenControlsSync(path, acquired, token, written)) {
+          throw operationAndCleanupFailure(path, error);
+        }
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if (createdDirectory && isLostUnclaimedDirectory(error)) return { acquired: false };
+      if (!isAlreadyLocked(error)) throw error;
+      if (reclaimed || !removeDeadOrStaleSync(path)) return { acquired: false };
+      reclaimed = true;
+    }
+  }
+
+  let result!: T;
+  let operationError: unknown;
+  let operationFailed = false;
+  try {
+    result = operation();
+    if (!directoryMatchesSync(path, acquired, token, true)) {
+      throw new Error(`File lock was replaced for ${path}`);
+    }
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+  const released = removeClaimedSync(path, acquired, token, ["owner", "pid"], true);
+  if (!released) {
+    if (operationFailed) throw operationAndCleanupFailure(path, operationError);
+    throw cleanupFailure(path);
+  }
+  if (operationFailed) throw operationError;
+  return { acquired: true, value: result };
 }
 
 export async function withFileLock<T>(

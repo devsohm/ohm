@@ -43,20 +43,20 @@ per-user launcher.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
 ```
 
 Neither command needs Node.js, npm, an npm account, or the npm registry. Linux and macOS need `curl`, `tar`, and a
 SHA-256 utility. Current Windows includes the required PowerShell and `tar.exe`.
 
 For a portable copy, download the standalone archive matching your platform from the
-[v0.1.0 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.0), verify it against `SHA256SUMS`, and
+[v0.1.1 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.1), verify it against `SHA256SUMS`, and
 extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/ohm`
 on Linux or macOS and `bin\ohm.cmd` on Windows.
 
@@ -374,12 +374,13 @@ registry. The [`mcp-stdio` example](examples/mcp-stdio/README.md) owns framing, 
 credentials, catalog replacement, and process lifecycle while publishing selected definitions with ordinary
 `registerTool()` calls.
 
-Delegated agents are likewise fully extension-owned. The [`subagent-specialists`
-example](examples/subagent-specialists/README.md) owns named profiles, child invocation, orchestration, limits,
-streamed event parsing, cancellation, results, and presentation while using only ordinary tools and the
-[`managed process`](docs/extension-api.md#managed-asynchronous-processes) contract. Core has no subagent scheduler,
-handles, events, journal type, or built-in screen. Use an [`external execution backend`](docs/execution-backends.md)
-when a model tool must cross a reviewed isolation boundary.
+Delegated-agent workflow and policy remain extension-owned. Core supplies generic
+[`jobs` and `childSessions`](docs/extension-api.md#durable-jobs-and-child-sessions) services for durable identity,
+bounded lifecycle control, and restart-aware reattachment, but it does not define subagent profiles, scheduling,
+event semantics, trees, or presentation. The [`subagent-specialists`](examples/subagent-specialists/README.md)
+example demonstrates an earlier managed-process workflow. Use an
+[`external execution backend`](docs/execution-backends.md) when a model tool must cross a reviewed isolation
+boundary.
 
 Managed packages support production dependencies, with lifecycle scripts disabled by default. A reviewed install or
 update may enable them for that transaction with `--allow-scripts`; source-package prepare and pack scripts remain

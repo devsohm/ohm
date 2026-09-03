@@ -14,7 +14,7 @@ registry. Download `SHA256SUMS` and the four package archives for one version,
 verify them together, and install the complete graph in one npm invocation:
 
 ```sh
-version=0.1.0
+version=0.1.1
 gh release download "v$version" --repo devsohm/ohm \
   --pattern SHA256SUMS \
   --pattern "ohm-terminal-$version.tgz" \
@@ -233,15 +233,16 @@ oldest-first compatibility behavior.
 
 ### Extension-owned integrations
 
-`AgentSession` has no protocol-specific MCP registry and no native child-agent
-spawn, handle, event, policy, or listing API. SDK hosts that need one of these
-workflows must load or supply an ordinary extension package. The package
-registers model-facing tools and uses the same generation-owned managed-process
-service as it does in CLI hosts.
+`AgentSession` has no protocol-specific MCP registry or native child-agent
+workflow. SDK hosts that need one load or supply an ordinary extension package.
+Loaded extensions receive the same generic durable `jobs` and `childSessions`
+services as CLI-hosted extensions, while the package continues to own the
+model-facing tools and domain policy.
 
-For delegated agents, the extension owns profiles, child-process invocation,
-mode arguments, concurrency and recursion limits, event parsing, cancellation,
-result composition, and external session persistence. For MCP, it owns
+For delegated agents, the extension owns profiles, orchestration, concurrency
+and recursion limits, result composition, and presentation. The host-owned
+service manages only bounded job metadata, child RPC transport, private V4
+session journals, cancellation, and explicit restart reattachment. For MCP, it owns
 transport, framing, discovery, authentication, catalog changes, and server
 lifecycle. The parent `AgentSession` observes only ordinary registered tool
 calls and results, preserving the same execution boundary in TUI, print, JSON,

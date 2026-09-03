@@ -156,6 +156,16 @@ import type {
   PromptCompositionMetadata,
 } from "../core/types.js";
 import type { CompactionReason } from "../context/compaction.js";
+import type {
+  PortablePresentationActionRequest,
+  PortablePresentationActionResult,
+  PortablePresentationEvent,
+} from "../interfaces/portable-presentation.js";
+import type {
+  ExtensionWireServiceDescriptor,
+  ExtensionWireServiceRequest,
+  ExtensionWireServiceResponse,
+} from "../extensions/wire-services.js";
 import {
   resolveEffectiveContextBudget,
   type ContextBudgetOptions,
@@ -4589,6 +4599,44 @@ export class AgentSession {
   subscribe(listener: AgentSessionEventListener): () => void {
     this.#publicListeners.add(listener);
     return () => this.#publicListeners.delete(listener);
+  }
+
+  /** Subscribe to transport-neutral extension presentation changes for this runtime. */
+  onPortablePresentation(listener: (event: PortablePresentationEvent) => void): () => void {
+    this.#assertOpen();
+    return this.#extensionHost?.onPortablePresentation(listener) ?? (() => undefined);
+  }
+
+  /** Current portable views for late-connecting RPC, serve, web, or desktop adapters. */
+  listPortablePresentations(): readonly PortablePresentationEvent[] {
+    this.#assertOpen();
+    return this.#extensionHost?.portablePresentations() ?? Object.freeze([]);
+  }
+
+  /** Route a versioned portable action back to its generation-owned extension handler. */
+  async invokePortablePresentationAction(
+    request: PortablePresentationActionRequest,
+    signal?: AbortSignal,
+  ): Promise<PortablePresentationActionResult> {
+    this.#assertOpen();
+    const host = this.#extensionHost;
+    if (host === undefined) throw new TypeError("Portable presentations are unavailable");
+    return await host.invokePortablePresentationAction(request, signal);
+  }
+
+  listExtensionWireServices(): readonly ExtensionWireServiceDescriptor[] {
+    this.#assertOpen();
+    return this.#extensionHost?.extensionWireServices() ?? Object.freeze([]);
+  }
+
+  async invokeExtensionWireService(
+    request: ExtensionWireServiceRequest,
+    signal?: AbortSignal,
+  ): Promise<ExtensionWireServiceResponse> {
+    this.#assertOpen();
+    const host = this.#extensionHost;
+    if (host === undefined) throw new TypeError("Extension wire services are unavailable");
+    return await host.invokeExtensionWireService(request, signal);
   }
 
   async #emitPublic(event: AgentSessionEvent): Promise<void> {

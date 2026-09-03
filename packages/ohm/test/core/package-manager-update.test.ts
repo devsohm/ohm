@@ -207,11 +207,11 @@ test("updates check versions concurrently and batch only eligible npm packages p
   assert.match(basename(projectRoot), /^\.ohm-package-stage-/u);
   assert.deepEqual(userInstall.args.slice(2), [
     "install", "user-old@latest", "user-unknown@latest", "user-range@^1.0.0",
-    "--prefix", userRoot, "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false",
+    "--prefix", userRoot, "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false", "--install-links=true",
   ]);
   assert.deepEqual(projectInstall.args.slice(2), [
     "install", "project-old@latest", "project-missing@latest",
-    "--prefix", projectRoot, "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false",
+    "--prefix", projectRoot, "--legacy-peer-deps", "--ignore-scripts=true", "--bin-links=false", "--install-links=true",
   ]);
   assert.deepEqual(progress.map(({ type, action, source }) => [type, action, source]).sort(), [
     ["complete", "update", "project npm packages"],

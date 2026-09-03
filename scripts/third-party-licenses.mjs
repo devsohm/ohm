@@ -12,12 +12,15 @@ const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const LEGAL_DOCUMENT = /^(?:licen[cs]e|copying|notice|third[-_. ]party)(?:$|[-_. ])/iu;
-const README_DOCUMENT = /^readme(?:$|[-_. ])/iu;
+const ASSET_ROOT = new URL("./third-party-license-assets/", import.meta.url);
 
 const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const portable = (root, path) => relative(root, path).split(sep).join("/");
 const firstParty = (name) => name === "ohm" || name.startsWith("@ohm/");
+const pinnedDocument = (asset, source, digest, removeFinalLf = false) => ({
+  asset: new URL(asset, ASSET_ROOT), source, sha256: digest, removeFinalLf,
+});
 const PROXY_AGENT_NEGOTIATE_NOTICE = Buffer.from(`(The MIT License)
 
 Copyright (c) 2013 Nathan Rajlich <nathan@tootallnate.net>
@@ -41,12 +44,39 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 `);
+const AWS_SDK_LICENSE = pinnedDocument(
+  "aws-sdk-js-v3-d760a008-LICENSE.txt",
+  "aws/aws-sdk-js-v3/d760a00859a08b5d04590ee047510b49add12361/LICENSE",
+  "edea91454b811f127fbdea3d86f378f6719bd372ed440abf82b232f6fca06c3d",
+  true,
+);
 const PACKAGE_DOCUMENT_OVERRIDES = new Map([
   ["proxy-agent-negotiate@1.1.0", {
     license: "MIT",
-    source: "proxy-agents/b7e5f7ccce1a3ac5b339cc4c587974e8989cbc16/packages/http-proxy-agent/LICENSE",
-    sha256: "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
-    bytes: PROXY_AGENT_NEGOTIATE_NOTICE,
+    documents: [{
+      source: "proxy-agents/b7e5f7ccce1a3ac5b339cc4c587974e8989cbc16/packages/http-proxy-agent/LICENSE",
+      sha256: "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
+      bytes: PROXY_AGENT_NEGOTIATE_NOTICE,
+    }],
+  }],
+  ["@aws-sdk/credential-provider-http@3.972.72", { license: "Apache-2.0", documents: [AWS_SDK_LICENSE] }],
+  ["@aws-sdk/credential-provider-login@3.972.77", { license: "Apache-2.0", documents: [AWS_SDK_LICENSE] }],
+  ["@aws-sdk/nested-clients@3.997.44", { license: "Apache-2.0", documents: [AWS_SDK_LICENSE] }],
+  ["data-uri-to-buffer@4.0.1", {
+    license: "MIT",
+    documents: [pinnedDocument(
+      "data-uri-to-buffer-4.0.1-LICENSE.txt",
+      "TooTallNate/node-data-uri-to-buffer/85cd8c854aefbf1bb636789d80364cfac8ea1583/README.md#license",
+      "3072ef4a004c4f92b37eae61cdc3e27225c0a7d2f5e144700e40b9c5a5a7a9b9",
+    )],
+  }],
+  ["standardwebhooks@1.0.0", {
+    license: "MIT",
+    documents: [pinnedDocument(
+      "standardwebhooks-1.0.0-LICENSE.txt",
+      "standard-webhooks/standard-webhooks/929bf0c1928b188287eaf88d0a9f0a4e87df6499/libraries/LICENSE",
+      "5ec8c7b26b64d881a6706617bed25c049f97f2f35de034c756de8546fd6dbe27",
+    )],
   }],
 ]);
 
@@ -58,24 +88,34 @@ async function regularFile(path, maximum, label) {
 }
 
 async function packageDocuments(directory, manifest) {
+  const override = PACKAGE_DOCUMENT_OVERRIDES.get(`${manifest.name}@${manifest.version}`);
+  if (override !== undefined) {
+    assert.equal(override.license, manifest.license,
+      `Pinned documents for ${manifest.name}@${manifest.version} do not match its license declaration`);
+    const documents = [];
+    for (const document of override.documents) {
+      let bytes = document.bytes;
+      if (bytes === undefined) {
+        bytes = await regularFile(document.asset, MAX_DOCUMENT_BYTES,
+          `Pinned package document for ${manifest.name}@${manifest.version}`);
+        if (document.removeFinalLf) {
+          assert.equal(bytes.at(-1), 0x0a,
+            `Pinned package document for ${manifest.name}@${manifest.version} is missing its storage newline`);
+          bytes = bytes.subarray(0, -1);
+        }
+      }
+      assert.equal(sha256(bytes), document.sha256,
+        `Pinned package document for ${manifest.name}@${manifest.version} does not match its digest`);
+      documents.push({ source: document.source, bytes });
+    }
+    return documents;
+  }
   const entries = (await readdir(directory, { withFileTypes: true }))
     .filter((entry) => LEGAL_DOCUMENT.test(entry.name))
     .sort((left, right) => compare(left.name, right.name));
-  const selected = entries.length > 0
-    ? entries
-    : (await readdir(directory, { withFileTypes: true }))
-      .filter((entry) => README_DOCUMENT.test(entry.name))
-      .sort((left, right) => compare(left.name, right.name));
-  if (selected.length === 0) {
-    const override = PACKAGE_DOCUMENT_OVERRIDES.get(`${manifest.name}@${manifest.version}`);
-    assert.ok(override !== undefined && override.license === manifest.license,
-      `Package ${directory} has no license, notice, or README document`);
-    assert.equal(sha256(override.bytes), override.sha256,
-      `Embedded package document for ${manifest.name}@${manifest.version} does not match its pinned digest`);
-    return [{ source: override.source, bytes: override.bytes }];
-  }
+  assert.ok(entries.length > 0, `Package ${directory} has no license or notice document and no pinned override`);
   const documents = [];
-  for (const entry of selected) {
+  for (const entry of entries) {
     const bytes = await regularFile(join(directory, entry.name), MAX_DOCUMENT_BYTES, `Package document ${entry.name}`);
     documents.push({ source: entry.name, bytes });
   }

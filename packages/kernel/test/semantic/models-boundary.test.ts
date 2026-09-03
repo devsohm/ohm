@@ -74,7 +74,7 @@ test("public IDs use the shared UUIDv7 contract and no private bridge remains", 
 test("package and node entrypoints preserve the declared dependency boundary", async () => {
 	const manifest = toJsonValue(JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")));
 	if (!isJsonObject(manifest) || !isJsonObject(manifest.dependencies)) assert.fail("expected package dependencies");
-	assert.equal(manifest.dependencies["@ohm/models"], "0.1.0");
+	assert.equal(manifest.dependencies["@ohm/models"], "0.1.1");
 	assert.equal(nodeEntry.EventStream, EventStream);
 	assert.equal(nodeEntry.NodeExecutionEnv instanceof Function, true);
 });

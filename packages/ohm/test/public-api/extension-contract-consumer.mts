@@ -31,6 +31,9 @@ import {
   type Extension,
   type ExtensionActions,
   type ExtensionAPI,
+  type ExtensionChildSessionService,
+  type ExtensionChildSessionStartOptions,
+  type ExtensionChildSessionStatus,
   type ExtensionCommandContextActions,
   type ExtensionContext,
   type ExtensionContextActions,
@@ -39,7 +42,17 @@ import {
   type ExtensionEventMap,
   type ExtensionEventResultMap,
   type ExtensionFactory,
+  type ExtensionFacetService,
   type ExtensionHandler,
+  type ExtensionJobContext,
+  type ExtensionJobId,
+  type ExtensionJobListOptions,
+  type ExtensionJobOperation,
+  type ExtensionJobService,
+  type ExtensionJobStartOptions,
+  type ExtensionJobState,
+  type ExtensionJobStatus,
+  type ExtensionJobWaitOptions,
   type ExtensionModelCompletion,
   type ExtensionMode,
   type ExtensionRuntime,
@@ -126,7 +139,25 @@ export interface ExtensionApiExportFixture {
   sessionDelivery: ExtensionSessionDelivery;
   modelCompletion: ExtensionModelCompletion;
   loadResult: LoadExtensionsResult;
+  jobs: ExtensionJobService;
+  jobContext: ExtensionJobContext;
+  jobId: ExtensionJobId;
+  jobOperation: ExtensionJobOperation;
+  jobStart: ExtensionJobStartOptions;
+  jobState: ExtensionJobState;
+  jobList: ExtensionJobListOptions;
+  jobWait: ExtensionJobWaitOptions;
+  jobStatus: ExtensionJobStatus;
+  childSessions: ExtensionChildSessionService;
+  childSessionStart: ExtensionChildSessionStartOptions;
+  childSessionStatus: ExtensionChildSessionStatus;
 }
+
+type UnsafeChildSessionOption = Extract<
+  keyof ExtensionChildSessionStartOptions,
+  "args" | "cliPath" | "command" | "env" | "executable" | "sessionDirectory"
+>;
+const noUnsafeChildSessionOptions: Record<UnsafeChildSessionOption, never> = {};
 
 export interface ExtensionUIRouteExportFixture {
   definition: ExtensionUIRouteDefinition;
@@ -227,9 +258,11 @@ export interface ExtensionEventExportFixture {
 
 const extensionApiMembers = [
   "appendEntry",
+  "childSessions",
   "config",
   "events",
   "exec",
+  "facets",
   "getActiveTools",
   "getAllTools",
   "getCommands",
@@ -237,6 +270,7 @@ const extensionApiMembers = [
   "getFlag",
   "getSessionName",
   "getThinkingLevel",
+  "jobs",
   "on",
   "onDispose",
   "processes",
@@ -258,8 +292,12 @@ const extensionApiMembers = [
   "setThinkingLevel",
   "unregisterProvider",
 ] as const satisfies readonly (keyof ExtensionAPI)[];
+declare const extensionApi: ExtensionAPI;
+const extensionFacetService: ExtensionFacetService = extensionApi.facets;
+void extensionFacetService;
 type MissingExtensionApiMember = Exclude<keyof ExtensionAPI, (typeof extensionApiMembers)[number]>;
 const noMissingExtensionApiMembers: Record<MissingExtensionApiMember, never> = {};
+void noUnsafeChildSessionOptions;
 
 const extensionEventNames = [
   "resources_discover",

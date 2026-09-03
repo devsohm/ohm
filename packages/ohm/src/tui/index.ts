@@ -56,6 +56,7 @@ export {
 export { TuiSelectionCancelledError, DEFAULT_TUI_LIMITS } from "./controller.js";
 export { TuiController } from "./public-controller.js";
 export { createInteractiveDirectUiContext } from "./direct-ui.js";
+export { projectPortablePresentationToRuntimeUiBlock } from "./portable-presentation.js";
 export type {
   FooterActivitySnapshot,
   FooterDataSnapshot,

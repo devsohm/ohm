@@ -15,6 +15,24 @@ export * from "./capabilities/session.js";
 export * from "./capabilities/tools.js";
 export * from "./capabilities/ui-routes.js";
 export * from "./capabilities/ui-slots.js";
+export * from "./facets.js";
+export * from "./replicated-state.js";
+export * from "./wire-services.js";
+export type {
+  ExtensionChildSessionService,
+  ExtensionChildSessionStartOptions,
+  ExtensionChildSessionStatus,
+  ExtensionJobContext,
+  ExtensionJobId,
+  ExtensionJobListOptions,
+  ExtensionJobOperation,
+  ExtensionJobService,
+  ExtensionJobStartOptions,
+  ExtensionJobState,
+  ExtensionJobStatus,
+  ExtensionJobWaitOptions,
+  RpcSessionState,
+} from "./durable-jobs.js";
 
 export type {
   AgentMessage,

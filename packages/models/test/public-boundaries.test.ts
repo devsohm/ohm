@@ -94,7 +94,7 @@ test("package metadata matches the public runtime contract", async () => {
   assert.ok(isJsonObject(parsed));
   const manifest = parsed;
   assert.equal(manifest.name, "@ohm/models");
-  assert.equal(manifest.version, "0.1.0");
+  assert.equal(manifest.version, "0.1.1");
   assert.equal(manifest.type, "module");
   assert.ok(isJsonObject(manifest.engines));
   assert.equal(manifest.engines.node, ">=26.7.0");

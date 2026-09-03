@@ -3,6 +3,9 @@ import type { Theme } from "./theme.js";
 import type { Frame, TuiControllerOptions, TuiViewState } from "./types.js";
 import type { RuntimeUiBlock } from "./components.js";
 import type { OhmTranscriptSearchMatch } from "./native-renderer/transcript-search.js";
+import type { OhmNativeToolDetailCache } from "./native-renderer/view.js";
+
+export const INTERNAL_TUI_TOOL_DETAIL_CACHE: unique symbol = Symbol("ohm.tui.tool-detail-cache");
 
 export interface TuiFrameProjectionRequest {
   readonly view: TuiViewState;
@@ -20,6 +23,8 @@ export interface TuiFrameProjectionRequest {
   readonly codeBlockIndent: string;
   /** Controller-owned mutation revision for safe retained transcript layout reuse. */
   readonly transcriptRevision?: number;
+  /** @internal Controller-owned native tool-detail wrap state. */
+  readonly [INTERNAL_TUI_TOOL_DETAIL_CACHE]?: OhmNativeToolDetailCache;
 }
 
 /** Internal lineage attached only to controller-owned persistent structured blocks. */
@@ -62,12 +67,16 @@ export type TuiProjectedFrame = Frame & {
   readonly [INTERNAL_TUI_TRANSCRIPT_SEARCH]?: TuiTranscriptSearchProjection;
 };
 
-export type TuiFrameProjector = (
-  request: Readonly<TuiFrameProjectionRequest>,
-) => TuiProjectedFrame;
+export const INTERNAL_TUI_FRAME_PROJECTOR_CLEAR: unique symbol = Symbol("ohm.tui.frame-projector-clear");
+
+export type TuiFrameProjector = {
+  (request: Readonly<TuiFrameProjectionRequest>): TuiProjectedFrame;
+  readonly [INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]?: () => void;
+};
 
 export const INTERNAL_TUI_FRAME_PROJECTOR: unique symbol = Symbol("ohm.tui.frame-projector");
 
 export type InternalTuiControllerOptions = TuiControllerOptions & {
   readonly [INTERNAL_TUI_FRAME_PROJECTOR]?: TuiFrameProjector;
+  readonly [INTERNAL_TUI_TOOL_DETAIL_CACHE]?: OhmNativeToolDetailCache;
 };

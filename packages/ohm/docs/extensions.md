@@ -51,12 +51,20 @@ The direct factory API exposes:
 - `exec` for one-shot argv-based child processes and `processes` for asynchronous generation-owned workers;
 - `config` for bounded extension-specific user and workspace configuration;
 - `services` for trusted same-process sharing of live objects or functions;
+- `facets` for optional worker, session, rich-TUI, and portable-presentation lifecycles, named replicated JSON state, and versioned wire services;
 - tool, command, model, and thinking-level selection helpers;
 - `getCommands()` for the invokable extension-command, prompt-template, and skill-command catalog in host order;
 - `getDiscoveryView` for the richer bounded prompt and skill metadata view;
 - `events.on` and `events.emit` for bounded in-process coordination.
 
 The API object is generation-scoped. Do not cache it across refreshes.
+
+Facets are additive; ordinary factories and every existing `ExtensionAPI`
+member continue to work without them. Raw terminal components stay TUI-only.
+Use a presentation facet when the same JSON view must reach line,
+accessibility, RPC, serve, or a future graphical adapter. The complete bounds,
+lifecycle, state, service, and current action-routing limits are documented in
+[Facets, portable presentations, and wire services](facets-and-presentations.md).
 
 Registrations remain live after activation. Re-registering a tool, its renderer, or a command with the same name from the same extension replaces that registration atomically. A tool name already owned by another extension keeps its first owner and produces a diagnostic.
 
@@ -196,20 +204,24 @@ managed-process cleanup without a protocol-aware core API.
 
 ## Specialist delegation
 
-Specialist delegation is also an ordinary trusted extension. The package owns
+Specialist delegation is still an extension-owned workflow. The package owns
 profile discovery and trust, model and tool selection, single or parallel
-orchestration, concurrency and recursion limits, child invocation, JSON-event
-parsing, cancellation, output bounds, result composition, and any presentation.
+orchestration, concurrency and recursion policy, result composition, and any
+presentation.
 
-A delegation tool can start an ephemeral ohm JSON-mode process through
-`ohm.processes`, consume its bounded event stream, and return the composed
-result like any other tool. Refresh, unload, caller cancellation, or host close
-terminates the extension-owned process tree. The core does not expose a
-subagent service, scheduler, event family, handle, child journal, or tree UI.
+The host provides generic `ohm.jobs` and `ohm.childSessions` capabilities for
+durable identity, bounded lifecycle control, and restart-aware child-session
+reattachment. These services do not define a subagent scheduler, event family,
+tree model, or UI. Extensions can also use `ohm.processes` for unrelated
+generation-owned subprocesses.
+
+All durable-job and child-session calls are post-commit operations, including
+inspection and listing, because reading the registry may persist crash recovery.
+Factories should register the workflow and begin it from a later callback.
 
 The [`subagent-specialists` example](../examples/subagent-specialists/README.md)
-shows named profiles and bounded parallel delegation using only public generic
-extension contracts.
+shows the earlier managed-process pattern; extension-owned workflows can migrate
+to the durable services without changing their domain policy.
 
 ## Events
 

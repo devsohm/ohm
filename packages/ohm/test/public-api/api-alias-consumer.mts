@@ -168,6 +168,19 @@ type LegacyMinimalRuntimeFactory = (
 const legacyRuntimeFactoryRemainsCompatible = true satisfies (
   LegacyMinimalRuntimeFactory extends Root.CreateAgentSessionRuntimeFactory ? true : false
 );
+declare const extensionApi: Extensions.ExtensionAPI;
+const durableJobStart: Promise<Extensions.ExtensionJobStatus> = extensionApi.jobs.start(
+  { kind: "consumer.fixture", idempotencyKey: "stable" },
+  ({ id, attempt, signal, replaceMetadata }) => {
+    void [id, attempt, signal, replaceMetadata];
+    return { accepted: true };
+  },
+);
+const childSessionStart: Promise<Extensions.ExtensionChildSessionStatus> = extensionApi.childSessions.spawn({
+  model: "fixture-model",
+  thinkingLevel: "high",
+  tools: ["read"],
+});
 type PublicNames = RootNames | keyof typeof Auth | keyof typeof Config | keyof typeof Context | keyof typeof Core
   | keyof typeof Extensions | keyof typeof Images | keyof typeof Interfaces | keyof typeof Modes | keyof typeof Process
   | keyof typeof Providers | keyof typeof Service | keyof typeof Tools | keyof typeof Tui;
@@ -201,6 +214,8 @@ void [
   createdAgentSession,
   legacyRuntimeFactoryRemainsCompatible,
   runtimeFactoryScopeContract,
+  durableJobStart,
+  childSessionStart,
 ];
 
 export type {

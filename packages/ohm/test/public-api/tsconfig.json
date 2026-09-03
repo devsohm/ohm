@@ -14,6 +14,7 @@
     "extension-config-consumer.mts",
     "extension-contract-consumer.mts",
     "extension-model-consumer.mts",
+    "facets-consumer.mts",
     "api-alias-consumer.mts",
     "layer-consumer.mts",
     "modes-consumer.mts",

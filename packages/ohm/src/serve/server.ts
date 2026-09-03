@@ -13,6 +13,21 @@ import { errorMessage } from "../core/errors.js";
 import type { EventEnvelope } from "../core/events.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
 import { BOOLEAN_VALUE, STRING_VALUE } from "../core/value-schemas.js";
+import {
+  PORTABLE_PRESENTATION_LIMITS,
+  validatePortablePresentationActionRequest,
+  type PortablePresentationActionRequest,
+  type PortablePresentationActionResult,
+  type PortablePresentationEvent,
+} from "../interfaces/portable-presentation.js";
+import {
+  EXTENSION_WIRE_SERVICE_LIMITS,
+  validateExtensionWireServiceRequest,
+  type ExtensionWireServiceDescriptor,
+  type ExtensionWireServiceRequest,
+  type ExtensionWireServiceResponse,
+} from "../extensions/wire-services.js";
+import { REPLICATED_JSON_STATE_LIMITS } from "../extensions/replicated-state.js";
 import type {
   AgentSessionEnvelopeListener,
   AgentSessionPromptOptions,
@@ -27,7 +42,13 @@ import { MAX_TOOL_RESULT_CONTENT_BYTES } from "../tools/coordinator.js";
 import { limitText } from "../tools/output.js";
 
 const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+const DEFAULT_REQUEST_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
+const DEFAULT_MAX_BODY_BYTES = Math.max(
+  PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes,
+  EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+  REPLICATED_JSON_STATE_LIMITS.maxStateBytes,
+  REPLICATED_JSON_STATE_LIMITS.maxDeltaBytes,
+) + DEFAULT_REQUEST_ENVELOPE_HEADROOM_BYTES;
 const DEFAULT_MAX_CLIENTS_PER_SESSION = 8;
 const DEFAULT_MAX_PROMPT_ADMISSION_BYTES_PER_SESSION = 1024 * 1024;
 const DEFAULT_MAX_PROMPT_ADMISSIONS_PER_SESSION = 32;
@@ -80,6 +101,17 @@ export interface ServeSessionRuntime {
   readonly summary: ServeSessionSummary;
   readonly suspendedRun: AgentSessionSuspendedRun | undefined;
   onEvent(listener: AgentSessionEnvelopeListener): () => void;
+  onPortablePresentation?(listener: (event: PortablePresentationEvent) => void): () => void;
+  listPortablePresentations?(): readonly PortablePresentationEvent[];
+  invokePortablePresentationAction?(
+    request: PortablePresentationActionRequest,
+    signal?: AbortSignal,
+  ): Promise<PortablePresentationActionResult>;
+  listExtensionWireServices?(): readonly ExtensionWireServiceDescriptor[];
+  invokeExtensionWireService?(
+    request: ExtensionWireServiceRequest,
+    signal?: AbortSignal,
+  ): Promise<ExtensionWireServiceResponse>;
   start?(signal: AbortSignal): Promise<void>;
   prompt(
     text: string,
@@ -175,10 +207,12 @@ interface SessionRecord {
   promptAdmissionDrainWaiters: Set<() => void>;
   promptAdmissionRunning: boolean;
   promptAdmissions: PromptAdmissionEntry[];
+  presentationVersions: Map<string, string>;
   replayBytes: number;
   runtime: ServeSessionRuntime;
   sessionId: string;
   unsubscribe: () => void;
+  unsubscribePresentation: () => void;
   workspace: string | undefined;
 }
 
@@ -284,6 +318,22 @@ function exactRequestKeys(
   const unexpected = Object.keys(value).find((key) => !keys.has(key));
   if (unexpected !== undefined) {
     throw new HttpProblem(400, `${name}.${unexpected} is not allowed`);
+  }
+}
+
+function portablePresentationActionRequest(value: unknown): PortablePresentationActionRequest {
+  try {
+    return validatePortablePresentationActionRequest(value);
+  } catch (error) {
+    throw new HttpProblem(400, errorMessage(error));
+  }
+}
+
+function extensionWireRequest(value: unknown): ExtensionWireServiceRequest {
+  try {
+    return validateExtensionWireServiceRequest(value);
+  } catch (error) {
+    throw new HttpProblem(400, errorMessage(error));
   }
 }
 
@@ -526,11 +576,14 @@ function statePayload(runtime: ServeSessionRuntime) {
   };
 }
 
-function eventFrame(id: number, envelope: EventEnvelope): string {
-  if (!/^[A-Za-z0-9_.-]{1,128}$/u.test(envelope.event.type)) {
+type ServeStreamEvent = EventEnvelope | PortablePresentationEvent;
+
+function eventFrame(id: number, event: ServeStreamEvent): string {
+  const type = "event" in event ? event.event.type : event.type;
+  if (!/^[A-Za-z0-9_.-]{1,128}$/u.test(type)) {
     throw new TypeError("Serve event type is invalid");
   }
-  return `id: ${id}\nevent: ${envelope.event.type}\ndata: ${JSON.stringify(envelope)}\n\n`;
+  return `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 function replayGapFrame(
@@ -965,6 +1018,57 @@ class RunningServeServer implements ServeServer {
         throw new HttpProblem(405, "Method not allowed", { Allow: "GET, POST" });
       }
 
+      if (path[3] === "presentation-actions") {
+        if (method !== "POST") throw new HttpProblem(405, "Method not allowed", { Allow: "POST" });
+        const invoke = record.runtime.invokePortablePresentationAction;
+        if (invoke === undefined) throw new HttpProblem(404, "Portable presentation actions are unavailable");
+        const body = await readJsonBody(request, this.#maxBodyBytes);
+        const action = portablePresentationActionRequest(body);
+        let result: PortablePresentationActionResult;
+        try {
+          result = await invoke.call(record.runtime, action, signal);
+        } catch {
+          signal.throwIfAborted();
+          throw new HttpProblem(409, "Portable presentation action was rejected");
+        }
+        writeJson(response, 200, { sessionId, result });
+        return;
+      }
+
+      if (path[3] === "presentations") {
+        if (method !== "GET") throw new HttpProblem(405, "Method not allowed", { Allow: "GET" });
+        writeJson(response, 200, {
+          sessionId,
+          presentations: record.runtime.listPortablePresentations?.() ?? [],
+        });
+        return;
+      }
+
+      if (path[3] === "wire-services") {
+        if (method === "GET") {
+          writeJson(response, 200, {
+            sessionId,
+            services: record.runtime.listExtensionWireServices?.() ?? [],
+          });
+          return;
+        }
+        if (method === "POST") {
+          const invoke = record.runtime.invokeExtensionWireService;
+          if (invoke === undefined) throw new HttpProblem(404, "Extension wire services are unavailable");
+          const body = await readJsonBody(request, this.#maxBodyBytes);
+          const wireRequest = extensionWireRequest(body);
+          try {
+            const result = await invoke.call(record.runtime, wireRequest, signal);
+            writeJson(response, 200, { sessionId, result });
+          } catch {
+            signal.throwIfAborted();
+            throw new HttpProblem(404, "Extension wire service is unavailable");
+          }
+          return;
+        }
+        throw new HttpProblem(405, "Method not allowed", { Allow: "GET, POST" });
+      }
+
       if (path[3] === "events") {
         if (method !== "GET") throw new HttpProblem(405, "Method not allowed", { Allow: "GET" });
         if (record.clients.size >= this.#maxClientsPerSession) {
@@ -1121,10 +1225,12 @@ class RunningServeServer implements ServeServer {
       promptAdmissionDrainWaiters: new Set(),
       promptAdmissionRunning: false,
       promptAdmissions: [],
+      presentationVersions: new Map(),
       replayBytes: 0,
       runtime,
       sessionId: runtime.sessionId,
       unsubscribe: () => undefined,
+      unsubscribePresentation: () => undefined,
       workspace,
     };
     try {
@@ -1133,32 +1239,30 @@ class RunningServeServer implements ServeServer {
       });
       await runtime.start?.(signal);
       signal.throwIfAborted();
-    } catch (error) {
-      try {
-        record.unsubscribe();
-      } catch {
-        // The original startup error remains authoritative.
+      record.unsubscribePresentation = runtime.onPortablePresentation?.((event) => {
+        this.#publishPortablePresentation(record, event);
+      }) ?? (() => undefined);
+      for (const event of runtime.listPortablePresentations?.() ?? []) {
+        this.#publishPortablePresentation(record, event);
       }
+    } catch (error) {
+      this.#unsubscribeRecord(record);
       await this.#closeUnregistered(runtime);
       throw error;
     }
     if (this.#closing) {
-      try {
-        record.unsubscribe();
-      } catch {
-        // Closing the runtime remains mandatory.
-      }
+      this.#unsubscribeRecord(record);
       await this.#closeUnregistered(runtime);
       throw new HttpProblem(503, "Serve server is closing");
     }
     const startedExisting = this.#sessions.get(runtime.sessionId);
     if (startedExisting?.runtime === runtime) {
-      record.unsubscribe();
+      this.#unsubscribeRecord(record);
       this.#assertWorkspace(startedExisting, workspace);
       return startedExisting;
     }
     if (startedExisting !== undefined) {
-      record.unsubscribe();
+      this.#unsubscribeRecord(record);
       await this.#closeUnregistered(runtime);
       this.#assertWorkspace(startedExisting, workspace);
       throw new HttpProblem(409, "Session is already open");
@@ -1352,14 +1456,17 @@ class RunningServeServer implements ServeServer {
     return record.closeFlight;
   }
 
+  #unsubscribeRecord(record: SessionRecord, failures?: Error[]): void {
+    for (const unsubscribe of [record.unsubscribe, record.unsubscribePresentation]) {
+      try { unsubscribe(); }
+      catch (error) { failures?.push(errorFromThrown(error)); }
+    }
+  }
+
   async #closeRecordOnce(record: SessionRecord, reason: string): Promise<void> {
     const failures: Error[] = [];
     try {
-      try {
-        record.unsubscribe();
-      } catch (error) {
-        failures.push(errorFromThrown(error));
-      }
+      this.#unsubscribeRecord(record, failures);
       for (const client of record.clients.values()) {
         this.#removeSseClient(record, client, false);
         try {
@@ -1475,7 +1582,7 @@ class RunningServeServer implements ServeServer {
     return false;
   }
 
-  #publish(record: SessionRecord, envelope: EventEnvelope): void {
+  #publish(record: SessionRecord, envelope: ServeStreamEvent): void {
     try {
       const id = record.latestEventId + 1;
       const frame = eventFrame(id, envelope);
@@ -1497,6 +1604,18 @@ class RunningServeServer implements ServeServer {
     } catch {
       // Runtime event delivery must not fail the session.
     }
+  }
+
+  #publishPortablePresentation(record: SessionRecord, event: PortablePresentationEvent): void {
+    const key = event.operation === "show"
+      ? `${event.owner}\u0000${event.presentation.id}`
+      : `${event.owner}\u0000${event.presentationId}`;
+    const revision = event.operation === "show" ? event.presentation.revision : event.revision;
+    const version = `${event.operation}:${revision}`;
+    if (record.presentationVersions.get(key) === version) return;
+    if (event.operation === "remove") record.presentationVersions.delete(key);
+    else record.presentationVersions.set(key, version);
+    this.#publish(record, event);
   }
 
   #openEventStream(

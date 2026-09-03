@@ -454,9 +454,11 @@ test("trusted modules use the direct factory registration signatures", async (co
   if (api === undefined) throw new Error("Expected the direct API to be captured");
   assert.deepEqual(Object.keys(api).sort(), [
     "appendEntry",
+    "childSessions",
     "config",
     "events",
     "exec",
+    "facets",
     "getActiveTools",
     "getAllTools",
     "getCommands",
@@ -464,6 +466,7 @@ test("trusted modules use the direct factory registration signatures", async (co
     "getFlag",
     "getSessionName",
     "getThinkingLevel",
+    "jobs",
     "on",
     "onDispose",
     "processes",

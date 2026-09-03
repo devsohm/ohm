@@ -81,6 +81,10 @@ Send `Content-Type: application/json` with each JSON request.
 | `POST /v1/sessions/:id/cancel` | Cancel active work for the session. |
 | `GET /v1/sessions/:id/recovery` | Read a suspended operation and its tool-effect IDs and statuses. |
 | `POST /v1/sessions/:id/recovery` | Attempt safe recovery or submit explicit effect resolutions. |
+| `GET /v1/sessions/:id/presentations` | Read current portable presentation snapshots. |
+| `POST /v1/sessions/:id/presentation-actions` | Invoke one versioned portable presentation action. |
+| `GET /v1/sessions/:id/wire-services` | Discover versioned extension services and their JSON schemas and limits. |
+| `POST /v1/sessions/:id/wire-services` | Invoke a versioned extension service. |
 | `GET /v1/sessions/:id/events` | Stream session events with SSE. |
 
 URL-encode the session ID when you put it in a path.
@@ -230,6 +234,26 @@ The service ends the session's SSE streams, cancels active work, closes the
 runtime, and releases the open-session slot. It does not delete the durable V4
 journal. Use the open endpoint to open that journal again.
 
+### Portable presentations and extension wire services
+
+Portable presentation snapshots are available through `GET
+/v1/sessions/:id/presentations`. The event stream also carries
+`portable_presentation` show/remove records. The service starts the runtime,
+subscribes to presentation updates, and then captures current snapshots.
+Revision tracking suppresses an identical event observed by both the
+subscription and snapshot pass, so a late client can use the snapshot endpoint
+after an SSE replay gap without duplicating the initial view. Post an exact
+`PortablePresentationActionRequest` to `presentation-actions`; rejected or
+stale actions return `409` without exposing extension exception text.
+
+The wire-service `GET` result contains owner, name, version, detached request
+and response schemas, and byte limits. Post an exact
+`ExtensionWireServiceRequest` to the same path to invoke it. Request disconnect
+and service shutdown propagate cancellation to the handler. Missing services
+return `404`; handler failures remain a versioned response with a generic
+message. The shared catalog/schema/payload limits are documented in
+[Facets, portable presentations, and wire services](facets-and-presentations.md).
+
 ## Event stream and reconnect
 
 Open the stream before or after you send a prompt:
@@ -279,7 +303,7 @@ The CLI uses these service defaults:
 
 | Limit | Default |
 | --- | --- |
-| JSON request body | 64 KiB |
+| JSON request body | 1 MiB payload plus 64 KiB envelope headroom |
 | Open sessions | 32 |
 | SSE clients for one session | 8 |
 | Retained SSE records for one session | 256 |

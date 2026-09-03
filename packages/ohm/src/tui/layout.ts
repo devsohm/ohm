@@ -82,6 +82,22 @@ export interface ToolRenderSlots {
   result?: RuntimeUiBlock;
 }
 
+const INTERNAL_TOOL_RENDER_ENTRY_KEY_PREFIX = "\u0000ohm:tool-render-entry:";
+
+/** @internal Binds controller-owned tool rendering to one chronological transcript row. */
+export function internalToolRenderEntryKey(entryId: string): string {
+  return `${INTERNAL_TOOL_RENDER_ENTRY_KEY_PREFIX}${entryId}`;
+}
+
+/** @internal Prefers exact row ownership while preserving legacy call-ID maps. */
+export function internalToolRenderSlotsForEntry(
+  blocks: ReadonlyMap<string, ToolRenderSlots> | undefined,
+  entry: Pick<TranscriptEntry, "id" | "callId">,
+): ToolRenderSlots | undefined {
+  return blocks?.get(internalToolRenderEntryKey(entry.id))
+    ?? (entry.callId === undefined ? undefined : blocks?.get(entry.callId));
+}
+
 export interface TranscriptRenderOptions {
   toolRenderBlocks?: ReadonlyMap<string, ToolRenderSlots>;
   sessionRenderBlocks?: ReadonlyMap<string, RuntimeUiBlock>;
@@ -2325,7 +2341,7 @@ function transcriptLineChunks(
     const spacedToolImages: RenderedLine[] = toolImages.length === 0
       ? []
       : [{ text: "", role: "muted" }, ...toolImages];
-    const custom = entry.callId === undefined ? undefined : toolRenderBlocks?.get(entry.callId);
+    const custom = internalToolRenderSlotsForEntry(toolRenderBlocks, entry);
     if (custom === undefined) {
       return [
         ...separator,

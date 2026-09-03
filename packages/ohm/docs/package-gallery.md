@@ -31,7 +31,7 @@ An npm record installs through the ordinary `npm:NAME@VERSION` source. A Git rec
 
 A gallery consumer must check the record's host-version range before offering installation. `extensionGalleryInstallSource()` converts the source; it does not perform that policy check.
 
-The normal package manager still stages privately, validates resource paths, disables lifecycle scripts by default, records provenance, and commits atomically. Gallery metadata never bypasses those controls.
+The normal package manager still stages privately, validates resource paths, disables lifecycle scripts by default, records provenance, and uses recoverable directory swaps. Gallery metadata never bypasses those controls.
 
 `verified` means the index publisher checked the supplied digest or provenance evidence. It does not make trusted Node.js runtime code safe. Keep warnings factual and specific, and use `unverified` or `unknown` when evidence is unavailable.
 

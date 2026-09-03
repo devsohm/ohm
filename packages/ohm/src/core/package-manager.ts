@@ -9,6 +9,8 @@ import {
 	opendirSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
+	rmSync,
 	statSync,
 	type Dirent,
 } from "node:fs";
@@ -32,6 +34,7 @@ import { readTrustedFileSync, readTrustedTextFileSync } from "./resource-file.js
 import { errorCode } from "./errors.js";
 import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "./json.js";
 import { STRING_VALUE } from "./value-schemas.js";
+import { tryWithFileLockSync, withFileLock } from "../storage/file-lock.js";
 
 export type PackageScope = "user" | "project" | "temporary";
 export type ResourceType = "extensions" | "skills" | "prompts" | "themes";
@@ -257,7 +260,12 @@ function installedNpmPath(scopeBase: string, name: string): string | undefined {
 		const root = join(scopeBase, "npm", "node_modules");
 		const path = join(root, name);
 		if (!inside(root, path)) return undefined;
-		return readJson(join(path, "package.json"), "Installed package manifest")["name"] === name ? path : undefined;
+		const visible = visibleNpmPackagePath(path);
+		return visible !== undefined
+			&& visible !== NPM_PACKAGE_TRANSITION
+			&& readJson(join(visible, "package.json"), "Installed package manifest")["name"] === name
+			? visible
+			: undefined;
 	} catch { return undefined; }
 }
 
@@ -332,6 +340,242 @@ function stagedNpmPackageName(stage: string): string | undefined {
 	} catch { return undefined; }
 }
 
+const NPM_PACKAGE_PREVIOUS_SUFFIX = ".ohm-previous";
+const NPM_PACKAGE_SWAP_LOCK_SUFFIX = ".ohm-swap";
+const NPM_PACKAGE_TRANSITION = Symbol("npm-package-transition");
+
+function npmPackageSwapLockPath(destination: string): string {
+	return join(dirname(destination), `.${basename(destination)}${NPM_PACKAGE_SWAP_LOCK_SUFFIX}`);
+}
+
+function npmPackagePreviousPath(destination: string): string {
+	return join(dirname(destination), `.${basename(destination)}${NPM_PACKAGE_PREVIOUS_SUFFIX}`);
+}
+
+function pathEntryExists(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch (error) {
+		if (missing(error)) return false;
+		throw error;
+	}
+}
+
+function recoverNpmPackageSwap(destination: string): void {
+	const previous = npmPackagePreviousPath(destination);
+	let information;
+	try { information = lstatSync(previous); }
+	catch (error) {
+		if (missing(error)) return;
+		throw error;
+	}
+	if (!information.isDirectory() && !information.isSymbolicLink()) {
+		throw new Error(`Invalid npm package recovery directory: ${previous}`);
+	}
+	if (pathEntryExists(destination)) rmSync(previous, { recursive: true, force: true });
+	else renameSync(previous, destination);
+}
+
+function visibleNpmPackagePath(destination: string): string | typeof NPM_PACKAGE_TRANSITION | undefined {
+	const lock = `${npmPackageSwapLockPath(destination)}.lock`;
+	const previous = npmPackagePreviousPath(destination);
+	if (!pathEntryExists(lock) && !pathEntryExists(previous)) {
+		const visible = pathEntryExists(destination) ? destination : undefined;
+		if (!pathEntryExists(lock) && !pathEntryExists(previous)) return visible;
+	}
+	const selected = tryWithFileLockSync(npmPackageSwapLockPath(destination), () => {
+		recoverNpmPackageSwap(destination);
+		return pathEntryExists(destination) ? destination : undefined;
+	});
+	if (selected.acquired) return selected.value;
+	return pathEntryExists(previous) ? previous : NPM_PACKAGE_TRANSITION;
+}
+
+function recoverManagedNpmPackageSwaps(scopeBase: string): boolean {
+	const root = join(scopeBase, "npm", "node_modules");
+	let recovered = true;
+	const visit = (directory: string): void => {
+		let candidates: Dirent[];
+		try { candidates = readdirSync(directory, { withFileTypes: true }); }
+		catch (error) {
+			if (missing(error)) return;
+			throw error;
+		}
+		for (const candidate of candidates) {
+			if (directory === root && candidate.isDirectory() && candidate.name.startsWith("@")) {
+				visit(join(directory, candidate.name));
+				continue;
+			}
+			if (
+				(!candidate.isDirectory() && !candidate.isSymbolicLink())
+				|| !candidate.name.startsWith(".")
+				|| !candidate.name.endsWith(NPM_PACKAGE_PREVIOUS_SUFFIX)
+			) continue;
+			const name = candidate.name.slice(1, -NPM_PACKAGE_PREVIOUS_SUFFIX.length);
+			if (name === "" || name === "." || name === ".." || name.includes(sep)) continue;
+			const destination = join(directory, name);
+			const selected = tryWithFileLockSync(npmPackageSwapLockPath(destination), () => {
+				recoverNpmPackageSwap(destination);
+			});
+			if (!selected.acquired) recovered = false;
+		}
+	};
+	visit(root);
+	return recovered;
+}
+
+interface NpmRuntimeDependency {
+	name: string;
+	required: boolean;
+}
+
+function npmRuntimeDependencies(manifest: JsonObject): NpmRuntimeDependency[] {
+	const required = new Set<string>();
+	const optional = new Set<string>();
+	const dependencies = manifest["dependencies"];
+	if (isJsonObject(dependencies)) for (const name of Object.keys(dependencies)) required.add(name);
+	const optionalDependencies = manifest["optionalDependencies"];
+	if (isJsonObject(optionalDependencies)) {
+		for (const name of Object.keys(optionalDependencies)) {
+			optional.add(name);
+			required.delete(name);
+		}
+	}
+	const peerDependencies = manifest["peerDependencies"];
+	if (isJsonObject(peerDependencies)) for (const name of Object.keys(peerDependencies)) optional.add(name);
+	for (const field of ["bundledDependencies", "bundleDependencies"]) {
+		const bundled = manifest[field];
+		if (!Array.isArray(bundled)) continue;
+		for (const name of bundled) {
+			if (!Value.Check(STRING_VALUE, name)) continue;
+			required.add(name);
+			optional.delete(name);
+		}
+	}
+	return [...new Set([...required, ...optional])].sort().map((name) => ({ name, required: required.has(name) }));
+}
+
+function npmDependencyPath(root: string, name: string): string | undefined {
+	if (name.includes("\0") || name.includes("\\") || name === "" || isAbsolute(name)) return undefined;
+	const segments = name.split("/");
+	if (
+		segments.some((segment) => segment === "" || segment === "." || segment === "..")
+		|| (name.startsWith("@") ? segments.length !== 2 : segments.length !== 1)
+	) return undefined;
+	const path = join(root, ...segments);
+	return inside(root, path) ? path : undefined;
+}
+
+interface StagedNpmDependency {
+	alias: string;
+	real: string;
+}
+
+function stagedNpmDependency(
+	nodeModules: string,
+	packagePath: string,
+	name: string,
+): StagedNpmDependency | undefined {
+	const nodeModulesRoot = realpathSync(nodeModules);
+	const candidates = [
+		npmDependencyPath(join(packagePath, "node_modules"), name),
+		npmDependencyPath(nodeModules, name),
+	].filter((path): path is string => path !== undefined);
+	for (const alias of candidates) {
+		try {
+			const real = realpathSync(alias);
+			if (!inside(nodeModulesRoot, real) || !statSync(real).isDirectory()) continue;
+			return { alias, real };
+		} catch (error) {
+			if (!missing(error)) throw error;
+		}
+	}
+	return undefined;
+}
+
+async function materializeStagedNpmPackage(
+	nodeModules: string,
+	packagePath: string,
+	destination: string,
+): Promise<void> {
+	const root = realpathSync(packagePath);
+	const occupied = new Map<string, string>();
+	const copyPackage = async (source: string, target: string): Promise<void> => {
+		const existing = occupied.get(target);
+		if (existing !== undefined) {
+			if (existing !== source) throw new Error(`Conflicting staged npm dependency destination: ${target}`);
+			return;
+		}
+		occupied.set(target, source);
+		const sourceNodeModules = join(source, "node_modules");
+		await mkdir(dirname(target), { recursive: true });
+		await cp(source, target, {
+			recursive: true,
+			dereference: false,
+			errorOnExist: false,
+			filter: (candidate) => !inside(sourceNodeModules, candidate),
+			verbatimSymlinks: true,
+		});
+		const manifest = readJson(join(source, "package.json"), "Installed package manifest");
+		for (const { name, required } of npmRuntimeDependencies(manifest)) {
+			const dependency = stagedNpmDependency(nodeModules, source, name);
+			if (dependency === undefined) {
+				if (required) throw new Error(`Installed npm package is missing required runtime dependency ${name}`);
+				continue;
+			}
+			const localAliasRoot = join(source, "node_modules");
+			const aliasRoot = inside(localAliasRoot, dependency.alias)
+				? join(target, "node_modules")
+				: join(destination, "node_modules");
+			const aliasTarget = npmDependencyPath(aliasRoot, name);
+			if (aliasTarget === undefined) throw new Error(`Invalid staged npm dependency name: ${name}`);
+			await copyPackage(dependency.real, aliasTarget);
+		}
+	};
+	await copyPackage(root, destination);
+}
+
+interface StagedNpmPackageCommitOptions {
+	afterCommit?: () => Promise<void>;
+	beforeCommit?: (prepared: string) => Promise<void>;
+	signal?: AbortSignal;
+}
+
+async function commitStagedNpmPackage(
+	nodeModules: string,
+	packagePath: string,
+	destination: string,
+	options: StagedNpmPackageCommitOptions = {},
+): Promise<void> {
+	const transaction = await mkdtemp(join(dirname(nodeModules), ".ohm-package-commit-"));
+	const prepared = join(transaction, "package");
+	const previous = npmPackagePreviousPath(destination);
+	try {
+		await materializeStagedNpmPackage(nodeModules, packagePath, prepared);
+		await options.beforeCommit?.(prepared);
+		await mkdir(dirname(destination), { recursive: true });
+		await withFileLock(npmPackageSwapLockPath(destination), async () => {
+			recoverNpmPackageSwap(destination);
+			const replacing = pathEntryExists(destination);
+			if (replacing) await rename(destination, previous);
+			let installed = false;
+			try {
+				await rename(prepared, destination);
+				installed = true;
+				await options.afterCommit?.();
+			} catch (error) {
+				if (installed) await rm(destination, { recursive: true, force: true });
+				if (replacing) await rename(previous, destination);
+				throw error;
+			}
+			if (replacing) await rm(previous, { recursive: true, force: true }).catch(() => undefined);
+		}, options.signal);
+	} finally {
+		await rm(transaction, { recursive: true, force: true }).catch(() => undefined);
+	}
+}
+
 async function writeAtomicFile(path: string, contents: string | Uint8Array): Promise<void> {
 	const root = dirname(path);
 	await mkdir(root, { recursive: true, mode: 0o700 });
@@ -364,7 +608,7 @@ function regularInside(root: string, path: string): string | undefined {
 
 interface Inventory { files: string[]; relative: Map<string, string> }
 
-function inventory(root: string): Inventory {
+function inventory(root: string, includeNodeModules = false): Inventory {
 	const files: string[] = [];
 	const relativePaths = new Map<string, string>();
 	const budget = { entries: 0, pathBytes: 0 };
@@ -409,7 +653,7 @@ function inventory(root: string): Inventory {
 			} catch (error) { if (!missing(error)) throw error; }
 		}
 		for (const entry of entries(directory)) {
-			if (entry.name === ".git" || ignored.has(entry.name)) continue;
+			if (entry.name === ".git" || (!includeNodeModules && entry.name === "node_modules") || ignored.has(entry.name)) continue;
 			const path = join(directory, entry.name);
 			if (entry.isSymbolicLink()) continue;
 			if (entry.isDirectory()) visit(path, depth + 1);
@@ -627,7 +871,7 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 	const portable = inspectPortablePlugin(root);
 	const diagnostics = (portable?.diagnostics ?? []).map((diagnostic) => ({ ...diagnostic, source: entry.source }));
 	if (portable?.rejected === true) return { resources: EMPTY(), diagnostics, rejected: true };
-	const snapshot = inventory(root);
+	let snapshot = inventory(root);
 	let declarations: Partial<Record<ResourceType, string[]>> = {};
 	let authoritative = false;
 	let legacyManifest: ReturnType<typeof parseLegacyExtensionManifest> | undefined;
@@ -681,6 +925,9 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 		}
 	}
 	if (authoritative) for (const type of TYPES) declarations[type] ??= [];
+	if (Object.values(declarations).some((patterns) => patterns?.some((pattern) => pattern.includes("node_modules")) === true)) {
+		snapshot = inventory(root, true);
+	}
 	if (!authoritative) {
 		for (const type of TYPES) {
 			if (entry[type] === undefined) continue;
@@ -905,6 +1152,7 @@ export class DefaultPackageManager implements PackageManager {
 	readonly #activate: PackageActivationCallback | undefined;
 	readonly #offline: boolean;
 	readonly #probeTimeout: number;
+	readonly #recoveredNpmScopes = new Set<"user" | "project">();
 	#progress: ProgressCallback | undefined;
 	#diagnostics: PackageDiagnostic[] = [];
 
@@ -916,6 +1164,8 @@ export class DefaultPackageManager implements PackageManager {
 		this.#activate = options.activateCandidate;
 		this.#offline = options.offline ?? process.env.OHM_OFFLINE === "1";
 		this.#probeTimeout = options.legacyGlobalProbeTimeoutMs ?? 2_000;
+		this.#recoverNpmScope("user");
+		if (this.#settings.isProjectTrusted()) this.#recoverNpmScope("project");
 	}
 
 	setProgressCallback(callback: ProgressCallback | undefined): void { this.#progress = callback; }
@@ -929,8 +1179,19 @@ export class DefaultPackageManager implements PackageManager {
 		return scope === "user" ? this.#agentDir : join(this.#cwd, ".ohm");
 	}
 
+	#recoverNpmScope(scope: "user" | "project"): void {
+		if (this.#recoveredNpmScopes.has(scope) || (scope === "project" && !this.#settings.isProjectTrusted())) return;
+		const scopeBase = this.#scopeBase(scope);
+		if (!pathEntryExists(join(scopeBase, "npm"))) {
+			this.#recoveredNpmScopes.add(scope);
+			return;
+		}
+		if (recoverManagedNpmPackageSwaps(scopeBase)) this.#recoveredNpmScopes.add(scope);
+	}
+
 	#assertProject(): void {
 		if (!this.#settings.isProjectTrusted()) throw new Error("Project packages are unavailable because this project is not trusted");
+		this.#recoverNpmScope("project");
 	}
 
 	#entries(scope: "user" | "project"): PackageSource[] {
@@ -999,6 +1260,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined {
+		this.#recoverNpmScope(scope);
 		const parsed = parseSource(source);
 		const scopeBase = this.#scopeBase(scope);
 		if (parsed.kind === "local") {
@@ -1011,7 +1273,9 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		if (parsed.name !== "") {
 			const path = join(scopeBase, "npm", "node_modules", parsed.name);
-			if (existsSync(path)) return path;
+			const visible = visibleNpmPackagePath(path);
+			if (visible === NPM_PACKAGE_TRANSITION) return undefined;
+			if (visible !== undefined) return visible;
 		} else {
 			if (existsSync(npmSourceReceiptPath(scopeBase, source))) return installedNpmReceiptPath(scopeBase, source);
 			const identity = sourceIdentity(source, scopeBase);
@@ -1072,7 +1336,7 @@ export class DefaultPackageManager implements PackageManager {
 		parsed: Extract<ParsedSource, { kind: "npm" }>,
 		scopeBase: string,
 		options: PackageInstallOptions,
-		use: (staged: { manifest: JsonObject; name: string; path: string }) => Promise<T>,
+		use: (staged: { manifest: JsonObject; name: string; nodeModules: string; path: string }) => Promise<T>,
 	): Promise<T> {
 		await mkdir(scopeBase, { recursive: true });
 		const stage = await mkdtemp(join(scopeBase, ".ohm-package-stage-"));
@@ -1083,11 +1347,11 @@ export class DefaultPackageManager implements PackageManager {
 			const manager = commandName(command);
 			const scriptFlags = options.allowScripts === true
 				? manager === "pnpm"
-					? ["--ignore-scripts=false", "--config.bin-links=true"]
-					: ["--ignore-scripts=false", "--bin-links=true"]
+					? ["--ignore-scripts=false", "--config.bin-links=true", "--config.node-linker=hoisted"]
+					: ["--ignore-scripts=false", "--bin-links=true", "--install-links=true"]
 				: manager === "pnpm"
-					? ["--ignore-scripts=true", "--config.bin-links=false", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
-					: ["--ignore-scripts=true", "--bin-links=false"];
+					? ["--ignore-scripts=true", "--config.bin-links=false", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false", "--config.node-linker=hoisted"]
+					: ["--ignore-scripts=true", "--bin-links=false", "--install-links=true"];
 			const peerFlags = manager === "pnpm" ? [] : ["--legacy-peer-deps"];
 			await run(command, ["install", parsed.spec, "--prefix", stage, ...peerFlags, ...scriptFlags], {
 				...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
@@ -1100,10 +1364,10 @@ export class DefaultPackageManager implements PackageManager {
 			const nodeModules = join(stage, "node_modules");
 			const candidates: string[] = [];
 			for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-				if (!entry.isDirectory()) continue;
+				if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 				if (entry.name.startsWith("@")) {
 					for (const child of readdirSync(join(nodeModules, entry.name), { withFileTypes: true })) {
-						if (child.isDirectory()) candidates.push(join(nodeModules, entry.name, child.name));
+						if (child.isDirectory() || child.isSymbolicLink()) candidates.push(join(nodeModules, entry.name, child.name));
 					}
 				} else candidates.push(join(nodeModules, entry.name));
 			}
@@ -1114,7 +1378,7 @@ export class DefaultPackageManager implements PackageManager {
 			const manifest = readJson(join(packagePath, "package.json"), "Installed package manifest");
 			const name = manifest["name"];
 				if (!Value.Check(STRING_VALUE, name) || name === "" || name.startsWith("-")) throw new Error("Installed package name is invalid");
-			return await use({ manifest, name, path: packagePath });
+			return await use({ manifest, name, nodeModules, path: packagePath });
 		} finally {
 			await rm(stage, { recursive: true, force: true });
 		}
@@ -1189,7 +1453,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	async #installNpm(source: string, parsed: Extract<ParsedSource, { kind: "npm" }>, scope: "user" | "project", options: PackageInstallOptions): Promise<void> {
 		const scopeBase = this.#scopeBase(scope);
-		await this.#withStagedNpm(source, parsed, scopeBase, options, async ({ manifest, name, path: packagePath }) => {
+		await this.#withStagedNpm(source, parsed, scopeBase, options, async ({ manifest, name, nodeModules, path: packagePath }) => {
 			const restoreReceipts = await this.#recoverNpmReceipts(scope, { name, source }, options);
 			try {
 				const receiptName = parsed.name === "" ? npmSourceReceiptName(scopeBase, source) : undefined;
@@ -1213,15 +1477,24 @@ export class DefaultPackageManager implements PackageManager {
 						throw new Error(`Package ${name} requires ohm ${range}`);
 					}
 				}
-				await this.#activation(source, scope, packagePath, options.signal);
-				options.signal?.throwIfAborted();
 				const managedRoot = join(scopeBase, "npm", "node_modules");
 				const destination = join(managedRoot, name);
 				if (!inside(managedRoot, destination)) throw new Error("Installed package name is invalid");
-				await mkdir(dirname(destination), { recursive: true });
-				await rm(destination, { recursive: true, force: true });
-				await cp(packagePath, destination, { recursive: true, dereference: false, errorOnExist: false });
-				if (parsed.name === "") await writeNpmSourceReceipt(scopeBase, source, name);
+				await commitStagedNpmPackage(
+					nodeModules,
+					packagePath,
+					destination,
+					{
+						beforeCommit: async (prepared) => {
+							await this.#activation(source, scope, prepared, options.signal);
+							options.signal?.throwIfAborted();
+						},
+						...optionalProperties(parsed.name === "" ? {
+							afterCommit: async () => await writeNpmSourceReceipt(scopeBase, source, name),
+						} : undefined),
+						...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
+					},
+				);
 			} catch (error) {
 				await restoreReceipts();
 				throw error;
@@ -1602,11 +1875,11 @@ export class DefaultPackageManager implements PackageManager {
 						"install", ...specs, "--prefix", stage,
 						...(manager === "pnpm"
 							? options.allowScripts === true
-								? ["--ignore-scripts=false", "--config.bin-links=true"]
-								: ["--ignore-scripts=true", "--config.bin-links=false", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false"]
+								? ["--ignore-scripts=false", "--config.bin-links=true", "--config.node-linker=hoisted"]
+								: ["--ignore-scripts=true", "--config.bin-links=false", "--config.auto-install-peers=false", "--config.strict-peer-dependencies=false", "--config.strict-dep-builds=false", "--config.node-linker=hoisted"]
 							: ["--legacy-peer-deps", ...(options.allowScripts === true
-									? ["--ignore-scripts=false", "--bin-links=true"]
-									: ["--ignore-scripts=true", "--bin-links=false"])]),
+									? ["--ignore-scripts=false", "--bin-links=true", "--install-links=true"]
+									: ["--ignore-scripts=true", "--bin-links=false", "--install-links=true"])]),
 					], {
 						...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
 						env: {
@@ -1621,11 +1894,14 @@ export class DefaultPackageManager implements PackageManager {
 							const name = npmName(spec);
 							const candidate = join(nodeModules, name);
 							if (!existsSync(candidate)) continue;
-							await this.#activation(`npm:${spec}`, scope, candidate, options.signal);
 							const destination = join(scopeBase, "npm", "node_modules", name);
-							await mkdir(dirname(destination), { recursive: true });
-							await rm(destination, { recursive: true, force: true });
-							await cp(candidate, destination, { recursive: true, dereference: false });
+							await commitStagedNpmPackage(nodeModules, candidate, destination, {
+								beforeCommit: async (prepared) => {
+									await this.#activation(`npm:${spec}`, scope, prepared, options.signal);
+									options.signal?.throwIfAborted();
+								},
+								...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
+							});
 						}
 					}
 				} finally { await rm(stage, { recursive: true, force: true }); }

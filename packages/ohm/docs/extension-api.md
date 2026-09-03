@@ -83,6 +83,8 @@ The complete `ExtensionAPI` surface is:
 | `setLabel(entryId, label)` | `void` | Add, replace, or clear an entry label. |
 | `exec(command, args, options?)` | `Promise<ExecResult>` | Run an executable with an argv array, without a shell. |
 | `config` | `ExtensionConfigStore` | Read or compare-and-swap the extension's user or workspace configuration. |
+| `jobs` | `ExtensionJobService` | Start, inspect, list, cancel, wait for, and explicitly resume durable extension jobs. |
+| `childSessions` | `ExtensionChildSessionService` | Spawn and reattach host-owned Ohm RPC sessions and send prompts, steering, or follow-ups. |
 | `processes` | `ExtensionProcessService` | Start and control generation-owned asynchronous processes. |
 | `services.register(name, service)` | `ExtensionRegistrationHandle` | Publish one trusted same-process object or function by exact reference. |
 | `services.get<T>(name)` | `T \| undefined` | Look up the current exact service reference. |
@@ -201,12 +203,105 @@ resources: they are cancelled on refresh or close and never survive or reattach
 after a host restart. The service does not persist a job mailbox or deliver a
 result to the model automatically.
 
-### Extension-owned protocol bridges and delegated agents
+### Durable jobs and child sessions
 
-There is no protocol-specific registry or child-agent service in this API.
-Both integrations are ordinary trusted extensions composed from
-`registerTool`, `processes`, lifecycle callbacks, configuration, and optional
-renderers.
+`ohm.jobs` supplies durable host authority without choosing an extension's
+workflow. `start(options, operation)` records a host-generated identity before
+running the supplied operation. The operation receives an abort signal, attempt
+number, and bounded `replaceMetadata` method. It may return a JSON-safe result.
+The service also provides `inspect`, bounded `list`, `wait`, idempotent `cancel`,
+and explicit `resume` for interrupted work.
+
+Every `jobs` and `childSessions` method is available only after the extension
+factory commits, including read methods such as `inspect`, `list`, `wait`, and
+`state`. Reads can perform crash recovery and persist an ownership transition,
+so a staged factory must register a command, tool, or lifecycle callback and use
+the service from that post-commit callback.
+
+Job kinds, labels, idempotency keys, metadata, results, diagnostics, active
+counts, timeouts, and retained records are bounded. An idempotency key resolves
+to the existing job and never silently runs the operation twice. Refresh, host
+shutdown, or a crash changes previously active work to `interrupted`; it does
+not pretend that a callback or process survived. A later generation must call
+`resume(id, operation)` explicitly. Completed, failed, cancelled, and timed-out
+jobs cannot be resumed through that method.
+
+Each active record carries a host-instance owner. Another live host sharing the
+workspace can inspect or wait for the record, but cannot steal or cancel it.
+Only a closed or demonstrably dead owner is recovered as interrupted. Under the
+aggregate byte or record cap, the registry deterministically removes the oldest
+terminal records first and the oldest interrupted records only when necessary;
+active records and the record being mutated are never eviction candidates.
+Cross-process liveness uses the operating system's PID probe. It is deliberately
+conservative: an inaccessible process or a reused live PID can delay recovery,
+but cannot cause a second host to take work from a possibly live owner.
+Current bounds are eight active jobs and 256 retained records per extension,
+a 1 MiB registry, 64 KiB each for metadata and result, a one-hour default
+timeout, and a 24-hour maximum timeout. Job kinds use lowercase identifier
+segments (`[a-z][a-z0-9._-]*`); the `ohm.` prefix is host-reserved. Because
+retention is bounded, a sufficiently old terminal or interrupted ID and its
+idempotency key can eventually expire from the registry.
+
+The host stores a checksummed, atomically replaced registry inside the
+extension's private workspace data directory. Ownership is stable across
+generations of the same extension, while another extension cannot inspect or
+control those records. A corrupt committed registry fails closed. Abandoned
+temporary files are ignored.
+
+`ohm.childSessions` specializes the same durable lifecycle for the host's own
+RPC entry point. `spawn` creates a persistent V4 journal below the extension's
+private data directory and returns its job ID plus the session ID and canonical
+session file. `prompt`, `steer`, and `followUp` use the existing RPC protocol;
+`state`, `inspect`, and `list` expose live or durable state; and `cancel` aborts
+the active turn before stopping the transport.
+
+`spawn` accepts only `idempotencyKey`, `label`, an in-workspace `cwd`,
+`provider`, `model`, `thinkingLevel`, `tools`, `excludeTools`,
+`noBuiltinTools`, `noContextFiles`, `systemPrompt`, `appendSystemPrompt`, and
+`timeoutMs`. The two system-prompt forms are mutually exclusive.
+
+A process cannot remain attached after its host crashes. On restart the record
+is therefore `interrupted`. `reattach(id)` validates the canonical path and V4
+header, then starts a new RPC transport using the exact stored session. It does
+not replay the first operation or claim process continuity. Child working
+directories stay within the canonical host workspace, sessions stay within
+the owning extension's private directory, and the API accepts typed Ohm
+options rather than an executable or arbitrary argv. Child extensions are
+disabled at this boundary; a workflow extension remains responsible for
+profiles, orchestration, budgets, aggregation, and presentation.
+An unexpected transport exit after a valid V4 identity has been recorded is
+also interrupted and reattachable; setup failures before that point are failed.
+
+Child sessions are same-user, same-trust Ohm processes, not a sandbox or
+confidentiality boundary. They inherit the host's Ohm environment so existing
+provider authentication continues to work. The extension cannot provide or
+override environment variables, the executable, raw argv, session-directory
+flags, or extension-loading flags through this API.
+
+### Optional facets and portable host contracts
+
+`ohm.facets.register(definition)` adds a versioned, generation-owned facet
+without changing the existing factory contract. Version 1 supports one-time
+worker facets, per-session and presentation facets, and component-capable
+rich-TUI facets. `web` and `desktop` names are reserved but not activated yet.
+The context exposes scoped typed wire services, portable presentations,
+activation-local `createState`, and generation-shared named `states.open/get`.
+
+Wire contracts carry detached TypeBox request/response schemas and byte limits
+through SDK, RPC, and serve discovery. Named state automatically exposes
+snapshot, retained delta, and revision-checked apply operations through that
+broker. Portable documents and action requests use a separate version 1 JSON
+contract with current snapshots for late clients. The TUI renders the portable
+document but version 1 does not add a built-in TUI action dispatcher. See
+[Facets, portable presentations, and wire services](facets-and-presentations.md)
+for exact lifecycle, bounds, cleanup, and host behavior.
+
+### Extension-owned protocol bridges and delegated workflows
+
+There is no MCP-specific registry or built-in subagent workflow in this API.
+Both integrations remain ordinary trusted extensions. A delegation extension
+may now use the generic `jobs` and `childSessions` authority instead of owning
+raw child transport and recovery itself.
 
 An MCP bridge owns framing, negotiation, discovery, authentication, server
 lifecycle, allowlisting, and catalog refresh. It starts a bounded transport
@@ -217,10 +312,10 @@ The tested [`mcp-stdio` example](../examples/mcp-stdio/README.md) implements tha
 complete boundary.
 
 A specialist-delegation extension owns its profiles, orchestration, limits,
-child invocation, streamed event parsing, cancellation, result composition,
-and presentation. It can launch an ephemeral ohm JSON-mode process through
-`ohm.processes` and expose the workflow as one ordinary registered tool. The
-host contributes only the generic process and tool contracts. See the tested
+result composition, and presentation. It can launch a one-shot JSON-mode process
+through `ohm.processes`, or a durable steerable session through
+`ohm.childSessions`, and expose the workflow as one ordinary registered tool.
+The host still does not encode subagent policy. See the tested
 [`subagent-specialists` example](../examples/subagent-specialists/README.md).
 
 `DiscoveryView` is:
@@ -756,6 +851,7 @@ path. This serializes aliases of the same physical file while unrelated files
 remain independent.
 
 Tool renderers receive `ToolRenderContext` with `args`, `toolCallId`, `invalidate`, `lastComponent`, mutable renderer `state`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, and `isError`. The result renderer also receives `{ expanded, isPartial }`.
+The host may retain call and result output while that view and its render context stay unchanged. Call `invalidate()` after changing renderer-owned state that should repaint the retained output.
 
 ## Event signatures
 

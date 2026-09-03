@@ -120,9 +120,11 @@ function errorCode<ValueType>(value: ValueType): string | undefined {
 
 const DOCUMENTED_API_MEMBERS = [
   "appendEntry",
+  "childSessions",
   "config",
   "events",
   "exec",
+  "facets",
   "getActiveTools",
   "getAllTools",
   "getCommands",
@@ -130,6 +132,7 @@ const DOCUMENTED_API_MEMBERS = [
   "getFlag",
   "getSessionName",
   "getThinkingLevel",
+  "jobs",
   "on",
   "onDispose",
   "processes",
@@ -166,6 +169,7 @@ const CAPABILITY_API_MEMBERS = [
   "abort",
   "addAutocompleteProvider",
   "appendEntry",
+  "childSessions",
   "capabilities",
   "compact",
   "confirm",
@@ -175,6 +179,7 @@ const CAPABILITY_API_MEMBERS = [
   "editor",
   "events",
   "exec",
+  "facets",
   "fork",
   "getActiveTools",
   "getAllTools",
@@ -196,6 +201,7 @@ const CAPABILITY_API_MEMBERS = [
   "input",
   "isIdle",
   "isProjectTrusted",
+  "jobs",
   "mode",
   "model",
   "modelRegistry",
@@ -271,6 +277,13 @@ const TUI_ONLY_CAPABILITIES = new Set([
 const TEST_ONLY_API_EVIDENCE = new Map<string, ReadonlyMap<string, string>>([
   ["bounded-process-execution", new Map([
     ["exec", "test/extensions/direct-factory-contract.test.ts"],
+  ])],
+  ["durable-jobs-and-child-sessions", new Map([
+    ["jobs", "test/extensions/durable-jobs.test.ts"],
+    ["childSessions", "test/extensions/durable-jobs.test.ts"],
+  ])],
+  ["optional-facets-portable-presentations-and-wire-services", new Map([
+    ["facets", "test/extensions/facets.test.ts"],
   ])],
   ["callback-context-contract", new Map([
     ["abort", "test/extensions/runtime-authoring.test.ts"],

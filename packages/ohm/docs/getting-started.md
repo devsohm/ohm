@@ -27,13 +27,13 @@ does not need Node.js or npm.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
 ```
 
 The installer downloads only the matching standalone archive from the latest GitHub release. It verifies the release

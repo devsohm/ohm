@@ -76,6 +76,19 @@ import type { SlashCommandInfo } from "../core/slash-commands.js";
 import type { EventBus as CoreEventBus } from "../core/event-bus.js";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import { createExtensionConfigStore } from "./config-store.js";
+import { DurableJobSupervisor } from "./durable-jobs.js";
+import {
+  PORTABLE_PRESENTATION_LIMITS,
+  createPortablePresentation,
+  portablePresentationRemoveEvent,
+  portablePresentationShowEvent,
+  validatePortablePresentationActionRequest,
+  type PortablePresentationActionRequest,
+  type PortablePresentationActionResult,
+  type PortablePresentationController,
+  type PortablePresentationDefinition,
+  type PortablePresentationEvent,
+} from "../interfaces/portable-presentation.js";
 import {
   ManagedProcessSupervisor,
   type ExtensionProcessService,
@@ -139,6 +152,23 @@ import type {
 import type { ExtensionUIRouteService } from "./capabilities/ui-routes.js";
 import { RuntimeUISlotRegistrations } from "./runtime-internal/ui-slot-registrations.js";
 import { UNAVAILABLE_EXTENSION_UI_ROUTES } from "./runtime-internal/ui-route-registrations.js";
+import { ExtensionFacetCoordinator } from "./runtime-internal/facet-coordinator.js";
+import type {
+  ExtensionFacetDefinition,
+  ExtensionPortablePresentationRegistration,
+} from "./facets.js";
+import {
+  EXTENSION_WIRE_SERVICE_LIMITS,
+  EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION,
+  describeExtensionWireServiceEndpoint,
+  extensionWireServiceRegistryName,
+  validateExtensionWireServiceRequest,
+  validateExtensionWireServiceResponse,
+  type ExtensionWireServiceDescriptor,
+  type ExtensionWireServiceEndpoint,
+  type ExtensionWireServiceRequest,
+  type ExtensionWireServiceResponse,
+} from "./wire-services.js";
 import { ExtensionUISlotCompositor } from "../tui/ui-slot-compositor.js";
 import {
   extensionModelRegistry,
@@ -270,6 +300,8 @@ const MAX_RUNTIME_DIAGNOSTICS = 512;
 const MAX_RUNTIME_ACTIVE_TOOLS = 512;
 const MAX_RUNTIME_CATALOG_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_SERVICES = 256;
+const MAX_RUNTIME_PORTABLE_PRESENTATIONS = 256;
+const MAX_RUNTIME_PORTABLE_PRESENTATION_LISTENERS = 64;
 const MAX_RUNTIME_SHARED_EVENT_LISTENERS = 1_024;
 const MAX_RUNTIME_STAGED_SHARED_EVENT_EMISSIONS = 1_024;
 const MAX_RUNTIME_SHARED_EVENT_PAYLOAD_BYTES = 1024 * 1024;
@@ -2051,6 +2083,7 @@ interface RuntimeNamedToolRenderer {
 interface RuntimeActivation {
   staged: StagedActivation;
   api: ExtensionAPI;
+  activateWorkers(signal?: AbortSignal): Promise<void>;
 }
 
 interface RuntimeHostContext {
@@ -2237,6 +2270,14 @@ interface OwnedService {
   entry: ExtensionRuntimeEntry;
   generation: RuntimeExtensionGeneration;
   registration: RuntimeServiceRegistration;
+}
+
+interface OwnedPortablePresentation {
+  entry: ExtensionRuntimeEntry;
+  generation: RuntimeExtensionGeneration;
+  controller: PortablePresentationController;
+  snapshotBytes: number;
+  dispose?: () => void;
 }
 
 interface OwnedCommand {
@@ -3701,6 +3742,7 @@ function activation(
     writable: () => staged.committed && generation.active,
   });
   const processes = host.managedProcesses(entry, generation, () => staged.committed);
+  const durable = host.durableJobs(entry, generation, dataPaths, () => staged.committed);
   const assertActive = (): void => {
     if (!generation.active) throw new Error(`Runtime extension context is no longer active: ${entry.extensionId}`);
   };
@@ -3988,8 +4030,54 @@ function activation(
     return registered;
   };
 
-  const directApi: ExtensionAPI = {
+  let directApi!: ExtensionAPI;
+  const unregisterFacetListener = <K extends RuntimeDirectExtensionEvent>(
+    event: K,
+    listener: RuntimeExtensionListener<RuntimeExtensionEvent>,
+  ): void => {
+    if (!staged.committed) {
+      const index = staged.listeners.findIndex((candidate) =>
+        candidate.event === event && candidate.listener === listener);
+      if (index >= 0) staged.listeners.splice(index, 1);
+    } else host.unregisterLiveListener(staged.entry, staged.generation, event, listener);
+  };
+  const facetCoordinator = new ExtensionFacetCoordinator({
+    owner: staged.entry.extensionId,
+    signal: generation.abortController.signal,
+    committed: () => staged.committed,
+    extension: () => directApi,
+    onSessionStart(handler) {
+      const listener = registerRuntimeListener(
+        "session_start",
+        async (_event, context) => await handler(context),
+      );
+      return () => unregisterFacetListener("session_start", listener);
+    },
+    onSessionShutdown(handler) {
+      const listener = registerRuntimeListener(
+        "session_shutdown",
+        async () => await handler(),
+      );
+      return () => unregisterFacetListener("session_shutdown", listener);
+    },
+    showPresentation(definition, signal) {
+      return host.showPortablePresentation(staged.entry, staged.generation, definition, signal);
+    },
+    removePresentation(id) {
+      host.removePortablePresentation(staged.entry, staged.generation, id);
+    },
+  });
+  staged.disposers.push(onceRuntimeCleanup(async () => await facetCoordinator.close()));
+
+  directApi = {
     config,
+    facets: Object.freeze({
+      async register(definition: ExtensionFacetDefinition) {
+        return await facetCoordinator.register(definition);
+      },
+    }),
+    jobs: durable.jobs,
+    childSessions: durable.childSessions,
     processes,
     services,
     onDispose(dispose) {
@@ -4312,6 +4400,7 @@ function activation(
   return {
     staged,
     api: Object.freeze(directApi),
+    activateWorkers: async (signal) => await facetCoordinator.activateWorkers(signal),
   };
 }
 
@@ -4376,6 +4465,9 @@ export class RuntimeExtensionHost {
   readonly #listeners = new Map<string, OwnedListener[]>();
   readonly #sharedListeners = new Map<string, OwnedSharedListener[]>();
   readonly #services = new Map<string, OwnedService>();
+  readonly #portablePresentations = new Map<string, OwnedPortablePresentation>();
+  readonly #portablePresentationListeners = new Set<(event: PortablePresentationEvent) => void>();
+  #portablePresentationSnapshotItemBytes = 0;
   readonly #externalSharedListeners = new Set<OwnedExternalSharedListener>();
   readonly #disposers: Array<() => void | Promise<void>> = [];
   readonly #moduleDisposers: Array<() => void | Promise<void>> = [];
@@ -4404,6 +4496,7 @@ export class RuntimeExtensionHost {
   readonly #uiSlotCompositor = new ExtensionUISlotCompositor();
   readonly #uiSlotRegistrations = new WeakMap<RuntimeExtensionGeneration, RuntimeUISlotRegistrations>();
   readonly #managedProcessSupervisor: ManagedProcessSupervisor;
+  readonly #durableJobSupervisor: DurableJobSupervisor;
   #liveRegistrationHandler: RuntimeLiveRegistrationHandler | undefined;
   #nativeUiHandler: ((extensionId: string, signal: AbortSignal) => NativeUiHost) | undefined;
   #unsafeTerminalHandler: ((extensionId: string, signal: AbortSignal) => UnsafeTerminalHost) | undefined;
@@ -4430,6 +4523,7 @@ export class RuntimeExtensionHost {
   ) {
     this.#workspace = resolve(workspace);
     this.#managedProcessSupervisor = new ManagedProcessSupervisor({ cwd: this.#workspace });
+    this.#durableJobSupervisor = new DurableJobSupervisor();
     this.#dataRoot = resolve(options.dataRoot ?? join(this.#workspace, ".ohm", "state", "extension-data"));
     this.#mode = options.mode ?? "print";
     this.#projectTrusted = options.projectTrusted ?? false;
@@ -4476,6 +4570,34 @@ export class RuntimeExtensionHost {
         sourcePath: entry.sourcePath,
         message,
       }),
+    });
+  }
+
+  durableJobs(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    dataPaths: RuntimeExtensionDataPaths,
+    isCommitted: () => boolean,
+  ): Pick<ExtensionAPI, "jobs" | "childSessions"> {
+    this.#assertLive(entry, generation);
+    const owner = {
+      key: generation,
+      id: entry.extensionId,
+      root: dataPaths.workspace,
+      workspace: this.#workspace,
+      projectTrusted: () => this.#projectTrusted,
+      signal: generation.abortController.signal,
+      isActive: () => generation.active && !this.#closed,
+      isCommitted,
+      diagnostic: (message: string) => this.addDiagnostic({
+        extensionId: entry.extensionId,
+        sourcePath: entry.sourcePath,
+        message,
+      }),
+    };
+    return Object.freeze({
+      jobs: this.#durableJobSupervisor.jobs(owner),
+      childSessions: this.#durableJobSupervisor.childSessions(owner),
     });
   }
 
@@ -5991,6 +6113,95 @@ export class RuntimeExtensionHost {
     return owned?.generation.active === true ? owned.registration.service : undefined;
   }
 
+  extensionWireServices(): readonly ExtensionWireServiceDescriptor[] {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    const descriptors: ExtensionWireServiceDescriptor[] = [];
+    let catalogBytes = 2;
+    for (const owned of this.#services.values()) {
+      if (!owned.generation.active) continue;
+      try {
+        const endpoint = owned.registration.service as Partial<ExtensionWireServiceEndpoint>;
+        if (
+          endpoint.protocolVersion !== EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION
+          || typeof endpoint.name !== "string"
+          || typeof endpoint.version !== "number"
+          || !Number.isSafeInteger(endpoint.version)
+          || typeof endpoint.request !== "function"
+          || extensionWireServiceRegistryName({ name: endpoint.name, version: endpoint.version })
+            !== owned.registration.name
+        ) continue;
+        const descriptor = describeExtensionWireServiceEndpoint(
+          endpoint as ExtensionWireServiceEndpoint,
+          owned.entry.extensionId,
+        );
+        if (descriptors.length >= EXTENSION_WIRE_SERVICE_LIMITS.maxCatalogEntries) {
+          throw new RangeError(
+            `Extension wire service catalog exceeds ${EXTENSION_WIRE_SERVICE_LIMITS.maxCatalogEntries} entries`,
+          );
+        }
+        catalogBytes += Buffer.byteLength(JSON.stringify(descriptor), "utf8")
+          + (descriptors.length === 0 ? 0 : 1);
+        if (catalogBytes > EXTENSION_WIRE_SERVICE_LIMITS.maxCatalogBytes) {
+          throw new RangeError(
+            `Extension wire service catalog exceeds ${EXTENSION_WIRE_SERVICE_LIMITS.maxCatalogBytes} bytes`,
+          );
+        }
+        descriptors.push(descriptor);
+      } catch (error) {
+        if (error instanceof RangeError && error.message.startsWith("Extension wire service catalog exceeds")) {
+          throw error;
+        }
+        // Arbitrary same-process services are not part of the versioned wire catalog.
+      }
+    }
+    descriptors.sort((left, right) =>
+      left.name.localeCompare(right.name) || left.version - right.version || left.owner.localeCompare(right.owner));
+    return Object.freeze(descriptors);
+  }
+
+  async invokeExtensionWireService(
+    value: ExtensionWireServiceRequest,
+    signal?: AbortSignal,
+  ): Promise<ExtensionWireServiceResponse> {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    signal?.throwIfAborted();
+    const request = validateExtensionWireServiceRequest(value);
+    const owned = this.#services.get(extensionWireServiceRegistryName({
+      name: request.service,
+      version: request.serviceVersion,
+    }));
+    if (owned === undefined || !owned.generation.active) {
+      throw new TypeError("Extension wire service is unavailable");
+    }
+    const endpoint = owned.registration.service as Partial<ExtensionWireServiceEndpoint>;
+    if (
+      endpoint.protocolVersion !== EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION
+      || endpoint.name !== request.service
+      || endpoint.version !== request.serviceVersion
+      || typeof endpoint.request !== "function"
+    ) throw new TypeError("Extension wire service endpoint is incompatible");
+    try {
+      return validateExtensionWireServiceResponse(
+        await endpoint.request(request, signal),
+        request,
+        endpoint.maxResponseBytes,
+      );
+    } catch {
+      signal?.throwIfAborted();
+      return Object.freeze({
+        protocolVersion: EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION,
+        service: request.service,
+        serviceVersion: request.serviceVersion,
+        id: request.id,
+        ok: false,
+        error: Object.freeze({
+          code: "handler_failed" as const,
+          message: "Extension wire service handler failed",
+        }),
+      });
+    }
+  }
+
   registerLiveService(
     entry: ExtensionRuntimeEntry,
     generation: RuntimeExtensionGeneration,
@@ -6013,6 +6224,184 @@ export class RuntimeExtensionHost {
       owned.generation === generation &&
       owned.registration === registration
     ) this.#services.delete(registration.name);
+  }
+
+  onPortablePresentation(listener: (event: PortablePresentationEvent) => void): () => void {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (!Value.Check(FUNCTION_VALUE, listener)) throw new TypeError("Portable presentation listener must be a function");
+    if (this.#portablePresentationListeners.size >= MAX_RUNTIME_PORTABLE_PRESENTATION_LISTENERS) {
+      throw new RangeError(
+        `Runtime portable presentation listeners exceed ${MAX_RUNTIME_PORTABLE_PRESENTATION_LISTENERS} registrations`,
+      );
+    }
+    this.#portablePresentationListeners.add(listener);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.#portablePresentationListeners.delete(listener);
+    };
+  }
+
+  portablePresentations(): readonly PortablePresentationEvent[] {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    const presentations = [...this.#portablePresentations.values()]
+      .filter((owned) => owned.generation.active)
+      .map((owned) => portablePresentationShowEvent(
+        owned.entry.extensionId,
+        owned.controller.document,
+      ));
+    presentations.sort((left, right) => {
+      if (left.operation !== "show" || right.operation !== "show") return 0;
+      return left.owner.localeCompare(right.owner)
+        || left.presentation.id.localeCompare(right.presentation.id);
+    });
+    return Object.freeze(presentations);
+  }
+
+  #emitPortablePresentation(event: PortablePresentationEvent): void {
+    for (const listener of Array.from(this.#portablePresentationListeners)) {
+      try { listener(event); }
+      catch {
+        // One presentation adapter cannot break the extension generation or another host adapter.
+      }
+    }
+  }
+
+  showPortablePresentation(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    definition: PortablePresentationDefinition,
+    signal: AbortSignal,
+  ): ExtensionPortablePresentationRegistration {
+    this.#assertLive(entry, generation);
+    if (!generation.committed) {
+      throw new Error("Portable presentations are unavailable before extension activation commits");
+    }
+    signal.throwIfAborted();
+    if (this.#portablePresentations.size >= MAX_RUNTIME_PORTABLE_PRESENTATIONS) {
+      throw new RangeError(`Runtime portable presentations exceed ${MAX_RUNTIME_PORTABLE_PRESENTATIONS} entries`);
+    }
+    const owner = entry.extensionId;
+    let controller = createPortablePresentation(owner, definition, {
+      signal: AbortSignal.any([signal, generation.abortController.signal]),
+    });
+    const key = `${owner}\u0000${controller.document.id}`;
+    if (this.#portablePresentations.has(key)) {
+      throw new TypeError(`Portable presentation ${controller.document.id} is already shown by ${owner}`);
+    }
+    const showEvent = portablePresentationShowEvent(owner, controller.document);
+    const snapshotBytes = Buffer.byteLength(JSON.stringify(showEvent), "utf8");
+    const aggregateBytes = 2
+      + this.#portablePresentationSnapshotItemBytes
+      + snapshotBytes
+      + this.#portablePresentations.size;
+    if (aggregateBytes > PORTABLE_PRESENTATION_LIMITS.maxSnapshotBytes) {
+      throw new RangeError(
+        `Runtime portable presentation snapshot exceeds ${PORTABLE_PRESENTATION_LIMITS.maxSnapshotBytes} bytes`,
+      );
+    }
+    const owned: OwnedPortablePresentation = { entry, generation, controller, snapshotBytes };
+    let disposed = false;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      signal.removeEventListener("abort", dispose);
+      if (this.#portablePresentations.get(key) !== owned) return;
+      this.#portablePresentations.delete(key);
+      this.#portablePresentationSnapshotItemBytes -= owned.snapshotBytes;
+      if (!this.#closed) {
+        this.#emitPortablePresentation(portablePresentationRemoveEvent(
+          owner,
+          controller.document.id,
+          controller.document.revision,
+        ));
+      }
+    };
+    owned.dispose = dispose;
+    this.#portablePresentations.set(key, owned);
+    this.#portablePresentationSnapshotItemBytes += snapshotBytes;
+    signal.addEventListener("abort", dispose, { once: true });
+    if (signal.aborted) {
+      dispose();
+      signal.throwIfAborted();
+    }
+    this.#emitPortablePresentation(showEvent);
+    const registration: ExtensionPortablePresentationRegistration = Object.freeze({
+      get disposed() { return disposed; },
+      get document() { return controller.document; },
+      update: (next: PortablePresentationDefinition): void => {
+        this.#assertLive(entry, generation);
+        signal.throwIfAborted();
+        if (disposed || this.#portablePresentations.get(key) !== owned) {
+          throw new Error("Portable presentation registration is disposed");
+        }
+        const candidate = createPortablePresentation(owner, next, {
+          signal: AbortSignal.any([signal, generation.abortController.signal]),
+        });
+        if (candidate.document.id !== controller.document.id) {
+          throw new TypeError("Portable presentation update cannot change its ID");
+        }
+        if (candidate.document.revision <= controller.document.revision) {
+          throw new TypeError("Portable presentation update revision must increase");
+        }
+        const event = portablePresentationShowEvent(owner, candidate.document);
+        const nextSnapshotBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+        const aggregateBytes = 2
+          + this.#portablePresentationSnapshotItemBytes
+          - owned.snapshotBytes
+          + nextSnapshotBytes
+          + Math.max(0, this.#portablePresentations.size - 1);
+        if (aggregateBytes > PORTABLE_PRESENTATION_LIMITS.maxSnapshotBytes) {
+          throw new RangeError(
+            `Runtime portable presentation snapshot exceeds ${PORTABLE_PRESENTATION_LIMITS.maxSnapshotBytes} bytes`,
+          );
+        }
+        controller = candidate;
+        owned.controller = candidate;
+        this.#portablePresentationSnapshotItemBytes += nextSnapshotBytes - owned.snapshotBytes;
+        owned.snapshotBytes = nextSnapshotBytes;
+        this.#emitPortablePresentation(event);
+      },
+      invoke: async (
+        request: PortablePresentationActionRequest,
+        actionSignal?: AbortSignal,
+      ): Promise<PortablePresentationActionResult> => {
+        this.#assertLive(entry, generation);
+        if (disposed || this.#portablePresentations.get(key) !== owned) {
+          throw new Error("Portable presentation registration is disposed");
+        }
+        return await controller.invoke(request, actionSignal);
+      },
+      dispose,
+    });
+    return registration;
+  }
+
+  removePortablePresentation(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    id: string,
+  ): void {
+    this.#assertLive(entry, generation);
+    const key = `${entry.extensionId}\u0000${id}`;
+    const owned = this.#portablePresentations.get(key);
+    if (owned?.entry !== entry || owned.generation !== generation) return;
+    owned.dispose?.();
+  }
+
+  async invokePortablePresentationAction(
+    value: PortablePresentationActionRequest,
+    signal?: AbortSignal,
+  ): Promise<PortablePresentationActionResult> {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    signal?.throwIfAborted();
+    const request = validatePortablePresentationActionRequest(value);
+    const selected = this.#portablePresentations.get(`${request.owner}\u0000${request.presentationId}`);
+    if (selected === undefined || !selected.generation.active) {
+      throw new TypeError("Portable presentation is unavailable");
+    }
+    return await selected.controller.invoke(request, signal);
   }
 
   emitShared<Input>(
@@ -8225,6 +8614,9 @@ export class RuntimeExtensionHost {
     this.#listeners.clear();
     this.#sharedListeners.clear();
     this.#services.clear();
+    this.#portablePresentations.clear();
+    this.#portablePresentationSnapshotItemBytes = 0;
+    this.#portablePresentationListeners.clear();
     this.#externalSharedListeners.clear();
     failures.push(...await runRuntimeCleanupPhase(
       [
@@ -8235,6 +8627,11 @@ export class RuntimeExtensionHost {
       "Runtime registration and listener cleanup",
     ));
     this.#liveToolRegistrationCleanups.clear();
+    failures.push(...await runRuntimeCleanupPhase(
+      [() => this.#durableJobSupervisor.close()],
+      this.#shutdownTimeoutMs,
+      "Runtime durable job cleanup",
+    ));
     failures.push(...await runRuntimeCleanupPhase(
       [() => this.#managedProcessSupervisor.close()],
       this.#shutdownTimeoutMs,
@@ -8449,6 +8846,16 @@ async function activateRuntimeExtensionEntries(
         host.suppressResources(staged, directMetadata.disabledResources);
       }
       host.commit(activationResult.staged);
+      try {
+        await activationResult.activateWorkers(activationSignal);
+      } catch (cause) {
+        if (loadSignal.aborted) throw cause;
+        host.addDiagnostic({
+          extensionId: entry.extensionId,
+          sourcePath: entry.sourcePath,
+          message: `Runtime worker facet activation failed: ${boundedRuntimeFailureMessage(cause)}`,
+        });
+      }
     } catch (cause) {
       const externalAbort = options.signal?.aborted === true ? abortError(options.signal) : undefined;
       const activationError = loadTimeoutSignal.aborted
@@ -8596,6 +9003,16 @@ async function activateInlineExtensions(
       ]);
       await withAbort(Promise.resolve(factory(candidate.api)), activationSignal);
       host.commit(candidate.staged);
+      try {
+        await candidate.activateWorkers(activationSignal);
+      } catch (cause) {
+        if (loadSignal.aborted) throw cause;
+        host.addDiagnostic({
+          extensionId: entry.extensionId,
+          sourcePath: entry.sourcePath,
+          message: `Runtime worker facet activation failed: ${boundedRuntimeFailureMessage(cause)}`,
+        });
+      }
     } catch (cause) {
       const externalAbort = options.signal?.aborted === true ? abortError(options.signal) : undefined;
       const activationError = externalAbort !== undefined

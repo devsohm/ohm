@@ -3132,7 +3132,7 @@ test("cache diagnostics reject requests with incomplete cache telemetry", () => 
   assert.equal(model.entries.some((entry) => entry.title === "Cache reuse estimate"), false);
 });
 
-test("compaction receipts report cache efficiency without inventing provider counters", () => {
+test("compaction receipts report meaningful cache efficiency without inventing provider counters", () => {
   assert.equal(
     formatCompactionUsageReceipt({
       inputTokens: 2_930,
@@ -3147,6 +3147,14 @@ test("compaction receipts report cache efficiency without inventing provider cou
     "summary request · prompt not reported · output 800",
   );
   assert.equal(
+    formatCompactionUsageReceipt({ inputTokens: 29_092, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 1_359 }),
+    "summary request · prompt 29,092 · output 1,359",
+  );
+  assert.equal(
+    formatCompactionUsageReceipt({ inputTokens: 999_501, cacheReadTokens: 499, cacheWriteTokens: 0, outputTokens: 1 }),
+    "summary request · prompt 1,000,000 · output 1",
+  );
+  assert.equal(
     formatCompactionUsageReceipt({ inputTokens: 0, cacheReadTokens: 0 }),
     undefined,
   );
@@ -3159,7 +3167,7 @@ test("compaction cards keep request metrics out of the compact transcript label"
     cacheWriteTokens: 0,
     outputTokens: 1_359,
   };
-  const receipt = "summary request · prompt 29,092 · cache hit 0.0% · output 1,359";
+  const receipt = "summary request · prompt 29,092 · output 1,359";
   const durable = new TuiModel(DEFAULT_TUI_LIMITS);
   durable.applySessionSummary({
     type: "session_summary",

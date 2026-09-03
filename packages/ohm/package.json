@@ -1,6 +1,6 @@
 {
   "name": "ohm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "A local-first, extensible agent harness for terminals and embedded applications",
@@ -172,9 +172,9 @@
     "typecheck:test": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@ohm/kernel": "0.1.0",
-    "@ohm/models": "0.1.0",
-    "@ohm/terminal": "0.1.0",
+    "@ohm/kernel": "0.1.1",
+    "@ohm/models": "0.1.1",
+    "@ohm/terminal": "0.1.1",
     "@anthropic-ai/sdk": "0.120.0",
     "@aws-sdk/client-bedrock-runtime": "3.1116.0",
     "@aws-sdk/credential-providers": "3.1116.0",

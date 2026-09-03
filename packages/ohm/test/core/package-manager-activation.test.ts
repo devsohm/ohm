@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import fs, { existsSync } from "node:fs";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +13,8 @@ import {
 } from "../../src/core/package-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import type { ExtensionAPI } from "../../src/extensions/direct.js";
+import { defaultNpmCommand } from "../../src/process/npm-command.js";
+import { withFileLock } from "../../src/storage/file-lock.js";
 import {
   loadDirectExtensions,
   type RuntimeDirectPathMetadata,
@@ -27,6 +30,8 @@ interface CandidateState {
 declare global {
   var __ohmCandidateState: CandidateState | undefined;
   var __ohmCancelCandidate: (() => void) | undefined;
+  var __ohmDependencyResource: string | undefined;
+  var __ohmDependencyValue: string | undefined;
   var __ohmExpectedPackagePath: string | undefined;
 }
 
@@ -60,11 +65,12 @@ async function fixture(context: TestContext): Promise<Fixture> {
   await mkdir(cwd);
   await mkdir(agentDir);
   await writeFile(npm, [
-    'import { mkdirSync, rmSync, writeFileSync } from "node:fs";',
-    'import { join } from "node:path";',
+    'import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";',
+    'import { dirname, join, relative } from "node:path";',
     'const args = process.argv.slice(2);',
     'const manager = args[0] === "--" ? args[1] : "npm";',
     'if (args.includes("view")) { process.stdout.write(JSON.stringify(process.env.OHM_TEST_LATEST_VERSION)); process.exit(0); }',
+    'if (args.includes("root") && args.includes("-g")) { process.stdout.write(process.env.OHM_TEST_GLOBAL_NPM_ROOT || ""); process.exit(0); }',
     'const install = args.indexOf("install");',
     'const uninstall = args.indexOf("uninstall");',
     'if (install < 0 && uninstall < 0) process.exit(0);',
@@ -76,15 +82,57 @@ async function fixture(context: TestContext): Promise<Fixture> {
     'const names = JSON.parse(process.env.OHM_TEST_PACKAGE_NAMES || "{}");',
     'const name = names[spec] || process.env.OHM_TEST_PACKAGE_NAME || "candidate-package";',
     'const hostRange = process.env.OHM_TEST_REJECT_SPEC === spec ? ">=999.0.0" : process.env.OHM_TEST_HOST_RANGE;',
+    'const dependencyValue = process.env.OHM_TEST_DEPENDENCY_VALUE;',
+    'const dependencyName = process.env.OHM_TEST_DEPENDENCY_NAME || "ohm-test-direct-dependency";',
+    'const dependencyResource = process.env.OHM_TEST_DEPENDENCY_RESOURCE === "1";',
+    'const missingDependency = process.env.OHM_TEST_MISSING_DEPENDENCY;',
+    'const missingDependencyKind = process.env.OHM_TEST_MISSING_DEPENDENCY_KIND;',
     'const target = join(root, "node_modules", name);',
     'mkdirSync(join(target, "extensions"), { recursive: true });',
     'writeFileSync(join(target, "package.json"), JSON.stringify({',
     '  name,',
     '  version: process.env.OHM_TEST_PACKAGE_VERSION,',
+    '  dependencies: dependencyValue ? { [dependencyName]: "1.0.0" } : missingDependencyKind === "dependency" ? { [missingDependency]: "1.0.0" } : undefined,',
+    '  bundledDependencies: missingDependencyKind === "bundled" ? [missingDependency] : undefined,',
     '  peerDependencies: hostRange ? { ohm: hostRange } : undefined,',
-    '  ohm: { extensions: ["extensions/index.mjs"] },',
+    '  ohm: { extensions: ["extensions/index.mjs", ...(dependencyResource ? [`node_modules/${dependencyName}/extensions/dependent.mjs`] : [])] },',
     '}));',
     'writeFileSync(join(target, "extensions", "index.mjs"), process.env.OHM_TEST_EXTENSION_SOURCE);',
+    'if (dependencyValue) {',
+    '  const direct = join(root, "node_modules", dependencyName);',
+    '  const transitive = join(root, "node_modules", "ohm-test-transitive-dependency");',
+    '  mkdirSync(direct, { recursive: true });',
+    '  mkdirSync(transitive, { recursive: true });',
+    '  writeFileSync(join(direct, "package.json"), JSON.stringify({ name: dependencyName, version: "1.0.0", type: "module", exports: "./index.mjs", dependencies: { "ohm-test-transitive-dependency": "1.0.0" } }));',
+    '  writeFileSync(join(direct, "index.mjs"), `export { dependencyValue } from "ohm-test-transitive-dependency";\\n`);',
+    '  if (dependencyResource) {',
+    '    mkdirSync(join(direct, "extensions"), { recursive: true });',
+    '    writeFileSync(join(direct, "extensions", "dependent.mjs"), `export default () => { globalThis.__ohmDependencyResource = ${JSON.stringify(dependencyName)}; };\\n`);',
+    '  }',
+    '  writeFileSync(join(transitive, "package.json"), JSON.stringify({ name: "ohm-test-transitive-dependency", version: "1.0.0", type: "module", exports: "./index.mjs" }));',
+    '  writeFileSync(join(transitive, "index.mjs"), `export const dependencyValue = ${JSON.stringify(dependencyValue)};\\n`);',
+    '  if (!dependencyResource) {',
+    '    let nested = transitive;',
+    '    for (let index = 0; index < 70; index += 1) nested = join(nested, `nested-${index}`);',
+    '    mkdirSync(nested, { recursive: true });',
+    '  }',
+    '}',
+    'if (process.env.OHM_TEST_PNPM_SYMLINK_LAYOUT === "1") {',
+    '  const store = join(root, "node_modules", ".pnpm");',
+    '  const moveToStore = (packageName) => {',
+    '    const source = join(root, "node_modules", packageName);',
+    '    const destination = join(store, `${packageName.replaceAll("/", "+")}@1.0.0`, "node_modules", packageName);',
+    '    mkdirSync(dirname(destination), { recursive: true });',
+    '    renameSync(source, destination);',
+    '    symlinkSync(process.platform === "win32" ? destination : relative(dirname(source), destination), source, process.platform === "win32" ? "junction" : "dir");',
+    '    return destination;',
+    '  };',
+    '  moveToStore(name);',
+    '  if (dependencyValue) {',
+    '    moveToStore(dependencyName);',
+    '    moveToStore("ohm-test-transitive-dependency");',
+    '  }',
+    '}',
     'const extra = process.env.OHM_TEST_EXTRA_PACKAGE;',
     'if (extra) {',
     '  const extraTarget = join(root, "node_modules", extra);',
@@ -109,15 +157,24 @@ async function fixture(context: TestContext): Promise<Fixture> {
   await settings.flush();
   context.after(async () => {
     delete process.env.OHM_TEST_LATEST_VERSION;
+    delete process.env.OHM_TEST_MISSING_DEPENDENCY;
+    delete process.env.OHM_TEST_MISSING_DEPENDENCY_KIND;
     delete process.env.OHM_TEST_EXTRA_PACKAGE;
+    delete process.env.OHM_TEST_DEPENDENCY_NAME;
+    delete process.env.OHM_TEST_DEPENDENCY_RESOURCE;
+    delete process.env.OHM_TEST_DEPENDENCY_VALUE;
     delete process.env.OHM_TEST_PACKAGE_NAME;
     delete process.env.OHM_TEST_PACKAGE_NAMES;
     delete process.env.OHM_TEST_PACKAGE_VERSION;
+    delete process.env.OHM_TEST_PNPM_SYMLINK_LAYOUT;
     delete process.env.OHM_TEST_REJECT_SPEC;
     delete process.env.OHM_TEST_HOST_RANGE;
+    delete process.env.OHM_TEST_GLOBAL_NPM_ROOT;
     delete process.env.OHM_TEST_EXTENSION_SOURCE;
     Reflect.deleteProperty(globalThis, "__ohmCandidateState");
     Reflect.deleteProperty(globalThis, "__ohmCancelCandidate");
+    Reflect.deleteProperty(globalThis, "__ohmDependencyResource");
+    Reflect.deleteProperty(globalThis, "__ohmDependencyValue");
     Reflect.deleteProperty(globalThis, "__ohmExpectedPackagePath");
     await rm(root, { recursive: true, force: true });
   });
@@ -191,17 +248,22 @@ async function assertNoResidue(value: Fixture): Promise<void> {
   const roots = [value.agentDir, join(value.cwd, ".ohm")];
   for (const root of roots) {
     if (!existsSync(root)) continue;
-    assert.deepEqual(
-      (await readdir(root)).filter((entry) => entry.startsWith(".ohm-package-stage-")),
-      [],
-    );
-  }
-  const activationRoot = join(value.agentDir, "tmp", "extensions");
-  if (existsSync(activationRoot)) {
-    assert.deepEqual(
-      (await readdir(activationRoot)).filter((entry) => entry.startsWith("package-activation-")),
-      [],
-    );
+    const residue: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (
+          entry.name.startsWith(".ohm-package-stage-")
+          || entry.name.startsWith(".ohm-package-commit-")
+          || entry.name.startsWith("package-activation-")
+          || entry.name.endsWith(".ohm-previous")
+          || entry.name.endsWith(".ohm-swap.lock")
+        ) residue.push(relative(root, path));
+        if (entry.isDirectory()) await visit(path);
+      }
+    };
+    await visit(root);
+    assert.deepEqual(residue, []);
   }
 }
 
@@ -210,6 +272,17 @@ async function onlySourceReceipt(value: Fixture): Promise<string> {
   const receipts = (await readdir(root)).filter((entry) => entry.endsWith(".json"));
   assert.equal(receipts.length, 1);
   return join(root, receipts[0]!);
+}
+
+async function activateInstalledPackage(value: Fixture, manager: DefaultPackageManager, source: string): Promise<void> {
+  await candidateActivator()({
+    source,
+    scope: "user",
+    workspace: value.cwd,
+    projectTrusted: false,
+    resources: await manager.resolve(),
+    dataRoot: join(value.agentDir, "tmp", "extensions"),
+  });
 }
 
 test("install activates a staged package.json direct factory before committing package code or settings", async (context) => {
@@ -234,6 +307,437 @@ test("install activates a staged package.json direct factory before committing p
   assert.throws(() => candidateApi().getCommands(), /no longer active|stale|closed/iu);
   assert.equal(JSON.parse(await readFile(join(finalPath, "package.json"), "utf8")).version, "1.0.0");
   assert.deepEqual(value.settings.getGlobalSettings().packages, ["npm:candidate-package"]);
+  await assertNoResidue(value);
+});
+
+test("npm install and update retain hoisted direct and transitive runtime dependencies through rollback", async (context) => {
+  const value = await fixture(context);
+  const source = "npm:candidate-package";
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const directDependency = join(installed, "node_modules", "ohm-test-direct-dependency");
+  const transitiveDependency = join(installed, "node_modules", "ohm-test-transitive-dependency");
+  const manager = packageManager(value);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_DEPENDENCY_VALUE = "installed-v1";
+  process.env.OHM_TEST_EXTENSION_SOURCE = `
+    import { dependencyValue } from "ohm-test-direct-dependency";
+    export default () => {
+      globalThis.__ohmDependencyValue = dependencyValue;
+      if (dependencyValue === "rejected-v3") throw new Error("dependency update rejected");
+    };
+  `;
+
+  await manager.installAndPersist(source);
+  await value.settings.flush();
+
+  assert.equal(existsSync(directDependency), true);
+  assert.equal(existsSync(transitiveDependency), true);
+  Reflect.deleteProperty(globalThis, "__ohmDependencyValue");
+  await activateInstalledPackage(value, manager, source);
+  assert.equal(globalThis.__ohmDependencyValue, "installed-v1");
+
+  process.env.OHM_TEST_LATEST_VERSION = "2.0.0";
+  process.env.OHM_TEST_PACKAGE_VERSION = "2.0.0";
+  process.env.OHM_TEST_DEPENDENCY_VALUE = "updated-v2";
+  await manager.update(source);
+
+  assert.equal(globalThis.__ohmDependencyValue, "updated-v2");
+  assert.match(await readFile(join(transitiveDependency, "index.mjs"), "utf8"), /updated-v2/u);
+  const installedBeforeRejectedUpdate = await tree(installed);
+
+  process.env.OHM_TEST_LATEST_VERSION = "3.0.0";
+  process.env.OHM_TEST_PACKAGE_VERSION = "3.0.0";
+  process.env.OHM_TEST_DEPENDENCY_VALUE = "rejected-v3";
+  await assert.rejects(manager.update(source), /dependency update rejected/u);
+
+  assert.deepEqual(await tree(installed), installedBeforeRejectedUpdate);
+  assert.match(await readFile(join(transitiveDependency, "index.mjs"), "utf8"), /updated-v2/u);
+  await assertNoResidue(value);
+});
+
+test("real npm file installs materialize an immutable package with its dependency closure", async (context) => {
+  const value = await fixture(context);
+  const packages = join(value.root, "real-npm-packages");
+  const sourceRoot = join(packages, "source");
+  const directRoot = join(packages, "direct");
+  const transitiveRoot = join(packages, "transitive");
+  await mkdir(join(sourceRoot, "extensions"), { recursive: true });
+  await mkdir(directRoot, { recursive: true });
+  await mkdir(transitiveRoot, { recursive: true });
+  await writeFile(join(transitiveRoot, "package.json"), JSON.stringify({
+    name: "ohm-real-transitive-dependency",
+    version: "1.0.0",
+    type: "module",
+    exports: "./index.mjs",
+  }));
+  await writeFile(join(transitiveRoot, "index.mjs"), 'export const value = "real-npm-value";\n');
+  await writeFile(join(directRoot, "package.json"), JSON.stringify({
+    name: "ohm-real-direct-dependency",
+    version: "1.0.0",
+    type: "module",
+    exports: "./index.mjs",
+    dependencies: { "ohm-real-transitive-dependency": pathToFileURL(transitiveRoot).href },
+  }));
+  await writeFile(join(directRoot, "index.mjs"), 'export { value } from "ohm-real-transitive-dependency";\n');
+  await writeFile(join(sourceRoot, "package.json"), JSON.stringify({
+    name: "ohm-real-file-package",
+    version: "1.0.0",
+    type: "module",
+    dependencies: { "ohm-real-direct-dependency": pathToFileURL(directRoot).href },
+    ohm: { extensions: ["extensions/index.mjs"] },
+  }));
+  await writeFile(join(sourceRoot, "extensions", "index.mjs"), `
+    import { value } from "ohm-real-direct-dependency";
+    export default () => { globalThis.__ohmDependencyValue = value; };
+  `);
+  value.settings.setNpmCommand(defaultNpmCommand());
+  const source = `npm:${pathToFileURL(sourceRoot).href}`;
+  const manager = packageManager(value);
+
+  await manager.installAndPersist(source);
+  await value.settings.flush();
+
+  const installed = join(value.agentDir, "npm", "node_modules", "ohm-real-file-package");
+  assert.equal((await lstat(installed)).isDirectory(), true);
+  assert.equal(existsSync(join(sourceRoot, "node_modules")), false);
+  assert.equal(existsSync(join(installed, "node_modules", "ohm-real-direct-dependency")), true);
+  assert.equal(existsSync(join(installed, "node_modules", "ohm-real-transitive-dependency")), true);
+  Reflect.deleteProperty(globalThis, "__ohmDependencyValue");
+  await activateInstalledPackage(value, manager, source);
+  assert.equal(globalThis.__ohmDependencyValue, "real-npm-value");
+  await assertNoResidue(value);
+});
+
+test("pnpm-style staged symlinks materialize as relocatable dependency directories", async (context) => {
+  const value = await fixture(context);
+  value.settings.setNpmCommand([process.execPath, value.npm, "--", "pnpm"]);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_DEPENDENCY_VALUE = "pnpm-symlink-value";
+  process.env.OHM_TEST_PNPM_SYMLINK_LAYOUT = "1";
+  process.env.OHM_TEST_EXTENSION_SOURCE = `
+    import { dependencyValue } from "ohm-test-direct-dependency";
+    export default () => { globalThis.__ohmDependencyValue = dependencyValue; };
+  `;
+  const source = "npm:candidate-package";
+  const manager = packageManager(value);
+
+  await manager.installAndPersist(source);
+  await value.settings.flush();
+
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const direct = join(installed, "node_modules", "ohm-test-direct-dependency");
+  const transitive = join(installed, "node_modules", "ohm-test-transitive-dependency");
+  assert.equal((await lstat(installed)).isDirectory(), true);
+  assert.equal((await lstat(direct)).isDirectory(), true);
+  assert.equal((await lstat(transitive)).isDirectory(), true);
+  Reflect.deleteProperty(globalThis, "__ohmDependencyValue");
+  await activateInstalledPackage(value, manager, source);
+  assert.equal(globalThis.__ohmDependencyValue, "pnpm-symlink-value");
+  await assertNoResidue(value);
+});
+
+test("pnpm-style scoped aliases expose explicitly declared dependency resources", async (context) => {
+  const value = await fixture(context);
+  const dependencyName = "@ohm-test/direct-dependency";
+  value.settings.setNpmCommand([process.execPath, value.npm, "--", "pnpm"]);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_DEPENDENCY_NAME = dependencyName;
+  process.env.OHM_TEST_DEPENDENCY_RESOURCE = "1";
+  process.env.OHM_TEST_DEPENDENCY_VALUE = "pnpm-scoped-value";
+  process.env.OHM_TEST_PNPM_SYMLINK_LAYOUT = "1";
+  process.env.OHM_TEST_EXTENSION_SOURCE = `
+    import { dependencyValue } from "${dependencyName}";
+    export default () => { globalThis.__ohmDependencyValue = dependencyValue; };
+  `;
+  const source = "npm:candidate-package";
+  const manager = packageManager(value);
+
+  await manager.installAndPersist(source);
+  await value.settings.flush();
+
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const direct = join(installed, "node_modules", "@ohm-test", "direct-dependency");
+  const dependentResource = join(direct, "extensions", "dependent.mjs");
+  assert.equal((await lstat(direct)).isDirectory(), true);
+  assert.equal(globalThis.__ohmDependencyResource, dependencyName);
+  const resources = await manager.resolve();
+  assert.equal(resources.extensions.some((entry) => entry.enabled && entry.path === dependentResource), true);
+  Reflect.deleteProperty(globalThis, "__ohmDependencyResource");
+  Reflect.deleteProperty(globalThis, "__ohmDependencyValue");
+  await activateInstalledPackage(value, manager, source);
+  assert.equal(globalThis.__ohmDependencyResource, dependencyName);
+  assert.equal(globalThis.__ohmDependencyValue, "pnpm-scoped-value");
+  await assertNoResidue(value);
+});
+
+test("batched npm updates materialize only each package dependency closure", async (context) => {
+  const value = await fixture(context);
+  const executable = join(value.root, "batch-package-manager.mjs");
+  await writeFile(executable, [
+    'import { mkdirSync, writeFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'const args = process.argv.slice(2);',
+    'if (args.includes("view")) { process.stdout.write(JSON.stringify("2.0.0")); process.exit(0); }',
+    'const install = args.indexOf("install");',
+    'if (install < 0) process.exit(0);',
+    'const prefix = args.indexOf("--prefix");',
+    'const root = args[prefix + 1];',
+    'const writePackage = (name, dependencies = {}) => {',
+    '  const target = join(root, "node_modules", name);',
+    '  mkdirSync(target, { recursive: true });',
+    '  writeFileSync(join(target, "package.json"), JSON.stringify({ name, version: "2.0.0", dependencies, ohm: name === "alpha" || name === "beta" ? { extensions: [] } : undefined }));',
+    '};',
+    'writePackage("alpha", { "alpha-direct": "2.0.0" });',
+    'writePackage("alpha-direct", { "alpha-transitive": "2.0.0" });',
+    'writePackage("alpha-transitive");',
+    'writePackage("beta", { "beta-direct": "2.0.0" });',
+    'writePackage("beta-direct", { "beta-transitive": "2.0.0" });',
+    'writePackage("beta-transitive");',
+    'writePackage("unrelated-sibling");',
+  ].join("\n"));
+  for (const name of ["alpha", "beta"]) {
+    const target = join(value.agentDir, "npm", "node_modules", name);
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, "package.json"), JSON.stringify({ name, version: "1.0.0", ohm: { extensions: [] } }));
+  }
+  value.settings.setNpmCommand([process.execPath, executable]);
+  value.settings.setPackages(["npm:alpha", "npm:beta"]);
+  const manager = packageManager(value);
+
+  await manager.update();
+
+  const installedRoot = join(value.agentDir, "npm", "node_modules");
+  assert.deepEqual((await readdir(join(installedRoot, "alpha", "node_modules"))).sort(), [
+    "alpha-direct",
+    "alpha-transitive",
+  ]);
+  assert.deepEqual((await readdir(join(installedRoot, "beta", "node_modules"))).sort(), [
+    "beta-direct",
+    "beta-transitive",
+  ]);
+  assert.equal(existsSync(join(installedRoot, "alpha", "node_modules", "beta")), false);
+  assert.equal(existsSync(join(installedRoot, "beta", "node_modules", "alpha")), false);
+  assert.equal(existsSync(join(installedRoot, "alpha", "node_modules", "unrelated-sibling")), false);
+  assert.equal(existsSync(join(installedRoot, "beta", "node_modules", "unrelated-sibling")), false);
+  await assertNoResidue(value);
+});
+
+test("a package manager restart reclaims a crashed lock and restores an interrupted npm directory swap", async (context) => {
+  const value = await fixture(context);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+  const source = "npm:candidate-package";
+  await packageManager(value).installAndPersist(source);
+  await value.settings.flush();
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const previous = join(dirname(installed), ".candidate-package.ohm-previous");
+  await rename(installed, previous);
+  const lock = join(dirname(installed), ".candidate-package.ohm-swap.lock");
+  const token = "00000000-0000-4000-8000-000000000001";
+  await mkdir(lock);
+  await Promise.all([
+    writeFile(join(lock, `claim-${token}`), token),
+    writeFile(join(lock, `owner-${token}`), token),
+    writeFile(join(lock, `pid-${token}`), "999999999"),
+  ]);
+
+  const restarted = packageManager(value);
+
+  assert.equal(restarted.getInstalledPath(source, "user"), installed);
+  assert.equal(existsSync(join(installed, "package.json")), true);
+  assert.equal(existsSync(previous), false);
+  assert.equal(existsSync(lock), false);
+  await assertNoResidue(value);
+});
+
+test("an npm retry reclaims a fresh dead transaction lock without a rollback directory", async (context) => {
+  const value = await fixture(context);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+  const source = "npm:candidate-package";
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const lock = join(dirname(installed), ".candidate-package.ohm-swap.lock");
+  const token = "00000000-0000-4000-8000-000000000001";
+  await mkdir(lock, { recursive: true });
+  await Promise.all([
+    writeFile(join(lock, `claim-${token}`), token),
+    writeFile(join(lock, `owner-${token}`), token),
+    writeFile(join(lock, `pid-${token}`), "999999999"),
+  ]);
+  const manager = packageManager(value);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("dead lock was not reclaimed")), 500);
+  timer.unref();
+  try {
+    await manager.installAndPersist(source, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  assert.equal(JSON.parse(await readFile(join(installed, "package.json"), "utf8")).version, "1.0.0");
+  assert.equal(existsSync(lock), false);
+  await assertNoResidue(value);
+});
+
+test("eager recovery does not delete a live npm transaction rollback", async (context) => {
+  const value = await fixture(context);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+  const source = "npm:candidate-package";
+  await packageManager(value).installAndPersist(source);
+  await value.settings.flush();
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const previous = join(dirname(installed), ".candidate-package.ohm-previous");
+  await rename(installed, previous);
+  await mkdir(installed);
+  await writeFile(join(installed, "package.json"), JSON.stringify({ name: "candidate-package", version: "2.0.0" }));
+  const firstInstallSource = "npm:first-install-package";
+  const firstInstall = join(dirname(installed), "first-install-package");
+  await mkdir(firstInstall);
+  await writeFile(join(firstInstall, "package.json"), JSON.stringify({ name: "first-install-package", version: "1.0.0" }));
+  const legacyRoot = join(value.root, "global-node-modules");
+  const legacyInstall = join(legacyRoot, "first-install-package");
+  await mkdir(legacyInstall, { recursive: true });
+  await writeFile(join(legacyInstall, "package.json"), JSON.stringify({ name: "first-install-package", version: "0.9.0" }));
+  process.env.OHM_TEST_GLOBAL_NPM_ROOT = legacyRoot;
+
+  let releaseTransaction!: () => void;
+  const transactionGate = new Promise<void>((resolve) => { releaseTransaction = resolve; });
+  let transactionEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { transactionEntered = resolve; });
+  const transaction = withFileLock(join(dirname(installed), ".candidate-package.ohm-swap"), async () => {
+    transactionEntered();
+    await transactionGate;
+  });
+  await entered;
+  let releaseFirstInstall!: () => void;
+  const firstInstallGate = new Promise<void>((resolve) => { releaseFirstInstall = resolve; });
+  let firstInstallEntered!: () => void;
+  const firstEntered = new Promise<void>((resolve) => { firstInstallEntered = resolve; });
+  const firstTransaction = withFileLock(join(dirname(firstInstall), ".first-install-package.ohm-swap"), async () => {
+    firstInstallEntered();
+    await firstInstallGate;
+  });
+  await firstEntered;
+
+  const restarted = packageManager(value);
+  try {
+    assert.equal(restarted.getInstalledPath(source, "user"), previous);
+    assert.equal(restarted.getInstalledPath(firstInstallSource, "user"), undefined);
+    assert.equal(JSON.parse(await readFile(join(previous, "package.json"), "utf8")).version, "1.0.0");
+    assert.equal(existsSync(previous), true);
+  } finally {
+    releaseTransaction();
+    releaseFirstInstall();
+    await Promise.all([transaction, firstTransaction]);
+  }
+
+  assert.equal(restarted.getInstalledPath(source, "user"), installed);
+  assert.equal(restarted.getInstalledPath(firstInstallSource, "user"), firstInstall);
+  assert.equal(existsSync(previous), false);
+  await assertNoResidue(value);
+});
+
+test("install replaces a dangling legacy package symlink without touching its missing target", async (context) => {
+  const value = await fixture(context);
+  const source = "npm:candidate-package";
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const legacyRoot = join(value.root, "legacy-stage");
+  const missingTarget = join(legacyRoot, "node_modules", "candidate-package");
+  const marker = join(legacyRoot, "marker.txt");
+  await mkdir(dirname(installed), { recursive: true });
+  await mkdir(missingTarget, { recursive: true });
+  await writeFile(marker, "legacy source remains untouched");
+  await symlink(missingTarget, installed, process.platform === "win32" ? "junction" : "dir");
+  await rm(missingTarget, { recursive: true });
+  assert.equal(existsSync(installed), false);
+  assert.equal((await lstat(installed)).isSymbolicLink(), true);
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+
+  await packageManager(value).installAndPersist(source);
+  await value.settings.flush();
+
+  assert.equal((await lstat(installed)).isDirectory(), true);
+  assert.equal(JSON.parse(await readFile(join(installed, "package.json"), "utf8")).version, "1.0.0");
+  assert.equal(existsSync(missingTarget), false);
+  assert.equal(await readFile(marker, "utf8"), "legacy source remains untouched");
+  await assertNoResidue(value);
+});
+
+test("lazy required and bundled runtime dependencies must exist before package commit", async (context) => {
+  for (const kind of ["dependency", "bundled"] as const) {
+    const value = await fixture(context);
+    const missingName = `ohm-test-missing-${kind}`;
+    process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+    process.env.OHM_TEST_MISSING_DEPENDENCY = missingName;
+    process.env.OHM_TEST_MISSING_DEPENDENCY_KIND = kind;
+    process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+
+    await assert.rejects(
+      packageManager(value).installAndPersist("npm:candidate-package"),
+      new RegExp(`missing required runtime dependency ${missingName}`, "u"),
+    );
+
+    assert.equal(existsSync(join(value.agentDir, "npm", "node_modules", "candidate-package")), false);
+    assert.equal(value.settings.getGlobalSettings().packages, undefined);
+    await assertNoResidue(value);
+  }
+});
+
+test("concurrent recovery cannot consume rollback before a failed bare receipt commit", async (context) => {
+  const value = await fixture(context);
+  const archive = join(value.root, "receipt-rollback.tgz");
+  await writeFile(archive, "receipt rollback fixture contents");
+  const source = `npm:${pathToFileURL(archive).href}`;
+  process.env.OHM_TEST_PACKAGE_VERSION = "1.0.0";
+  process.env.OHM_TEST_EXTENSION_SOURCE = "export default () => {};\n";
+  const manager = packageManager(value);
+  await manager.installAndPersist(source);
+  await value.settings.flush();
+  const installed = join(value.agentDir, "npm", "node_modules", "candidate-package");
+  const before = await tree(installed);
+  const receipt = await onlySourceReceipt(value);
+  const receiptBefore = await readFile(receipt);
+
+  process.env.OHM_TEST_PACKAGE_VERSION = "2.0.0";
+  const originalRename = fs.promises.rename;
+  let releaseReceipt!: () => void;
+  const receiptGate = new Promise<void>((resolve) => { releaseReceipt = resolve; });
+  let receiptEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { receiptEntered = resolve; });
+  let injected = false;
+  const injectedRename: typeof fs.promises.rename = async (sourcePath, destinationPath) => {
+    if (!injected && String(destinationPath) === receipt) {
+      injected = true;
+      receiptEntered();
+      await receiptGate;
+      throw Object.assign(new Error("injected receipt commit failure"), { code: "EIO" });
+    }
+    await originalRename(sourcePath, destinationPath);
+  };
+  fs.promises.rename = injectedRename;
+  syncBuiltinESMExports();
+  const update = manager.install(source);
+  try {
+    await entered;
+    const previous = join(dirname(installed), ".candidate-package.ohm-previous");
+    const observer = packageManager(value);
+    assert.equal(observer.getInstalledPath(source, "user"), previous);
+    assert.equal(JSON.parse(await readFile(join(installed, "package.json"), "utf8")).version, "2.0.0");
+    assert.equal(JSON.parse(await readFile(join(previous, "package.json"), "utf8")).version, "1.0.0");
+    releaseReceipt();
+    await assert.rejects(update, /injected receipt commit failure/u);
+  } finally {
+    releaseReceipt();
+    await update.catch(() => undefined);
+    fs.promises.rename = originalRename;
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(injected, true);
+  assert.deepEqual(await tree(installed), before);
+  assert.deepEqual(await readFile(receipt), receiptBefore);
   await assertNoResidue(value);
 });
 

@@ -1193,7 +1193,7 @@ test("approved Anthropic OAuth credentials use the provider compatibility contra
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("anthropic-dangerous-direct-browser-access"), "true");
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "ohm/0.1.0");
+  assert.equal(headers?.get("user-agent"), "ohm/0.1.1");
   assert.deepEqual(jsonObjects(posted?.tools).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");
   assert.equal(tool?.type === "tool_call_end" ? tool.name : undefined, "read");
