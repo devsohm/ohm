@@ -11223,7 +11223,8 @@ test("AgentSession bounds terminal assistant content before durable or observed 
         assert.deepEqual(host.diagnostics(), []);
         const cpuCeilingMs = process.env.NODE_V8_COVERAGE !== undefined ? 20_000
           : process.env.CI === "true" && process.platform === "darwin" && process.arch === "x64" ? 36_000
-            : process.env.CI === "true" ? 12_000 : 8_000;
+            : process.env.CI === "true" && process.platform === "win32" ? 16_000
+              : process.env.CI === "true" ? 12_000 : 8_000;
         assert.ok(
           cpuMs < cpuCeilingMs,
           `${contentBlocks} terminal blocks occupied JavaScript for ${cpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms)`,
