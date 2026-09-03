@@ -539,9 +539,12 @@ test("SDK default model and auth services use the requested agent directory", as
   const previousAgentDir = process.env.OHM_HOME;
   const previousOpenAiKey = process.env.OPENAI_API_KEY;
   const previousPath = process.env.PATH;
+  const previousSystemRoot = process.env.SystemRoot;
   process.env.OHM_HOME = ambientAgentDir;
   delete process.env.OPENAI_API_KEY;
   process.env.PATH = "";
+  // Secure-store integration is covered separately; this test owns agent-directory routing.
+  if (process.platform === "win32") process.env.SystemRoot = join(cwd, "missing-system-root");
   let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
   try {
     created = await createAgentSession({
@@ -550,6 +553,8 @@ test("SDK default model and auth services use the requested agent directory", as
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager: SettingsManager.inMemory(),
     });
+    const modelError = created.session.modelRuntime.getError();
+    assert.equal(modelError, undefined, modelError ?? "Default model refresh reported an error");
     assert.equal(created.session.nativeModel?.provider, "openai");
   } finally {
     await created?.session.close().catch(() => undefined);
@@ -559,6 +564,8 @@ test("SDK default model and auth services use the requested agent directory", as
     else process.env.OPENAI_API_KEY = previousOpenAiKey;
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
+    if (previousSystemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = previousSystemRoot;
   }
 });
 
