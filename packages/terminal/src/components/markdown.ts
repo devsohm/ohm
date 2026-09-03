@@ -1,6 +1,10 @@
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.js";
 import type { Component } from "../tui.js";
 import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.js";
+import { renderLatexOrUndefined } from "../latex.js";
+
+export { Marked } from "marked";
+export type { Token, Tokens } from "marked";
 
 export interface DefaultTextStyle {
   underline?: boolean;
@@ -28,6 +32,8 @@ export interface MarkdownTheme {
 export interface MarkdownOptions {
   preserveOrderedListMarkers?: boolean;
   preserveBackslashEscapes?: boolean;
+  /** Render recognized math delimiters as terminal-safe Unicode. Defaults to true. */
+  renderLatex?: boolean;
   /** Transform source Markdown after the exact content width is known. */
   transform?: (markdown: string, availableWidth: number) => string;
 }
@@ -35,6 +41,69 @@ export interface MarkdownOptions {
 interface Table {
   rows: string[][];
   alignment: Array<"left" | "center" | "right">;
+}
+
+interface DisplayMathBlock {
+  next: number;
+  source: string;
+}
+
+function displayMathBlock(lines: string[], start: number): DisplayMathBlock | undefined {
+  const opening = lines[start]?.trim();
+  const delimiters = opening?.startsWith("$$") ? ["$$", "$$"] as const
+    : opening?.startsWith("\\[") ? ["\\[", "\\]"] as const : undefined;
+  if (opening === undefined || delimiters === undefined) return undefined;
+  const [begin, close] = delimiters;
+  const first = opening.slice(begin.length);
+  const sameLineEnd = unescapedDelimiter(first, close);
+  if (sameLineEnd >= 0) {
+    if (first.slice(sameLineEnd + close.length).trim() !== "") return undefined;
+    const source = first.slice(0, sameLineEnd).trim();
+    return source === "" ? undefined : { next: start + 1, source };
+  }
+  const body = first === "" ? [] : [first];
+  let length = first.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    length += line.length + 1;
+    if (length > 16_384) return undefined;
+    const end = unescapedDelimiter(line, close);
+    if (end < 0) { body.push(line); continue; }
+    if (line.slice(end + close.length).trim() !== "") return undefined;
+    body.push(line.slice(0, end));
+    const source = body.join("\n").trim();
+    return source === "" ? undefined : { next: index + 1, source };
+  }
+  return undefined;
+}
+
+function unescapedDelimiter(value: string, delimiter: string, start = 0): number {
+  let offset = start;
+  while (offset < value.length) {
+    const candidate = value.indexOf(delimiter, offset);
+    if (candidate < 0) return -1;
+    let slashes = 0;
+    for (let index = candidate - 1; index >= 0 && value[index] === "\\"; index -= 1) slashes += 1;
+    if (slashes % 2 === 0) return candidate;
+    offset = candidate + delimiter.length;
+  }
+  return -1;
+}
+
+function likelyDollarMath(source: string, value: string, opening: number, closing: number): boolean {
+  if (/^\d+(?:[.,]\d+)?$/u.test(source)) return false;
+  if (/^[A-Z_][A-Z0-9_]*(?:[/:.-][A-Za-z0-9_]*)*$/u.test(source)) return false;
+  if (/^[A-Za-z_][A-Za-z0-9_]*\/$/u.test(source) && /[A-Za-z_]/u.test(value[closing + 1] ?? "")) return false;
+  if (/\d/u.test(value[opening + 1] ?? "") && /[\p{L}\p{N}]/u.test(value[closing + 1] ?? "")) return false;
+  if (/^[\p{L}]$/u.test(source)) return true;
+  return /\\[A-Za-z]+|[_^{}=+*/<>]|[∂-⋿α-ωΑ-Ω]/u.test(source);
+}
+
+function bracedShellPathAt(value: string, offset: number): string | undefined {
+  const path = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}(?:\/\$\{[A-Za-z_][A-Za-z0-9_]*\})+/u
+    .exec(value.slice(offset))?.[0];
+  if (path === undefined || value[offset + path.length] === "$") return undefined;
+  return path;
 }
 
 function stylePrefix(style: (text: string) => string): string {
@@ -194,6 +263,21 @@ export class Markdown implements Component {
         continue;
       }
 
+      if (this.options.renderLatex !== false) {
+        const math = displayMathBlock(lines, index);
+        if (math !== undefined) {
+          const rendered = renderLatexOrUndefined(math.source, { display: true });
+          if (rendered !== undefined) {
+            activeList = undefined; listIndents = []; ordered.clear();
+            pushGap();
+            output.push(...rendered.split("\n").map((line) => this.#default(line)));
+            index = math.next;
+            if (index < lines.length && lines[index]!.trim()) output.push("");
+            continue;
+          }
+        }
+      }
+
       const table = parseTable(lines, index);
       if (table !== undefined) {
         activeList = undefined; listIndents = []; ordered.clear();
@@ -319,6 +403,7 @@ export class Markdown implements Component {
     const line = lines[index] ?? "";
     return /^ {0,3}(?:#{1,6}\s|`{3,}|~{3,}|(?:-{3,}|\*{3,}|_{3,})\s*$)/u.test(line)
       || /^\s*(?:>|[-+*]\s|\d+[.)]\s)/u.test(line)
+      || this.options.renderLatex !== false && displayMathBlock(lines, index) !== undefined
       || parseTable(lines, index) !== undefined;
   }
 
@@ -349,6 +434,24 @@ export class Markdown implements Component {
       let output = "";
       for (let index = 0; index < value.length;) {
         const character = value[index]!;
+        if (this.options.renderLatex !== false && character === "\\") {
+          const delimiter = value.startsWith("\\(", index) ? ["\\(", "\\)"] as const
+            : value.startsWith("\\[", index) ? ["\\[", "\\]"] as const : undefined;
+          if (delimiter !== undefined) {
+            const end = unescapedDelimiter(value, delimiter[1], index + delimiter[0].length);
+            if (end < 0) { output += delimiter[0]; index += delimiter[0].length; continue; }
+            const raw = value.slice(index + delimiter[0].length, end);
+            const rendered = renderLatexOrUndefined(raw, { display: delimiter[0] === "\\[" });
+            output += rendered === undefined ? value.slice(index, end + delimiter[1].length) : rendered;
+            index = end + delimiter[1].length;
+            continue;
+          }
+          if (value.startsWith("\\)", index) || value.startsWith("\\]", index)) {
+            output += value.slice(index, index + 2);
+            index += 2;
+            continue;
+          }
+        }
         if (character === "\\" && punctuation.test(value[index + 1] ?? "")) {
           output += `${this.options.preserveBackslashEscapes ? "\\" : ""}${value[index + 1]!}`;
           index += 2;
@@ -361,6 +464,29 @@ export class Markdown implements Component {
             index = end + 1;
             continue;
           }
+        }
+        if (this.options.renderLatex !== false && character === "$" && value[index - 1] !== "$") {
+          const shellPath = bracedShellPathAt(value, index);
+          if (shellPath !== undefined) {
+            output += shellPath;
+            index += shellPath.length;
+            continue;
+          }
+          const delimiter = value[index + 1] === "$" ? "$$" : "$";
+          const end = unescapedDelimiter(value, delimiter, index + delimiter.length);
+          if (end < 0 || value.slice(index + delimiter.length, end).includes("\n")) {
+            output += delimiter;
+            index += delimiter.length;
+            continue;
+          }
+          const raw = value.slice(index + delimiter.length, end);
+          const validWhitespace = raw !== "" && (delimiter === "$$" || !/^\s|\s$/u.test(raw));
+          const recognized = delimiter === "$$" || likelyDollarMath(raw, value, index, end);
+          if (!validWhitespace || !recognized) { output += delimiter; index += delimiter.length; continue; }
+          const rendered = renderLatexOrUndefined(raw, { display: delimiter === "$$" });
+          output += rendered === undefined ? value.slice(index, end + delimiter.length) : rendered;
+          index = end + delimiter.length;
+          continue;
         }
         if (character === "[") {
           const labelEnd = value.indexOf("](", index + 1);

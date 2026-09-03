@@ -70,7 +70,7 @@ import {
 } from "../core/agent.js";
 import type { EventEnvelope, EventSink, RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
-import { isJsonObject, isJsonValue, type JsonValue } from "../core/json.js";
+import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
 import {
   modelIsInScope,
   normalizeModelScopeSelectors,
@@ -1049,8 +1049,15 @@ interface PromptAdmissionEntry extends PromptAdmissionSizes {
   started: boolean;
   onAbort: () => void;
   resolve(release: () => void): void;
-  reject(reason?: unknown): void;
+  reject(reason?: AbortSignal["reason"]): void;
 }
+
+interface CanonicalPromptModel {
+  model?: AgentSessionModel;
+  infoBytes: number;
+}
+
+type DetachedPromptModelInfo = ModelInfo & JsonObject;
 
 function canonicalPromptToolNames(
   value: readonly string[] | undefined,
@@ -1083,7 +1090,7 @@ function canonicalPromptToolNames(
 
 function canonicalPromptModel(
   model: AgentSessionModel | undefined,
-): { model?: AgentSessionModel; infoBytes: number } {
+): CanonicalPromptModel {
   if (model === undefined) return { infoBytes: 0 };
   let info: ModelInfo | undefined;
   let infoBytes = 0;
@@ -1097,7 +1104,7 @@ function canonicalPromptModel(
     });
     if (!isJsonObject(snapshot.value)) throw new TypeError("Prompt model info must be an object");
     // SAFETY: boundedJsonSnapshot preserves the caller's typed JSON-domain ModelInfo structure.
-    info = snapshot.value as unknown as ModelInfo;
+    info = snapshot.value as DetachedPromptModelInfo;
     infoBytes = snapshot.bytes;
   }
   return {
@@ -3920,6 +3927,16 @@ interface AgentSessionDeliveryTarget {
   readonly binding: object;
 }
 
+interface DurableSessionQueues {
+  queued: QueuedRunMessage[];
+  nextRun: CanonicalMessage[];
+}
+
+interface RestoredSessionSelection {
+  model: AgentSessionModel | undefined;
+  thinkingLevel: string;
+}
+
 export class AgentSession {
   readonly #providers: ProviderRegistry;
   readonly #modelRegistry: ModelRegistry | undefined;
@@ -5302,7 +5319,7 @@ export class AgentSession {
 
   #sessionDeliveryTarget(
     sessionId?: string,
-    binding?: object,
+    binding?: AgentSessionDeliveryTarget["binding"],
   ): AgentSessionDeliveryTarget | undefined {
     if (sessionId === undefined && binding === undefined) return undefined;
     if (sessionId === undefined || binding === undefined) {
@@ -9748,10 +9765,7 @@ export class AgentSession {
     }
   }
 
-  #prepareDurableQueues(manager: SessionManager): {
-    queued: QueuedRunMessage[];
-    nextRun: CanonicalMessage[];
-  } {
+  #prepareDurableQueues(manager: SessionManager): DurableSessionQueues {
     const queued: QueuedRunMessage[] = [];
     const nextRun: CanonicalMessage[] = [];
     for (const entry of manager.getV4RecoverySnapshot().queue) {
@@ -10990,10 +11004,7 @@ export class AgentSession {
     };
   }
 
-  #restoredSessionSelection(manager: SessionManager): {
-    model: AgentSessionModel | undefined;
-    thinkingLevel: string;
-  } {
+  #restoredSessionSelection(manager: SessionManager): RestoredSessionSelection {
     const context = manager.buildSessionContext();
     let model = this.#model;
     if (context.model !== null) {

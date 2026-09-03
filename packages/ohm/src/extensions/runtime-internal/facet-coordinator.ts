@@ -1,6 +1,8 @@
-import { Type } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 import type { JsonValue } from "../../core/json.js";
+import { FUNCTION_VALUE } from "../../core/value-schemas.js";
 import type {
   PortablePresentationActionRequest,
   PortablePresentationActionResult,
@@ -31,6 +33,9 @@ import {
 import {
   createExtensionWireServiceProvider,
   defineExtensionWireService,
+  type ExtensionWireServiceContext,
+  type ExtensionWireServiceContract,
+  type ExtensionWireServiceProvider,
 } from "../wire-services.js";
 import type { ExtensionAPI } from "../capabilities/api.js";
 import type { ExtensionContext } from "../capabilities/host.js";
@@ -196,7 +201,10 @@ export class ExtensionFacetCoordinator implements ExtensionFacetService {
     this.#options.signal.throwIfAborted();
     const serviceName = extensionFacetStateServiceName(this.#options.owner, name);
     const existing = this.#states.get(name);
-    if (existing !== undefined) return existing.view as ExtensionFacetSharedState<T>;
+    if (existing !== undefined) {
+      // SAFETY: a state name identifies one channel whose first opener fixes its value contract.
+      return existing.view as ExtensionFacetSharedState<T>;
+    }
     if (this.#states.size >= MAX_EXTENSION_FACET_STATES) {
       throw new RangeError(`Extension facet states exceed ${MAX_EXTENSION_FACET_STATES} channels`);
     }
@@ -242,6 +250,7 @@ export class ExtensionFacetCoordinator implements ExtensionFacetService {
             deltas: [...state.deltasSince(request.revision)],
           };
         }
+        // SAFETY: ReplicatedJsonState.apply validates and bounds the wire delta before committing it.
         return {
           operation: "snapshot" as const,
           snapshot: state.apply(request.delta as ReplicatedJsonStateDelta),
@@ -288,12 +297,18 @@ export class ExtensionFacetCoordinator implements ExtensionFacetService {
     const cleanups: Array<() => void | Promise<void>> = [];
     const setupRollbacks: Array<() => void | Promise<void>> = [];
     const services = createExtensionWireServiceProvider(this.#options.extension(), signal);
-    const scopedServices = Object.freeze({
-      provide: ((contract: Parameters<typeof services.provide>[0], handler: Parameters<typeof services.provide>[1]) => {
+    const scopedServices: ExtensionWireServiceProvider = Object.freeze({
+      provide<RequestSchema extends TSchema, ResponseSchema extends TSchema>(
+        contract: ExtensionWireServiceContract<RequestSchema, ResponseSchema>,
+        handler: (
+          request: Static<RequestSchema>,
+          context: ExtensionWireServiceContext,
+        ) => Static<ResponseSchema> | Promise<Static<ResponseSchema>>,
+      ): ExtensionRegistrationHandle {
         const handle = services.provide(contract, handler);
         cleanups.push(async () => { await handle.dispose(); });
         return handle;
-      }) as typeof services.provide,
+      },
       get: services.get.bind(services),
     });
     const presentation = Object.freeze({
@@ -366,28 +381,30 @@ export class ExtensionFacetCoordinator implements ExtensionFacetService {
       get: <T extends JsonValue = JsonValue>(name: string): ExtensionFacetSharedState<T> | undefined => {
         signal.throwIfAborted();
         extensionFacetStateServiceName(this.#options.owner, name);
+        // SAFETY: a state name identifies one channel whose first opener fixes its value contract.
         return this.#states.get(name)?.view as ExtensionFacetSharedState<T> | undefined;
       },
     });
-    const context: ExtensionFacetContext = Object.freeze({
+    const contextBase = {
       apiVersion: EXTENSION_FACET_API_VERSION,
       kind: definition.kind,
       name: definition.name,
-      mode: definition.kind === "worker" ? "worker" : session!.mode,
       signal,
       extension: this.#options.extension(),
-      ...(session === undefined ? {} : { session }),
       services: scopedServices,
       presentation,
       states,
       createState,
-    });
+    };
+    const context: ExtensionFacetContext = session === undefined
+      ? Object.freeze({ ...contextBase, mode: "worker" })
+      : Object.freeze({ ...contextBase, mode: session.mode, session });
     const setup = Promise.resolve().then(() => definition.setup(context));
     try {
       const cleanup = await withAbort(setup, setupSignal);
       signal.throwIfAborted();
       if (cleanup !== undefined) {
-        if (typeof cleanup !== "function") throw new TypeError("Extension facet setup must return a cleanup function");
+        if (!Value.Check(FUNCTION_VALUE, cleanup)) throw new TypeError("Extension facet setup must return a cleanup function");
         cleanups.push(cleanup);
       }
       registration.activation = { abort, cleanup: Object.freeze(cleanups) };
@@ -395,7 +412,7 @@ export class ExtensionFacetCoordinator implements ExtensionFacetService {
       abort.abort(new Error("Extension facet setup failed"));
       if (setupSignal?.aborted === true) {
         void setup.then(async (lateCleanup) => {
-          if (typeof lateCleanup === "function") await lateCleanup();
+          if (Value.Check(FUNCTION_VALUE, lateCleanup)) await lateCleanup();
         }).catch(() => undefined);
       }
       try { await cleanupAll([...setupRollbacks, ...cleanups]); }

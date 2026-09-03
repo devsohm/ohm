@@ -43,13 +43,17 @@ test("wire services preserve typed versioned JSON envelopes across a process bou
 test("wire services reject incompatible versions, unknown fields, and schema-invalid payloads", async () => {
   const endpoint = createExtensionWireServiceEndpoint(CONTRACT, () => ({ found: true }));
   const base = extensionWireServiceRequest(CONTRACT, "call-2", { id: "known" });
+  const incompatibleProtocol = structuredClone(base);
+  Object.defineProperty(incompatibleProtocol, "protocolVersion", { value: 2 });
+  const invalidPayload = structuredClone(base);
+  Object.defineProperty(invalidPayload.payload, "id", { value: 7 });
   for (const request of [
-    { ...base, protocolVersion: 2 },
+    incompatibleProtocol,
     { ...base, serviceVersion: 3 },
-    { ...base, payload: { id: 7 } },
+    invalidPayload,
     { ...base, extra: true },
   ]) {
-    const response = await endpoint.request(request as never);
+    const response = await endpoint.request(request);
     assert.equal(response.ok, false);
     if (!response.ok) assert.equal(response.error.code, "invalid_request");
   }
@@ -67,7 +71,11 @@ test("wire services bound handler failures, validate responses, and stop with th
     assert.doesNotMatch(failed.error.message, /failure/u);
   }
 
-  const invalidResponse = createExtensionWireServiceEndpoint(CONTRACT, () => ({ found: "yes" } as never));
+  const invalidResponse = createExtensionWireServiceEndpoint(CONTRACT, () => {
+    const response = { found: true };
+    Object.defineProperty(response, "found", { value: "yes" });
+    return response;
+  });
   const invalid = await invalidResponse.request(extensionWireServiceRequest(CONTRACT, "call-4", { id: "known" }));
   assert.equal(invalid.ok, false);
   if (!invalid.ok) assert.equal(invalid.error.message, "Extension wire service handler failed");
@@ -107,29 +115,31 @@ test("wire service admission is detached from later extension schema mutation", 
     responseSchema,
   });
   const endpoint = createExtensionWireServiceEndpoint(contract, () => ({ accepted: true }));
-  (requestSchema.properties.count as { type: string }).type = "string";
+  Object.defineProperty(requestSchema.properties.count, "type", { value: "string" });
   assert.equal((await endpoint.request(extensionWireServiceRequest(
     contract,
     "immutable-1",
     { count: 1 },
   ))).ok, true);
-  const rejected = await endpoint.request(extensionWireServiceRequest(
+  const invalidRequest = structuredClone(extensionWireServiceRequest(
     contract,
     "immutable-2",
-    { count: "one" },
-  ) as never);
+    { count: 1 },
+  ));
+  Object.defineProperty(invalidRequest.payload, "count", { value: "one" });
+  const rejected = await endpoint.request(invalidRequest);
   assert.equal(rejected.ok, false);
   assert.throws(() => {
-    (contract.requestSchema as { type: string }).type = "array";
-  }, /read only|Cannot assign/iu);
+    Object.defineProperty(contract.requestSchema, "type", { value: "array" });
+  }, /read only|Cannot (?:assign|redefine)/iu);
 
   const descriptor = describeExtensionWireServiceEndpoint(endpoint, "immutable.extension");
   assert.equal(descriptor.maxRequestBytes, 1024 * 1024);
   assert.deepEqual(descriptor.requestSchema, contract.requestSchema);
   assert.notEqual(descriptor.requestSchema, endpoint.requestSchema);
   assert.throws(() => {
-    (descriptor.requestSchema as { type: string }).type = "array";
-  }, /read only|Cannot assign/iu);
+    Object.defineProperty(descriptor.requestSchema, "type", { value: "array" });
+  }, /read only|Cannot (?:assign|redefine)/iu);
 });
 
 test("wire providers derive registry ownership from the detached endpoint", () => {
@@ -139,15 +149,18 @@ test("wire providers derive registry ownership from the detached endpoint", () =
     disposed: false,
     dispose() {},
   });
-  const provider = createExtensionWireServiceProvider({
+  const lifecycle: Parameters<typeof createExtensionWireServiceProvider>[0] = {
     services: {
-      register(name: string) {
+      register<Service extends object>(name: string, _service: Service) {
         registeredName = name;
         return registration;
       },
-      get() { return undefined; },
+      get<Service extends object = object>(_name: string): Service | undefined {
+        return undefined;
+      },
     },
-  } as never);
+  };
+  const provider = createExtensionWireServiceProvider(lifecycle);
   provider.provide({
     get name() {
       nameReads += 1;

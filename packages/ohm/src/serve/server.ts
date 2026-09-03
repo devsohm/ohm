@@ -321,7 +321,7 @@ function exactRequestKeys(
   }
 }
 
-function portablePresentationActionRequest(value: unknown): PortablePresentationActionRequest {
+function portablePresentationActionRequest(value: JsonObject): PortablePresentationActionRequest {
   try {
     return validatePortablePresentationActionRequest(value);
   } catch (error) {
@@ -329,7 +329,7 @@ function portablePresentationActionRequest(value: unknown): PortablePresentation
   }
 }
 
-function extensionWireRequest(value: unknown): ExtensionWireServiceRequest {
+function extensionWireRequest(value: JsonObject): ExtensionWireServiceRequest {
   try {
     return validateExtensionWireServiceRequest(value);
   } catch (error) {

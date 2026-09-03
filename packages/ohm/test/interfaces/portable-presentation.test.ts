@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
-import type { JsonValue } from "../../src/core/json.js";
+import type { JsonObject, JsonValue } from "../../src/core/json.js";
 
 import {
+  PORTABLE_PRESENTATION_LIMITS,
   PORTABLE_PRESENTATION_PROTOCOL_VERSION,
   createPortablePresentation,
   definePortablePresentationAction,
@@ -88,8 +89,9 @@ test("portable presentations preserve one versioned JSON contract across rich, l
   const remove = portablePresentationRemoveEvent("fixture.extension", "task_status", 3);
   assert.deepEqual(JSON.parse(JSON.stringify([show, remove])), [show, remove]);
   assert.throws(() => {
-    if (show.operation === "show") {
-      (show.presentation.blocks[0] as { text: string }).text = "mutated";
+    const firstBlock = show.operation === "show" ? show.presentation.blocks[0] : undefined;
+    if (firstBlock?.type === "text") {
+      Object.assign(firstBlock, { text: "mutated" });
     }
   }, /read only|Cannot assign/iu);
 });
@@ -105,13 +107,33 @@ test("portable presentation actions reject unknown fields, incompatible versions
     /version is unsupported/u,
   );
   await assert.rejects(controller.invoke({ ...request(), revision: 2 }), /revision is stale/u);
+  await assert.rejects(
+    controller.invoke({ ...request(), owner: "other.extension" }),
+    /owner does not match/u,
+  );
   await assert.rejects(controller.invoke(request({ value: "seven" })), /does not match its schema/u);
+  assert.throws(
+    () => validatePortablePresentationActionRequest(request({
+      value: "x".repeat(PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes),
+    })),
+    /exceeds 262144 UTF-8 bytes/u,
+  );
+  const invalidDefinition = definition();
+  const invalidAction = invalidDefinition.actions?.[0];
+  assert.ok(invalidAction);
+  Object.assign(invalidAction, { unexpected: true });
+  assert.throws(
+    () => createPortablePresentation("fixture.extension", invalidDefinition),
+    /unexpected is not allowed/u,
+  );
+  const action = definition().actions?.[0];
+  assert.ok(action);
   assert.throws(
     () => createPortablePresentation("fixture.extension", {
       ...definition(),
-      actions: [{ ...definition().actions![0]!, unexpected: true } as never],
+      actions: Array.from({ length: PORTABLE_PRESENTATION_LIMITS.maxActions + 1 }, () => action),
     }),
-    /unexpected is not allowed/u,
+    /actions exceed 64 entries/u,
   );
 });
 
@@ -123,10 +145,16 @@ test("portable presentation actions enforce lifecycle and JSON result bounds", a
   lifecycle.abort(new Error("generation stopped"));
   await assert.rejects(controller.invoke(request()), /generation stopped/u);
 
-  const circular: { self?: unknown } = {};
+  const circular: JsonObject = {};
   circular.self = circular;
-  const invalid = createPortablePresentation("fixture.extension", definition(() => circular as never));
+  const invalid = createPortablePresentation("fixture.extension", definition(() => circular));
   await assert.rejects(invalid.invoke(request()), /must not contain cycles/u);
+
+  const oversized = createPortablePresentation(
+    "fixture.extension",
+    definition(() => "x".repeat(PORTABLE_PRESENTATION_LIMITS.maxActionResultBytes)),
+  );
+  await assert.rejects(oversized.invoke(request()), /exceeds 262144 UTF-8 bytes/u);
 });
 
 test("portable presentation admission is detached from later extension schema mutation", async () => {
@@ -142,10 +170,12 @@ test("portable presentation admission is detached from later extension schema mu
       run: (input) => ({ accepted: input.value }),
     })],
   });
-  (schema.properties.value as { type: string }).type = "string";
+  Object.defineProperty(schema.properties.value, "type", { value: "string" });
   assert.deepEqual((await controller.invoke(request())).result, { accepted: 7 });
   await assert.rejects(controller.invoke(request({ value: "seven" })), /does not match its schema/u);
+  const admittedSchema = controller.document.actions[0]?.inputSchema;
+  assert.ok(admittedSchema);
   assert.throws(() => {
-    (controller.document.actions[0]!.inputSchema as { type: string }).type = "array";
+    admittedSchema["type"] = "array";
   }, /read only|Cannot assign/iu);
 });

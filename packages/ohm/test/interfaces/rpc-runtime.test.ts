@@ -15,6 +15,7 @@ import {
 } from "../../src/interfaces/rpc-runtime.js";
 import type {
   RpcBashExecutionUpdate,
+  RpcCommand,
 } from "../../src/interfaces/rpc-protocol.js";
 import type { RpcUnknownCommand } from "../../src/interfaces/rpc.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
@@ -1928,23 +1929,28 @@ test("RPC context pages clone only the selected page and remain mutation-isolate
 
   const originalStructuredClone = globalThis.structuredClone;
   let fullContextClones = 0;
-  globalThis.structuredClone = ((input: unknown, options?: StructuredSerializeOptions): unknown => {
+  const countingStructuredClone = <Value>(
+    input: Value,
+    options?: StructuredSerializeOptions,
+  ): Value => {
     if (
       Array.isArray(input) &&
       input.length === messages.length &&
       input.every((entry) => isJsonObject(entry) && entry.role === "user" && Array.isArray(entry.content))
     ) fullContextClones += 1;
     return originalStructuredClone(input, options);
-  }) as typeof structuredClone;
+  };
+  globalThis.structuredClone = countingStructuredClone;
   try {
     let cursor: string | undefined;
     for (let index = 0; index < messages.length; index += 1) {
-      const response = await dispatcher.dispatch({
+      const command: Extract<RpcCommand, { type: "get_messages" }> = {
         id: `clone-page-${index + 1}`,
         type: "get_messages",
         limit: 1,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
+      };
+      if (cursor !== undefined) command.cursor = cursor;
+      const response = await dispatcher.dispatch(command);
       if (response?.success !== true || response.command !== "get_messages" || !("data" in response)) {
         assert.fail("get_messages did not return a page");
       }

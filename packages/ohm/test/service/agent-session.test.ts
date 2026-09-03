@@ -18,7 +18,7 @@ import { Value } from "typebox/value";
 
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import type { EventEnvelope, RuntimeEvent } from "../../src/core/events.js";
-import type { JsonValue } from "../../src/core/json.js";
+import { isJsonObject, type JsonValue } from "../../src/core/json.js";
 import {
   RuntimeObservability,
   type ObservabilityRecord,
@@ -98,6 +98,10 @@ const observedAt = "2026-07-20T00:00:00.000Z";
 const supported = { value: "supported", source: "provider", observedAt } as const;
 const TOOL_INPUT_VALUE = Type.Object({ value: Type.String() }, { additionalProperties: true });
 const BASH_NODE_RESULT_VALUE = Type.Object({ role: Type.Literal("bashExecution") }, { additionalProperties: true });
+
+function capturedFailure<Value>(value: Value): Error {
+  return Error.isError(value) ? value : new Error(String(value), { cause: value });
+}
 const BASH_METADATA_VALUE = Type.Object({
   exitCode: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   timedOut: Type.Optional(Type.Boolean()),
@@ -5430,9 +5434,9 @@ test("callback session delivery acknowledges the exact live session and rejects 
   );
   assert.equal(manager.getBranch().some((candidate) =>
     candidate.type === "custom_message"
-    && (typeof candidate.content === "string"
-      ? candidate.content === "same-id late"
-      : candidate.content.some((block) => block.type === "text" && block.text === "same-id late"))), false);
+    && (Array.isArray(candidate.content)
+      ? candidate.content.some((block) => block.type === "text" && block.text === "same-id late")
+      : candidate.content === "same-id late")), false);
 
   await session.close();
   await assert.rejects(
@@ -5466,7 +5470,7 @@ test("callback session delivery cannot resume a queued user message in a replace
           async handler(_args, _commandContext) {
             deliveryOutcome = delivery!.sendUserMessage("/inner-delivery-race", {
               expandPromptTemplates: true,
-            }).then(() => "resolved" as const, (cause: unknown) => cause as Error);
+            }).then(() => "resolved" as const, capturedFailure);
             activeSession!.newSession({ id: delivery!.sessionId });
             replacementCancelled = false;
           },
@@ -5799,7 +5803,7 @@ test("nextTurn capacity includes a full batch leased by an active run", async (c
       hookEntered,
       active.then(
         () => Promise.reject(new Error("Active run completed before leasing next-turn messages")),
-        (error: unknown) => Promise.reject(error),
+        (error) => Promise.reject(capturedFailure(error)),
       ),
     ]);
     await assert.rejects(session.sendCustomMessage({
@@ -6390,7 +6394,7 @@ test("AgentSession removes an aborted queued prompt admission without breaking F
   });
   const secondFailure = second.then(
     () => undefined,
-    (error: unknown) => error,
+    capturedFailure,
   );
   const third = session.prompt("third");
   cancellation.abort(new Error("skip queued second"));
@@ -6451,6 +6455,16 @@ test("AgentSession snapshots queued prompt model metadata and tool filters at ad
     ...structuredClone(provider.models[0]!),
     metadata: { marker: "accepted" },
   };
+  let jsonParses = 0;
+  const originalJsonParse = JSON.parse;
+  const jsonParseMock = context.mock.method(
+    JSON,
+    "parse",
+    (...argumentsValue: Parameters<typeof JSON.parse>): ReturnType<typeof JSON.parse> => {
+      jsonParses += 1;
+      return originalJsonParse(...argumentsValue);
+    },
+  );
   const second = session.prompt("second", {
     allowedTools,
     model: {
@@ -6461,6 +6475,8 @@ test("AgentSession snapshots queued prompt model metadata and tool filters at ad
       reasoningEffort: "high",
     },
   });
+  jsonParseMock.mock.restore();
+  assert.equal(jsonParses, 0, "prompt admission must reuse its bounded in-process model snapshot");
   allowedTools.push("read");
   selectedInfo.metadata = { marker: "mutated" };
   releaseFirst();
@@ -6468,7 +6484,12 @@ test("AgentSession snapshots queued prompt model metadata and tool filters at ad
   await first;
   await second;
   assert.deepEqual(provider.requests[0]?.tools?.map((tool) => tool.name) ?? [], []);
-  assert.deepEqual(session.nativeModel?.info?.metadata, { marker: "accepted" });
+  const admittedInfo = session.nativeModel?.info;
+  assert.ok(admittedInfo !== undefined);
+  assert.notEqual(admittedInfo, selectedInfo);
+  const admittedMetadata = admittedInfo.metadata;
+  assert.ok(isJsonObject(admittedMetadata));
+  assert.equal(admittedMetadata.marker, "accepted");
   assert.equal(session.thinkingLevel, "high");
 });
 
@@ -6528,7 +6549,7 @@ test("AgentSession includes bounded model metadata in aggregate prompt admission
     },
   }).then(
     () => undefined,
-    (error: unknown) => error,
+    capturedFailure,
   );
   const rejectedBeforeFirstReleased = await Promise.race([
     overflow.then(() => true),
@@ -6556,9 +6577,9 @@ test("AgentSession rejects proxy prompt tool filters before reading their length
   for (const field of ["allowedTools", "excludedTools"] as const) {
     let lengthReads = 0;
     const names = new Proxy<string[]>([], {
-      get(target, key, receiver) {
+      get(target, key, _receiver) {
         if (key === "length") lengthReads += 1;
-        return Reflect.get(target, key, receiver);
+        return key === "length" ? target.length : undefined;
       },
     });
     await assert.rejects(session.prompt(field, { [field]: names }), /must be a non-proxy array/u);
@@ -6600,7 +6621,7 @@ test("AgentSession bounds concurrent prompt admission count", async (context) =>
   const queued = Array.from({ length: 99 }, (_, index) => session.prompt(`queued-${index + 1}`));
   const capacityResult = session.prompt("over capacity").then(
     () => undefined,
-    (error: unknown) => error,
+    capturedFailure,
   );
   const rejectedBeforeFirstReleased = await Promise.race([
     capacityResult.then(() => true),

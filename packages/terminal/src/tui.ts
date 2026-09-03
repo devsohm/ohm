@@ -13,6 +13,11 @@ import { deleteKittyImage } from "./terminal-image.js";
 export const CURSOR_MARKER = "\x1b_ohm:c\x07";
 
 export type TuiMode = "regular" | "fullscreen";
+export interface TuiStopOptions { preserveScreen?: boolean }
+export interface TuiMainScreenRenderState {
+  readonly columns: number;
+  readonly lines: readonly string[];
+}
 
 function isOrdinaryTextRow(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -80,6 +85,8 @@ export class TUI extends Container {
   #renderGeneration = 0;
   #forceFullRedraw = false;
   #lines: string[] = [];
+  #renderedColumns: number | undefined;
+  #restoredColumns: number | undefined;
   fullRedraws = 0;
   onDebug?: () => void;
 
@@ -115,30 +122,53 @@ export class TUI extends Container {
       this.beforeTerminalStart();
       this.terminal.start((data) => this.#input(data), () => { this.fullRedraws += 1; this.requestRender(true); });
       if (this.#showHardwareCursor) this.terminal.showCursor(); else this.terminal.hideCursor();
-      this.fullRedraws += 1;
-      this.#diagnostic("ohm-debug.log", "full-redraw reason=initial");
-      this.requestRender(true);
+      const restored = this.mode === "regular" && this.#restoredColumns === this.terminal.columns;
+      this.#restoredColumns = undefined;
+      if (!restored) {
+        this.fullRedraws += 1;
+        this.#diagnostic("ohm-debug.log", "full-redraw reason=initial");
+      }
+      this.requestRender(!restored);
     } catch (error) {
-      try { this.beforeTerminalStop(); } finally { this.terminal.showCursor(); this.terminal.stop(); this.#running = false; }
+      try { this.beforeTerminalStop({}); } finally { this.terminal.showCursor(); this.terminal.stop(); this.#running = false; }
       throw error;
     }
   }
 
-  stop(): void {
+  stop(options: TuiStopOptions = {}): void {
     if (!this.#running) return;
     this.#running = false;
     this.#settleQueries();
+    const preserveScreen = options.preserveScreen === true && this.mode === "regular";
     try {
-      if (this.#lines.some((line) => line.includes(CURSOR_MARKER))) this.terminal.write(" ");
-      this.beforeTerminalStop();
-      if (!(this instanceof Object && "setLayoutRoot" in this)) this.terminal.write("\r\n");
+      if (!preserveScreen && this.#lines.some((line) => line.includes(CURSOR_MARKER))) this.terminal.write(" ");
+      this.beforeTerminalStop(options);
+      if (!preserveScreen && !(this instanceof Object && "setLayoutRoot" in this)) this.terminal.write("\r\n");
     } finally {
       this.terminal.showCursor();
       this.terminal.stop();
       this.#renderGeneration += 1;
       this.#scheduled = false;
       this.#lines = [];
+      this.#renderedColumns = undefined;
     }
+  }
+
+  captureRenderState(): TuiMainScreenRenderState {
+    if (this.mode !== "regular") throw new Error("Render state is available only for the main-screen renderer");
+    if (this.#renderedColumns === undefined) throw new Error("No main-screen frame has been rendered");
+    const lines = Object.freeze([...this.#lines]);
+    return Object.freeze({ columns: this.#renderedColumns, lines });
+  }
+
+  restoreRenderState(state: TuiMainScreenRenderState): void {
+    if (this.mode !== "regular") throw new Error("Render state is available only for the main-screen renderer");
+    if (this.#running) throw new Error("Render state must be restored before the renderer starts");
+    if (!Number.isSafeInteger(state.columns) || state.columns < 1) throw new RangeError("Render-state columns must be a positive safe integer");
+    if (!Array.isArray(state.lines)) throw new TypeError("Render-state lines must be an array");
+    this.#lines = [...state.lines];
+    this.#renderedColumns = state.columns;
+    this.#restoredColumns = state.columns;
   }
 
   requestRender(full = false): void {
@@ -205,7 +235,7 @@ export class TUI extends Container {
   protected compositionChanged(): void {}
   protected frameComposed(_lines: readonly string[]): void {}
   protected beforeTerminalStart(): void {}
-  protected beforeTerminalStop(): void {}
+  protected beforeTerminalStop(_options: TuiStopOptions = {}): void {}
 
   #removeOverlay(state: OverlayState | undefined): void {
     if (state === undefined) return;
@@ -367,7 +397,10 @@ export class TUI extends Container {
     });
     this.frameComposed(lines);
     const changed = lines.length !== this.#lines.length || lines.some((line, index) => line !== this.#lines[index]);
-    if (!changed && !this.#forceFullRedraw) return;
+    if (!changed && !this.#forceFullRedraw) {
+      this.#renderedColumns = this.terminal.columns;
+      return;
+    }
     const oldImageIds = new Set<number>();
     for (const line of this.#lines) {
       for (const match of line.matchAll(/(?:^|,)i=(\d+)(?:,|;)/gu)) oldImageIds.add(Number(match[1]));
@@ -403,6 +436,7 @@ export class TUI extends Container {
     }
     this.terminal.write(`\x1b[?2026h${deleteImages}${body.replaceAll(CURSOR_MARKER, "")}\x1b[?2026l`);
     this.#lines = [...lines];
+    this.#renderedColumns = this.terminal.columns;
     this.#forceFullRedraw = false;
   }
 

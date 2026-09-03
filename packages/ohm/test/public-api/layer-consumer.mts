@@ -40,9 +40,13 @@ import {
 } from "ohm/tools";
 import {
   fuzzyScore,
+  Marked,
+  renderLatex,
   uiText,
   type RuntimeUiView,
   type Theme,
+  type Token,
+  type Tokens,
   type TuiControllerOptions,
 } from "ohm/tui";
 
@@ -50,6 +54,10 @@ const fixedViewportOptions = { mode: "full" } satisfies TuiControllerOptions;
 // @ts-expect-error The product rich viewport has no selectable screen host.
 const removedScreenOverride: TuiControllerOptions = { alternateScreen: false };
 void [fixedViewportOptions, removedScreenOverride];
+
+declare const headingToken: Tokens.Heading;
+const markdownToken: Token = headingToken;
+void markdownToken;
 
 declare const sessionPath: string;
 const sessionSnapshot = SessionManager.openSnapshot(sessionPath);
@@ -81,6 +89,8 @@ export const layerValues = [
   ToolRegistry,
   ToolResourceArbiter,
   fuzzyScore,
+  Marked,
+  renderLatex,
   uiText,
 ] as const;
 

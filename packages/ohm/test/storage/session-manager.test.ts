@@ -723,6 +723,8 @@ test("session snapshots coexist with the writer and remain immutable point-in-ti
   manager.appendMessage(message("assistant", "after snapshot"));
   assert.deepEqual(snapshot.buildSessionContext().messages.map(contextText), ["before snapshot"]);
   assert.deepEqual(manager.buildSessionContext().messages.map(contextText), ["before snapshot", "after snapshot"]);
+  // SAFETY: openSnapshot returns the same runtime class with mutators omitted
+  // from its public type; this test intentionally invokes them to verify their guards.
   const mutableSnapshot = snapshot as SessionManager;
   let candidateValidated = false;
   assert.throws(

@@ -808,19 +808,19 @@ function providerAssistantAggregateBytes(
   return total;
 }
 
-interface ProviderAssistantStreamShape {
+interface ProviderAssistantStreamOccupancy {
   argumentContainers: number;
   argumentValues: number;
   toolBlocks: number;
 }
 
-const EMPTY_PROVIDER_ASSISTANT_STREAM_SHAPE: ProviderAssistantStreamShape = {
+const EMPTY_PROVIDER_ASSISTANT_STREAM_OCCUPANCY: ProviderAssistantStreamOccupancy = {
   argumentContainers: 0,
   argumentValues: 0,
   toolBlocks: 0,
 };
 
-function assertProviderAssistantStreamShape(
+function assertProviderAssistantStreamCapacity(
   blocks: number,
   argumentValues: number,
   argumentContainers: number,
@@ -846,13 +846,13 @@ function startProviderAssistantPart(
   current: Set<number>,
   other: Set<number>,
   part: number,
-  shape: ProviderAssistantStreamShape = EMPTY_PROVIDER_ASSISTANT_STREAM_SHAPE,
+  occupancy: ProviderAssistantStreamOccupancy = EMPTY_PROVIDER_ASSISTANT_STREAM_OCCUPANCY,
 ): boolean {
   if (current.has(part)) return false;
-  assertProviderAssistantStreamShape(
-    current.size + other.size + shape.toolBlocks + 1,
-    shape.argumentValues,
-    shape.argumentContainers,
+  assertProviderAssistantStreamCapacity(
+    current.size + other.size + occupancy.toolBlocks + 1,
+    occupancy.argumentValues,
+    occupancy.argumentContainers,
   );
   current.add(part);
   return true;
@@ -864,7 +864,7 @@ function startExplicitProviderAssistantPart(
   completed: ReadonlySet<number>,
   part: number,
   kind: "text" | "reasoning",
-  shape: ProviderAssistantStreamShape = EMPTY_PROVIDER_ASSISTANT_STREAM_SHAPE,
+  occupancy: ProviderAssistantStreamOccupancy = EMPTY_PROVIDER_ASSISTANT_STREAM_OCCUPANCY,
 ): void {
   if (completed.has(part)) {
     throw providerProtocolFailure(`Provider emitted ${kind}_start after ${kind}_end for part ${part}`);
@@ -872,7 +872,7 @@ function startExplicitProviderAssistantPart(
   if (current.has(part)) {
     throw providerProtocolFailure(`Provider emitted more than one ${kind}_start for part ${part}`);
   }
-  startProviderAssistantPart(current, other, part, shape);
+  startProviderAssistantPart(current, other, part, occupancy);
 }
 
 function providerUsage<Value>(value: Value): NormalizedUsage {
@@ -942,19 +942,21 @@ interface ProviderAssistantStreamPosition {
   rawIndex: number;
 }
 
+interface ProviderAssistantStreamPositions {
+  ordered: ProviderAssistantStreamPosition[];
+  position(rawIndex: number, kind: ProviderAssistantStreamKind, explicitStart?: boolean): number;
+}
+
 function createProviderAssistantStreamPositions(
   globallyIndexed: boolean,
   isCompleted: (kind: ProviderAssistantStreamKind, position: number) => boolean,
-): {
-  ordered: ProviderAssistantStreamPosition[];
-  position: (rawIndex: number, kind: ProviderAssistantStreamKind, explicitStart?: boolean) => number;
-} {
+): ProviderAssistantStreamPositions {
   const ordered: ProviderAssistantStreamPosition[] = [];
-  const byKind: Record<ProviderAssistantStreamKind, Map<number, number>> = {
+  const byKind = {
     reasoning: new Map(),
     text: new Map(),
     tool: new Map(),
-  };
+  } satisfies Record<ProviderAssistantStreamKind, Map<number, number>>;
   let lastGlobalRawIndex = -1;
   return {
     ordered,
@@ -1031,7 +1033,7 @@ function assertProviderToolCallStreamCapacity(
     );
   }
   if (!calls.has(index)) {
-    assertProviderAssistantStreamShape(
+    assertProviderAssistantStreamCapacity(
       assistantBlocks + calls.size + 1,
       argumentValues + 1,
       argumentContainers + 1,
@@ -3437,7 +3439,7 @@ export class RuntimeEngine {
       let streamedToolCallBytes = 0;
       let streamedToolArgumentValues = 0;
       let streamedToolArgumentContainers = 0;
-      const streamShape = (): ProviderAssistantStreamShape => ({
+      const streamOccupancy = (): ProviderAssistantStreamOccupancy => ({
         argumentContainers: streamedToolArgumentContainers,
         argumentValues: streamedToolArgumentValues,
         toolBlocks: calls.size,
@@ -3546,7 +3548,7 @@ export class RuntimeEngine {
                 completedText,
                 part,
                 "text",
-                streamShape(),
+                streamOccupancy(),
               );
               await sink.emit({ type: "text_started", part });
               break;
@@ -3572,7 +3574,7 @@ export class RuntimeEngine {
                 deltaBytes,
                 streamedToolCallBytes,
               );
-              if (startProviderAssistantPart(startedText, startedReasoning, part, streamShape())) {
+              if (startProviderAssistantPart(startedText, startedReasoning, part, streamOccupancy())) {
                 await sink.emit({ type: "text_started", part });
               }
               const next = `${previous ?? ""}${event.text}`;
@@ -3602,7 +3604,7 @@ export class RuntimeEngine {
                 nextTextBytes + nextSignatureBytes,
                 streamedToolCallBytes,
               );
-              if (startProviderAssistantPart(startedText, startedReasoning, part, streamShape())) {
+              if (startProviderAssistantPart(startedText, startedReasoning, part, streamOccupancy())) {
                 await sink.emit({ type: "text_started", part });
               }
               const suffix = event.text.slice(accumulated.length);
@@ -3636,7 +3638,7 @@ export class RuntimeEngine {
                 completedReasoning,
                 part,
                 "reasoning",
-                streamShape(),
+                streamOccupancy(),
               );
               reasoningVisibility.set(part, visibility);
               await sink.emit({ type: "reasoning_started", part, visibility });
@@ -3664,7 +3666,7 @@ export class RuntimeEngine {
                 deltaBytes,
                 streamedToolCallBytes,
               );
-              if (startProviderAssistantPart(startedReasoning, startedText, part, streamShape())) {
+              if (startProviderAssistantPart(startedReasoning, startedText, part, streamOccupancy())) {
                 await sink.emit({ type: "reasoning_started", part, visibility });
               }
               const next = `${previous?.text ?? ""}${event.text}`;
@@ -3699,7 +3701,7 @@ export class RuntimeEngine {
                 nextReasoningBytes + nextSignatureBytes,
                 streamedToolCallBytes,
               );
-              if (startProviderAssistantPart(startedReasoning, startedText, part, streamShape())) {
+              if (startProviderAssistantPart(startedReasoning, startedText, part, streamOccupancy())) {
                 await sink.emit({ type: "reasoning_started", part, visibility });
               }
               const suffix = event.text.slice(accumulated.length);
@@ -3878,7 +3880,7 @@ export class RuntimeEngine {
                 + argumentCounts.values;
               const nextArgumentContainers = streamedToolArgumentContainers - (existing === undefined ? 0 : 1)
                 + argumentCounts.containers;
-              assertProviderAssistantStreamShape(
+              assertProviderAssistantStreamCapacity(
                 startedText.size + startedReasoning.size + calls.size + (existing === undefined ? 1 : 0),
                 nextArgumentValues,
                 nextArgumentContainers,
@@ -4045,7 +4047,7 @@ export class RuntimeEngine {
               const nextTextBytes = Buffer.byteLength(block.text, "utf8");
               const nextSignatureBytes = Buffer.byteLength(block.textSignature ?? "", "utf8");
               if (!startedText.has(index)) prospectiveBlocks += 1;
-              assertProviderAssistantStreamShape(
+              assertProviderAssistantStreamCapacity(
                 prospectiveBlocks,
                 prospectiveArgumentValues,
                 prospectiveArgumentContainers,
@@ -4081,7 +4083,7 @@ export class RuntimeEngine {
               const nextReasoningBytes = Buffer.byteLength(block.thinking, "utf8");
               const nextSignatureBytes = Buffer.byteLength(block.thinkingSignature ?? "", "utf8");
               if (!startedReasoning.has(index)) prospectiveBlocks += 1;
-              assertProviderAssistantStreamShape(
+              assertProviderAssistantStreamCapacity(
                 prospectiveBlocks,
                 prospectiveArgumentValues,
                 prospectiveArgumentContainers,
@@ -4106,7 +4108,7 @@ export class RuntimeEngine {
                 prospectiveBlocks += 1;
                 prospectiveArgumentValues += 1;
                 prospectiveArgumentContainers += 1;
-                assertProviderAssistantStreamShape(
+                assertProviderAssistantStreamCapacity(
                   prospectiveBlocks,
                   prospectiveArgumentValues,
                   prospectiveArgumentContainers,
@@ -4137,7 +4139,7 @@ export class RuntimeEngine {
               const argumentCounts = providerToolCallArgumentCounts(argumentsValue);
               prospectiveArgumentValues = prospectiveArgumentValues - 1 + argumentCounts.values;
               prospectiveArgumentContainers = prospectiveArgumentContainers - 1 + argumentCounts.containers;
-              assertProviderAssistantStreamShape(
+              assertProviderAssistantStreamCapacity(
                 prospectiveBlocks,
                 prospectiveArgumentValues,
                 prospectiveArgumentContainers,

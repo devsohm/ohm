@@ -17,6 +17,21 @@ import {
 import type { PortablePresentationEvent } from "../../src/interfaces/portable-presentation.js";
 import type { ExtensionWireServiceDescriptor } from "../../src/extensions/wire-services.js";
 
+type BrokerAgentSession = Pick<
+  AgentSession,
+  | "invokeExtensionWireService"
+  | "invokePortablePresentationAction"
+  | "listExtensionWireServices"
+  | "listPortablePresentations"
+  | "onPortablePresentation"
+  | "subscribe"
+>;
+
+function brokerAgentSessionFixture(value: BrokerAgentSession): AgentSession {
+  // SAFETY: this RPC scenario can reach only the six statically checked session seams listed above.
+  return value as AgentSession;
+}
+
 test("RPC projects portable views and brokers versioned extension services and actions", async () => {
   const presentationListeners = new Set<(event: PortablePresentationEvent) => void>();
   const eventListeners = new Set<(event: AgentSessionEvent) => void | Promise<void>>();
@@ -47,7 +62,7 @@ test("RPC projects portable views and brokers versioned extension services and a
       actions: [],
     },
   };
-  const session = {
+  const sessionFixture = {
     subscribe(listener: (event: AgentSessionEvent) => void | Promise<void>) {
       eventListeners.add(listener);
       return () => eventListeners.delete(listener);
@@ -59,17 +74,21 @@ test("RPC projects portable views and brokers versioned extension services and a
     },
     listPortablePresentations() { return presentationReady ? [presentation] : []; },
     listExtensionWireServices() { return [descriptor]; },
-    async invokeExtensionWireService(request: { id: string; payload: unknown }) {
+    async invokeExtensionWireService(
+      request: Parameters<BrokerAgentSession["invokeExtensionWireService"]>[0],
+    ) {
       return {
         protocolVersion: 1 as const,
         service: "fixture.echo",
         serviceVersion: 1,
         id: request.id,
         ok: true as const,
-        payload: request.payload as never,
+        payload: request.payload,
       };
     },
-    async invokePortablePresentationAction(request: { owner: string; presentationId: string; revision: number; actionId: string }) {
+    async invokePortablePresentationAction(
+      request: Parameters<BrokerAgentSession["invokePortablePresentationAction"]>[0],
+    ) {
       if (request.actionId === "secret") throw new Error("database password is hunter2");
       return {
         protocolVersion: 1 as const,
@@ -80,12 +99,16 @@ test("RPC projects portable views and brokers versioned extension services and a
         result: { accepted: true },
       };
     },
-  } as unknown as AgentSession;
-  const runtime = {
+  } satisfies BrokerAgentSession;
+  const session = brokerAgentSessionFixture(sessionFixture);
+  const runtime: RpcSessionRuntime = {
     session,
+    async newSession() { return { cancelled: false }; },
+    async switchSession() { return { cancelled: false }; },
+    async fork() { return { cancelled: false }; },
     setBeforeSessionInvalidate(callback?: () => void) { beforeSessionInvalidate = callback; },
     setRebindSession(callback?: (session: AgentSession) => Promise<void>) { rebindSession = callback; },
-  } as unknown as RpcSessionRuntime;
+  };
   const dispatcher = new RpcRuntimeDispatcher({
     runtime,
     output(value) { outputs.push(value); },
@@ -185,14 +208,15 @@ test("RPC projects portable views and brokers versioned extension services and a
     id: "invalid",
     request: {},
     extra: true,
-  } as never);
+  });
   assert.equal(invalid?.success, false);
 
-  const emptySession = {
-    subscribe() { return () => undefined; },
+  const emptySession = brokerAgentSessionFixture({
+    ...sessionFixture,
+    subscribe(_listener) { return () => undefined; },
     onPortablePresentation() { return () => undefined; },
     listPortablePresentations() { return []; },
-  } as unknown as AgentSession;
+  });
   assert.ok(beforeSessionInvalidate !== undefined);
   beforeSessionInvalidate();
   assert.ok(rebindSession !== undefined);
@@ -243,11 +267,14 @@ test("RPC snapshots presentations created while a real AgentSession binds extens
   });
   context.after(async () => await session.close());
   const outputs: Parameters<RpcRuntimeDispatcherOptions["output"]>[0][] = [];
-  const runtime = {
+  const runtime: RpcSessionRuntime = {
     session,
+    async newSession() { return { cancelled: false }; },
+    async switchSession() { return { cancelled: false }; },
+    async fork() { return { cancelled: false }; },
     setBeforeSessionInvalidate() {},
     setRebindSession() {},
-  } as unknown as RpcSessionRuntime;
+  };
   const dispatcher = new RpcRuntimeDispatcher({
     runtime,
     output(value) { outputs.push(value); },

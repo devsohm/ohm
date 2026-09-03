@@ -158,6 +158,7 @@ export {
   Image,
   Input,
   Loader,
+  Marked,
   Markdown,
   ScrollView,
   SelectList,
@@ -178,9 +179,11 @@ export {
   type LoaderIndicatorOptions,
   type MarkdownOptions,
   type MarkdownTheme,
+  type RenderLatexOptions,
   type ScrollbarVisibility,
   type ScrollViewOptions,
   type ScrollViewScrollbar,
+  type ScrollViewScrollToOptions,
   type SelectItem,
   type SelectListLayoutOptions,
   type SelectListTheme,
@@ -193,7 +196,10 @@ export {
   type StackEntryOptions,
   type StackOptions,
   type TuiAltScreenOptions,
+  type Token,
+  type Tokens,
 } from "@ohm/terminal";
+export { renderLatex } from "@ohm/terminal";
 export {
   type BackgroundCell,
   type BackgroundComponent,
@@ -211,6 +217,8 @@ export {
   type SizeValue,
   type TuiInputListener,
   type TuiInputListenerResult,
+  type TuiMainScreenRenderState,
+  type TuiStopOptions,
   type ViewportTUI,
 } from "@ohm/terminal";
 export {
@@ -245,6 +253,7 @@ export {
   getCellDimensions,
   resetCapabilitiesCache,
   setCapabilities,
+  setCapabilityOverrides,
   setCellDimensions,
   type CellDimensions,
   type TerminalCapabilities,
@@ -345,7 +354,14 @@ export {
   truncateCells,
   wrapCells,
 } from "./unicode.js";
-export { sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@ohm/terminal";
+export {
+  getOsc8LinkAtColumn,
+  sliceByColumn,
+  stripTerminalSequences,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@ohm/terminal";
 export type {
   EventRenderer,
   BuiltinThemeName,

@@ -5,8 +5,10 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Check } from "typebox/value";
 
-import type { JsonValue } from "../../src/core/json.js";
+import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../../src/core/json.js";
+import { FUNCTION_VALUE, NUMBER_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
 import {
   DurableJobSupervisor,
   type ExtensionJobContext,
@@ -15,6 +17,68 @@ import type { ExtensionAPI } from "../../src/extensions/direct.js";
 import { loadDirectExtensions } from "../../src/extensions/runtime.js";
 import type { RpcClientOptions } from "../../src/interfaces/rpc-client.js";
 import type { RpcSessionState } from "../../src/interfaces/rpc-protocol.js";
+
+interface MutableStoredHostFixture extends JsonObject {
+  pid: number;
+  token: string;
+}
+
+interface MutableStoredJobFixture extends JsonObject {
+  id: string;
+  state: string;
+  updatedAt: number;
+  label?: string;
+  error?: string;
+  host?: MutableStoredHostFixture;
+}
+
+interface MutableStoredPayloadFixture extends JsonObject {
+  version: 1;
+  jobs: MutableStoredJobFixture[];
+}
+
+interface MutableStoredEnvelopeFixture extends JsonObject {
+  checksum: string;
+  payload: MutableStoredPayloadFixture;
+}
+
+function isStoredHostFixture(value: JsonValue | undefined): value is MutableStoredHostFixture | undefined {
+  return value === undefined
+    || (isJsonObject(value) && Check(NUMBER_VALUE, value.pid) && Check(STRING_VALUE, value.token));
+}
+
+function isStoredJobFixture(value: JsonValue): value is MutableStoredJobFixture {
+  return isJsonObject(value)
+    && Check(STRING_VALUE, value.id)
+    && Check(STRING_VALUE, value.state)
+    && Check(NUMBER_VALUE, value.updatedAt)
+    && (value.label === undefined || Check(STRING_VALUE, value.label))
+    && (value.error === undefined || Check(STRING_VALUE, value.error))
+    && isStoredHostFixture(value.host);
+}
+
+function isStoredEnvelopeFixture(value: JsonValue): value is MutableStoredEnvelopeFixture {
+  if (!isJsonObject(value) || !Check(STRING_VALUE, value.checksum) || !isJsonObject(value.payload)) return false;
+  return value.payload.version === 1
+    && Array.isArray(value.payload.jobs)
+    && value.payload.jobs.every(isStoredJobFixture);
+}
+
+function parseStoredEnvelopeFixture(serialized: string): MutableStoredEnvelopeFixture {
+  const parsed: unknown = JSON.parse(serialized);
+  if (!isJsonValue(parsed) || !isStoredEnvelopeFixture(parsed)) {
+    throw new Error("Test durable store has an unexpected shape");
+  }
+  return parsed;
+}
+
+function parseSessionIdFixture(serialized: string): string {
+  const parsed: unknown = JSON.parse(serialized);
+  if (!isJsonObject(parsed) || !Check(STRING_VALUE, parsed.sessionId)) {
+    throw new Error("Test child session header has no session id");
+  }
+  return parsed.sessionId;
+}
 
 async function temporaryOwner(context: test.TestContext, id = "fixture-extension") {
   const base = await mkdtemp(join(tmpdir(), "ohm-durable-jobs-"));
@@ -145,7 +209,7 @@ test("durable JSON snapshots reject active objects without invoking extension co
   context.after(async () => await supervisor.close());
   const jobs = supervisor.jobs(fixture.owner);
   let getterCalls = 0;
-  const accessor: Record<string, unknown> = {};
+  const accessor: JsonObject = {};
   Object.defineProperty(accessor, "value", {
     enumerable: true,
     get() {
@@ -154,34 +218,35 @@ test("durable JSON snapshots reject active objects without invoking extension co
     },
   });
   await assert.rejects(
-    jobs.start({ kind: "fixture.accessor", metadata: accessor as JsonValue }, () => undefined),
+    jobs.start({ kind: "fixture.accessor", metadata: accessor }, () => undefined),
     /enumerable data properties/u,
   );
   assert.equal(getterCalls, 0);
 
   let toJsonCalls = 0;
-  const activeSerializer = {
-    value: "safe",
-    toJSON() {
+  const activeSerializer: JsonObject = { value: "safe" };
+  Object.defineProperty(activeSerializer, "toJSON", {
+    enumerable: true,
+    value() {
       toJsonCalls += 1;
       return { replaced: true };
     },
-  };
+  });
   await assert.rejects(
-    jobs.start({ kind: "fixture.to-json", metadata: activeSerializer as unknown as JsonValue }, () => undefined),
+    jobs.start({ kind: "fixture.to-json", metadata: activeSerializer }, () => undefined),
     /only JSON values/u,
   );
   assert.equal(toJsonCalls, 0);
 
   let proxyReads = 0;
-  const proxy = new Proxy({}, {
-    get(target, property, receiver) {
+  const proxy = new Proxy<JsonObject>({}, {
+    get() {
       proxyReads += 1;
-      return Reflect.get(target, property, receiver);
+      return undefined;
     },
   });
   await assert.rejects(
-    jobs.start({ kind: "fixture.proxy", metadata: proxy as JsonValue }, () => undefined),
+    jobs.start({ kind: "fixture.proxy", metadata: proxy }, () => undefined),
     /must not contain proxies/u,
   );
   assert.equal(proxyReads, 0);
@@ -310,8 +375,8 @@ test("clean shutdown cancels its completed drain timer", async (context) => {
   const fixture = await temporaryOwner(context);
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
-  const drainTimers = new Set<NodeJS.Timeout>();
-  context.mock.method(globalThis, "setTimeout", ((
+  const drainTimers = new Set<Parameters<typeof clearTimeout>[0]>();
+  context.mock.method(globalThis, "setTimeout", (
     callback: (...argumentsValue: unknown[]) => void,
     milliseconds?: number,
     ...argumentsValue: unknown[]
@@ -319,11 +384,11 @@ test("clean shutdown cancels its completed drain timer", async (context) => {
     const timer = originalSetTimeout(callback, milliseconds, ...argumentsValue);
     if (milliseconds === 2_500) drainTimers.add(timer);
     return timer;
-  }) as typeof setTimeout);
-  context.mock.method(globalThis, "clearTimeout", ((timer: Parameters<typeof clearTimeout>[0]) => {
-    if (timer !== undefined) drainTimers.delete(timer as NodeJS.Timeout);
+  });
+  context.mock.method(globalThis, "clearTimeout", (timer: Parameters<typeof clearTimeout>[0]) => {
+    if (timer !== undefined) drainTimers.delete(timer);
     originalClearTimeout(timer);
-  }) as typeof clearTimeout);
+  });
 
   const supervisor = new DurableJobSupervisor();
   const jobs = supervisor.jobs(fixture.owner);
@@ -346,10 +411,7 @@ test("atomic job storage ignores abandoned temp files and rejects corrupt commit
   await healthy.close();
 
   const storePath = join(fixture.root, "durable-jobs-v1.json");
-  const envelope = JSON.parse(await readFile(storePath, "utf8")) as {
-    checksum: string;
-    payload: { version: 1; jobs: Array<{ label?: string }> };
-  };
+  const envelope = parseStoredEnvelopeFixture(await readFile(storePath, "utf8"));
   envelope.payload.jobs[0]!.label = "tampered";
   await writeFile(storePath, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
   const corrupt = new DurableJobSupervisor();
@@ -462,8 +524,7 @@ class FakeRpcClient {
     const sessionIndex = args.indexOf("--session");
     if (sessionIndex >= 0) {
       this.#sessionFile = args[sessionIndex + 1]!;
-      const header = JSON.parse((await readFile(this.#sessionFile, "utf8")).split("\n")[0]!) as { sessionId: string };
-      this.#sessionId = header.sessionId;
+      this.#sessionId = parseSessionIdFixture((await readFile(this.#sessionFile, "utf8")).split("\n")[0]!);
     } else {
       this.#sessionId = randomUUID();
       this.#sessionFile = join(directory, `fixture_${this.#sessionId}.jsonl`);
@@ -810,19 +871,7 @@ test("a failed factory cannot recover or mutate the durable store before commit"
   await seedHost.close();
 
   const storePath = join(dataPaths.workspace, "durable-jobs-v1.json");
-  const envelope = JSON.parse(await readFile(storePath, "utf8")) as {
-    checksum: string;
-    payload: {
-      version: 1;
-      jobs: Array<{
-        id: string;
-        state: string;
-        updatedAt: number;
-        error?: string;
-        host?: { pid: number; token: string };
-      }>;
-    };
-  };
+  const envelope = parseStoredEnvelopeFixture(await readFile(storePath, "utf8"));
   const stored = envelope.payload.jobs.find((job) => job.id === started.id);
   assert.ok(stored !== undefined);
   stored.state = "running";
@@ -882,7 +931,7 @@ test("every committed ExtensionAPI generation receives the durable host services
   await assert.rejects(precommit, /before activation commits/u);
   const running = await firstApi.jobs.start({ kind: "fixture.integration" }, untilAborted);
   assert.equal(running.state, "running");
-  assert.equal(typeof firstApi.childSessions.spawn, "function");
+  assert.equal(Check(FUNCTION_VALUE, firstApi.childSessions.spawn), true);
   await firstHost.close();
 
   let secondApi: ExtensionAPI | undefined;

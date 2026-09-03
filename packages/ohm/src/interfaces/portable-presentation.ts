@@ -1,8 +1,15 @@
 import { boundedJsonSnapshot } from "@ohm/kernel/runtime/core/bounded-json";
-import type { Static, TSchema } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
+import {
+  BOOLEAN_VALUE,
+  FUNCTION_VALUE,
+  NUMBER_VALUE,
+  OBJECT_VALUE,
+  STRING_VALUE,
+} from "../core/value-schemas.js";
 
 export const PORTABLE_PRESENTATION_PROTOCOL_VERSION = 1 as const;
 
@@ -21,6 +28,15 @@ const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/u;
 const OWNER = /^[A-Za-z0-9@][A-Za-z0-9@/_.:-]{0,255}$/u;
 const PRESENTATION_ROLES = ["normal", "muted", "accent", "success", "warning", "error"] as const;
 const ACTION_STYLES = ["default", "primary", "danger"] as const;
+
+const PRESENTATION_ACTION_REQUEST_SOURCE_VALUE = Type.Object({
+  protocolVersion: Type.Optional(Type.Unknown()),
+  owner: Type.Optional(Type.Unknown()),
+  presentationId: Type.Optional(Type.Unknown()),
+  revision: Type.Optional(Type.Unknown()),
+  actionId: Type.Optional(Type.Unknown()),
+  input: Type.Optional(Type.Unknown()),
+}, { additionalProperties: true });
 
 export type PortablePresentationRole = (typeof PRESENTATION_ROLES)[number];
 export type PortablePresentationActionStyle = (typeof ACTION_STYLES)[number];
@@ -158,73 +174,114 @@ export interface PortablePresentationController {
   invoke(request: PortablePresentationActionRequest, signal?: AbortSignal): Promise<PortablePresentationActionResult>;
 }
 
-function boundedString(value: unknown, label: string, maximumBytes = PORTABLE_PRESENTATION_LIMITS.maxFieldBytes): string {
-  if (typeof value !== "string" || value.includes("\0")) throw new TypeError(`${label} must be a NUL-free string`);
+interface PortablePresentationActionOwner {
+  id: string;
+  label: string;
+  inputSchema: JsonObject;
+  style?: PortablePresentationActionStyle;
+  disabled?: boolean;
+}
+
+interface PortablePresentationDocumentOwner {
+  protocolVersion: typeof PORTABLE_PRESENTATION_PROTOCOL_VERSION;
+  id: string;
+  revision: number;
+  title?: string;
+  blocks: readonly PortablePresentationBlock[];
+  actions: readonly PortablePresentationAction[];
+}
+
+interface ValidatedPortablePresentationDefinition {
+  document: PortablePresentationDocument;
+  actions: ReadonlyMap<string, PortablePresentationActionDefinition>;
+}
+
+function matchesSource<SchemaType extends TSchema, ValueType>(schema: SchemaType, value: ValueType): boolean {
+  return Value.Check(schema, value);
+}
+
+function boundedString<ValueType>(
+  value: ValueType,
+  label: string,
+  maximumBytes = PORTABLE_PRESENTATION_LIMITS.maxFieldBytes,
+): string {
+  if (!Value.Check(STRING_VALUE, value) || value.includes("\0")) {
+    throw new TypeError(`${label} must be a NUL-free string`);
+  }
   if (Buffer.byteLength(value, "utf8") > maximumBytes) throw new RangeError(`${label} exceeds ${maximumBytes} bytes`);
   return value;
 }
 
-function identifier(value: unknown, label: string): string {
-  if (typeof value !== "string" || !IDENTIFIER.test(value)) throw new TypeError(`${label} is invalid`);
+function identifier<ValueType>(value: ValueType, label: string): string {
+  if (!Value.Check(STRING_VALUE, value) || !IDENTIFIER.test(value)) throw new TypeError(`${label} is invalid`);
   return value;
 }
 
-function ownerIdentifier(value: unknown, label: string): string {
-  if (typeof value !== "string" || !OWNER.test(value)) throw new TypeError(`${label} is invalid`);
+function ownerIdentifier<ValueType>(value: ValueType, label: string): string {
+  if (!Value.Check(STRING_VALUE, value) || !OWNER.test(value)) throw new TypeError(`${label} is invalid`);
   return value;
 }
 
-function nonNegativeInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+function nonNegativeInteger<ValueType>(value: ValueType, label: string): number {
+  if (!Value.Check(NUMBER_VALUE, value) || !Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative safe integer`);
   }
-  return value as number;
+  return value;
 }
 
-function exact(value: Readonly<Record<string, unknown>>, keys: readonly string[], label: string): void {
+function exact<ValueType extends object>(value: ValueType, keys: readonly string[], label: string): void {
   const allowed = new Set(keys);
   const unexpected = Object.keys(value).find((key) => !allowed.has(key));
   if (unexpected !== undefined) throw new TypeError(`${label}.${unexpected} is not allowed`);
 }
 
-function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError(`${label} must be an object`);
+function finiteNumber<ValueType>(value: ValueType, label: string): number {
+  if (!Value.Check(NUMBER_VALUE, value) || !Number.isFinite(value)) {
+    throw new TypeError(`${label} must be finite`);
   }
-  return value as Readonly<Record<string, unknown>>;
-}
-
-function finiteNumber(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${label} must be finite`);
   return value;
 }
 
-function presentationBlock(value: unknown, index: number): PortablePresentationBlock {
+function presentationRole<ValueType>(value: ValueType, label: string): PortablePresentationRole {
+  const selected = Value.Check(STRING_VALUE, value)
+    ? PRESENTATION_ROLES.find((candidate) => candidate === value)
+    : undefined;
+  if (selected === undefined) throw new TypeError(`${label} is invalid`);
+  return selected;
+}
+
+function actionStyle<ValueType>(value: ValueType, label: string): PortablePresentationActionStyle {
+  const selected = Value.Check(STRING_VALUE, value)
+    ? ACTION_STYLES.find((candidate) => candidate === value)
+    : undefined;
+  if (selected === undefined) throw new TypeError(`${label} is invalid`);
+  return selected;
+}
+
+function presentationBlock(value: PortablePresentationBlock, index: number): PortablePresentationBlock {
   const label = `Portable presentation block ${index}`;
-  const selected = record(value, label);
-  const type = selected["type"];
+  if (!matchesSource(OBJECT_VALUE, value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  const type = value.type;
   if (type === "text") {
-    exact(selected, ["type", "text", "role"], label);
-    const role = selected["role"];
-    if (role !== undefined && !PRESENTATION_ROLES.includes(role as PortablePresentationRole)) {
-      throw new TypeError(`${label}.role is invalid`);
+    exact(value, ["type", "text", "role"], label);
+    const text = boundedString(value.text, `${label}.text`);
+    if (value.role === undefined) {
+      return Object.freeze({ type, text });
     }
-    return Object.freeze({
-      type,
-      text: boundedString(selected["text"], `${label}.text`),
-      ...(role === undefined ? {} : { role: role as PortablePresentationRole }),
-    });
+    return Object.freeze({ type, text, role: presentationRole(value.role, `${label}.role`) });
   }
   if (type === "markdown") {
-    exact(selected, ["type", "markdown"], label);
+    exact(value, ["type", "markdown"], label);
     return Object.freeze({
       type,
-      markdown: boundedString(selected["markdown"], `${label}.markdown`),
+      markdown: boundedString(value.markdown, `${label}.markdown`),
     });
   }
   if (type === "fields") {
-    exact(selected, ["type", "fields"], label);
-    const fields = selected["fields"];
+    exact(value, ["type", "fields"], label);
+    const { fields } = value;
     if (!Array.isArray(fields) || fields.length > PORTABLE_PRESENTATION_LIMITS.maxListItems) {
       throw new RangeError(`${label}.fields exceeds ${PORTABLE_PRESENTATION_LIMITS.maxListItems} entries`);
     }
@@ -232,45 +289,44 @@ function presentationBlock(value: unknown, index: number): PortablePresentationB
       type,
       fields: Object.freeze(fields.map((fieldValue, fieldIndex) => {
         const fieldLabel = `${label}.fields[${fieldIndex}]`;
-        const field = record(fieldValue, fieldLabel);
-        exact(field, ["label", "value"], fieldLabel);
+        if (!matchesSource(OBJECT_VALUE, fieldValue)) {
+          throw new TypeError(`${fieldLabel} must be an object`);
+        }
+        exact(fieldValue, ["label", "value"], fieldLabel);
         return Object.freeze({
-          label: boundedString(field["label"], `${fieldLabel}.label`, 4 * 1024),
-          value: boundedString(field["value"], `${fieldLabel}.value`),
+          label: boundedString(fieldValue.label, `${fieldLabel}.label`, 4 * 1024),
+          value: boundedString(fieldValue.value, `${fieldLabel}.value`),
         });
       })),
     });
   }
   if (type === "list") {
-    exact(selected, ["type", "items", "ordered"], label);
-    const items = selected["items"];
+    exact(value, ["type", "items", "ordered"], label);
+    const { items } = value;
     if (!Array.isArray(items) || items.length > PORTABLE_PRESENTATION_LIMITS.maxListItems) {
       throw new RangeError(`${label}.items exceeds ${PORTABLE_PRESENTATION_LIMITS.maxListItems} entries`);
     }
-    if (selected["ordered"] !== undefined && typeof selected["ordered"] !== "boolean") {
+    if (value.ordered !== undefined && !Value.Check(BOOLEAN_VALUE, value.ordered)) {
       throw new TypeError(`${label}.ordered must be boolean`);
     }
-    return Object.freeze({
-      type,
-      items: Object.freeze(items.map((item, itemIndex) =>
-        boundedString(item, `${label}.items[${itemIndex}]`))),
-      ...(selected["ordered"] === undefined ? {} : { ordered: selected["ordered"] as boolean }),
-    });
+    const selectedItems = Object.freeze(items.map((item, itemIndex) =>
+      boundedString(item, `${label}.items[${itemIndex}]`)));
+    if (value.ordered === undefined) return Object.freeze({ type, items: selectedItems });
+    return Object.freeze({ type, items: selectedItems, ordered: value.ordered });
   }
   if (type === "progress") {
-    exact(selected, ["type", "value", "max", "label"], label);
-    const max = finiteNumber(selected["max"], `${label}.max`);
-    const progress = finiteNumber(selected["value"], `${label}.value`);
+    exact(value, ["type", "value", "max", "label"], label);
+    const max = finiteNumber(value.max, `${label}.max`);
+    const progress = finiteNumber(value.value, `${label}.value`);
     if (max <= 0 || progress < 0 || progress > max) {
       throw new RangeError(`${label} progress must be between zero and max`);
     }
+    if (value.label === undefined) return Object.freeze({ type, value: progress, max });
     return Object.freeze({
       type,
       value: progress,
       max,
-      ...(selected["label"] === undefined
-        ? {}
-        : { label: boundedString(selected["label"], `${label}.label`, 4 * 1024) }),
+      label: boundedString(value.label, `${label}.label`, 4 * 1024),
     });
   }
   throw new TypeError(`${label}.type is invalid`);
@@ -280,10 +336,11 @@ function deepFreezeJson<ValueType extends JsonValue>(value: ValueType): ValueTyp
   const pending: JsonValue[] = [value];
   while (pending.length > 0) {
     const current = pending.pop();
-    if (current !== null && typeof current === "object" && !Object.isFrozen(current)) {
-      Object.freeze(current);
-      pending.push(...Object.values(current));
-    }
+    if (current === undefined || current === null || Value.Check(STRING_VALUE, current)
+      || Value.Check(NUMBER_VALUE, current) || Value.Check(BOOLEAN_VALUE, current)
+      || Object.isFrozen(current)) continue;
+    Object.freeze(current);
+    pending.push(...Object.values(current));
   }
   return value;
 }
@@ -301,7 +358,17 @@ function schemaSnapshot(schema: TSchema, label: string): JsonObject {
   return deepFreezeJson(snapshot);
 }
 
-function jsonSnapshot(value: unknown, label: string, maximumBytes: number): JsonValue {
+function jsonSnapshot(
+  value: PortablePresentationDocument,
+  label: string,
+  maximumBytes: number,
+): PortablePresentationDocument;
+function jsonSnapshot<ValueType>(value: ValueType, label: string, maximumBytes: number): JsonValue;
+function jsonSnapshot<ValueType>(
+  value: ValueType,
+  label: string,
+  maximumBytes: number,
+): JsonValue | PortablePresentationDocument {
   return deepFreezeJson(structuredClone(boundedJsonSnapshot(value, {
     label,
     maximumBytes,
@@ -311,96 +378,111 @@ function jsonSnapshot(value: unknown, label: string, maximumBytes: number): Json
   }).value));
 }
 
-function validateDefinition(definition: PortablePresentationDefinition): {
-  document: PortablePresentationDocument;
-  actions: ReadonlyMap<string, PortablePresentationActionDefinition>;
-} {
-  const source = record(definition, "Portable presentation");
-  exact(source, ["id", "revision", "title", "blocks", "actions"], "Portable presentation");
-  const id = identifier(source["id"], "Portable presentation ID");
-  const revision = source["revision"] === undefined
+function validateDefinition(definition: PortablePresentationDefinition): ValidatedPortablePresentationDefinition {
+  if (!matchesSource(OBJECT_VALUE, definition)) {
+    throw new TypeError("Portable presentation must be an object");
+  }
+  exact(definition, ["id", "revision", "title", "blocks", "actions"], "Portable presentation");
+  const id = identifier(definition.id, "Portable presentation ID");
+  const revision = definition.revision === undefined
     ? 0
-    : nonNegativeInteger(source["revision"], "Portable presentation revision");
-  const blocks = source["blocks"];
+    : nonNegativeInteger(definition.revision, "Portable presentation revision");
+  const { blocks } = definition;
   if (!Array.isArray(blocks) || blocks.length > PORTABLE_PRESENTATION_LIMITS.maxBlocks) {
     throw new RangeError(`Portable presentation blocks exceed ${PORTABLE_PRESENTATION_LIMITS.maxBlocks} entries`);
   }
-  const actionValues = source["actions"] ?? [];
+  const actionValues = definition.actions ?? [];
   if (!Array.isArray(actionValues) || actionValues.length > PORTABLE_PRESENTATION_LIMITS.maxActions) {
     throw new RangeError(`Portable presentation actions exceed ${PORTABLE_PRESENTATION_LIMITS.maxActions} entries`);
   }
   const actions = new Map<string, PortablePresentationActionDefinition>();
   const actionDocuments = actionValues.map((actionValue, index): PortablePresentationAction => {
     const label = `Portable presentation action ${index}`;
-    const actionRecord = record(actionValue, label);
-    exact(actionRecord, ["id", "label", "inputSchema", "style", "disabled", "run"], label);
-    const action = actionRecord as unknown as PortablePresentationActionDefinition;
-    const id = identifier(action.id, `${label} ID`);
-    if (actions.has(id)) throw new TypeError(`Portable presentation action ${id} is duplicated`);
-    if (typeof action.run !== "function") throw new TypeError(`${label}.run must be a function`);
-    if (action.style !== undefined && !ACTION_STYLES.includes(action.style)) {
-      throw new TypeError(`${label}.style is invalid`);
+    if (!matchesSource(OBJECT_VALUE, actionValue)) {
+      throw new TypeError(`${label} must be an object`);
     }
-    if (action.disabled !== undefined && typeof action.disabled !== "boolean") {
+    exact(actionValue, ["id", "label", "inputSchema", "style", "disabled", "run"], label);
+    const actionId = identifier(actionValue.id, `${label} ID`);
+    if (actions.has(actionId)) throw new TypeError(`Portable presentation action ${actionId} is duplicated`);
+    if (!Value.Check(FUNCTION_VALUE, actionValue.run)) throw new TypeError(`${label}.run must be a function`);
+    const style = actionValue.style === undefined
+      ? undefined
+      : actionStyle(actionValue.style, `${label}.style`);
+    if (actionValue.disabled !== undefined && !Value.Check(BOOLEAN_VALUE, actionValue.disabled)) {
       throw new TypeError(`${label}.disabled must be boolean`);
     }
-    const inputSchema = schemaSnapshot(action.inputSchema, `${label} input schema`);
+    const inputSchema = schemaSnapshot(actionValue.inputSchema, `${label} input schema`);
     const selected: PortablePresentationActionDefinition = Object.freeze({
-      ...action,
-      id,
-      inputSchema: inputSchema as unknown as TSchema,
-    });
-    actions.set(id, selected);
-    return Object.freeze({
-      id,
-      label: boundedString(action.label, `${label}.label`, 4 * 1024),
+      ...actionValue,
+      id: actionId,
       inputSchema,
-      ...(action.style === undefined ? {} : { style: action.style }),
-      ...(action.disabled === undefined ? {} : { disabled: action.disabled }),
     });
+    actions.set(actionId, selected);
+    const actionDocument: PortablePresentationActionOwner = {
+      id: actionId,
+      label: boundedString(actionValue.label, `${label}.label`, 4 * 1024),
+      inputSchema,
+    };
+    if (style !== undefined) actionDocument.style = style;
+    if (actionValue.disabled !== undefined) actionDocument.disabled = actionValue.disabled;
+    return Object.freeze(actionDocument);
   });
-  const document: PortablePresentationDocument = Object.freeze({
-    protocolVersion: PORTABLE_PRESENTATION_PROTOCOL_VERSION,
-    id,
-    revision,
-    ...(source["title"] === undefined
-      ? {}
-      : { title: boundedString(source["title"], "Portable presentation title", 8 * 1024) }),
-    blocks: Object.freeze(blocks.map(presentationBlock)),
-    actions: Object.freeze(actionDocuments),
-  });
+  const selectedBlocks = Object.freeze(blocks.map(presentationBlock));
+  const selectedActions = Object.freeze(actionDocuments);
+  let documentOwner: PortablePresentationDocumentOwner;
+  if (definition.title === undefined) {
+    documentOwner = {
+      protocolVersion: PORTABLE_PRESENTATION_PROTOCOL_VERSION,
+      id,
+      revision,
+      blocks: selectedBlocks,
+      actions: selectedActions,
+    };
+  } else {
+    documentOwner = {
+      protocolVersion: PORTABLE_PRESENTATION_PROTOCOL_VERSION,
+      id,
+      revision,
+      title: boundedString(definition.title, "Portable presentation title", 8 * 1024),
+      blocks: selectedBlocks,
+      actions: selectedActions,
+    };
+  }
+  const document = Object.freeze(documentOwner);
   jsonSnapshot(document, "Portable presentation document", PORTABLE_PRESENTATION_LIMITS.maxDocumentBytes);
   return { document, actions };
 }
 
-export function validatePortablePresentationActionRequest(
-  value: unknown,
+export function validatePortablePresentationActionRequest<ValueType>(
+  value: ValueType,
 ): PortablePresentationActionRequest {
-  const input = record(value, "Portable presentation action request");
+  if (!Value.Check(PRESENTATION_ACTION_REQUEST_SOURCE_VALUE, value)) {
+    throw new TypeError("Portable presentation action request must be an object");
+  }
   exact(
-    input,
+    value,
     ["protocolVersion", "owner", "presentationId", "revision", "actionId", "input"],
     "Portable presentation action request",
   );
-  if (input["protocolVersion"] !== PORTABLE_PRESENTATION_PROTOCOL_VERSION) {
+  if (value.protocolVersion !== PORTABLE_PRESENTATION_PROTOCOL_VERSION) {
     throw new TypeError("Portable presentation action protocol version is unsupported");
   }
   return Object.freeze({
     protocolVersion: PORTABLE_PRESENTATION_PROTOCOL_VERSION,
-    owner: ownerIdentifier(input["owner"], "Portable presentation action owner"),
-    presentationId: identifier(input["presentationId"], "Portable presentation action presentation ID"),
-    revision: nonNegativeInteger(input["revision"], "Portable presentation action revision"),
-    actionId: identifier(input["actionId"], "Portable presentation action ID"),
+    owner: ownerIdentifier(value.owner, "Portable presentation action owner"),
+    presentationId: identifier(value.presentationId, "Portable presentation action presentation ID"),
+    revision: nonNegativeInteger(value.revision, "Portable presentation action revision"),
+    actionId: identifier(value.actionId, "Portable presentation action ID"),
     input: jsonSnapshot(
-      input["input"],
+      value.input,
       "Portable presentation action input",
       PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes,
     ),
   });
 }
 
-function validateActionRequest(
-  value: unknown,
+function validateActionRequest<ValueType>(
+  value: ValueType,
   document: PortablePresentationDocument,
   owner: string,
 ): PortablePresentationActionRequest {
@@ -511,7 +593,7 @@ export function portablePresentationShowEvent(
     document,
     "Portable presentation event document",
     PORTABLE_PRESENTATION_LIMITS.maxDocumentBytes,
-  ) as unknown as PortablePresentationDocument;
+  );
   return Object.freeze({
     type: "portable_presentation",
     protocolVersion: PORTABLE_PRESENTATION_PROTOCOL_VERSION,

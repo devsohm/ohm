@@ -1302,6 +1302,8 @@ test("serve snapshots presentations created while a real AgentSession starts", a
       { headers: authHeaders() },
     );
     assert.equal(snapshot.status, 200);
+    // SAFETY: this in-process response was serialized from the typed runtime
+    // event list; the assertions below verify the fields used by the test.
     const body = await snapshot.json() as { presentations: PortablePresentationEvent[] };
     assert.equal(body.presentations.length, 1);
     assert.equal(body.presentations[0]?.operation, "show");

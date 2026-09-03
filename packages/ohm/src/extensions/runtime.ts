@@ -323,6 +323,22 @@ const MAX_RUNTIME_TREE_INSTRUCTIONS_BYTES = 16 * 1024;
 const MAX_RUNTIME_TREE_LABEL_BYTES = 256;
 const RUNTIME_BOUNDARY_RECORD_VALUE = Type.Record(Type.String(), Type.Unknown());
 const RUNTIME_FUNCTION_OR_OBJECT_VALUE = Type.Union([FUNCTION_VALUE, OBJECT_VALUE]);
+const RUNTIME_WIRE_SERVICE_ENDPOINT_VALUE = Type.Unsafe<ExtensionWireServiceEndpoint>(Type.Object({
+  protocolVersion: Type.Literal(EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION),
+  name: STRING_VALUE,
+  version: Type.Integer({ minimum: 1 }),
+  requestSchema: RUNTIME_BOUNDARY_RECORD_VALUE,
+  responseSchema: RUNTIME_BOUNDARY_RECORD_VALUE,
+  maxRequestBytes: Type.Integer({
+    minimum: 1,
+    maximum: EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+  }),
+  maxResponseBytes: Type.Integer({
+    minimum: 1,
+    maximum: EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+  }),
+  request: FUNCTION_VALUE,
+}, { additionalProperties: true }));
 const DIRECT_EXTENSION_FACTORY_VALUE = Type.Function([Type.Unknown()], Type.Unknown());
 const STRING_ARRAY_VALUE = Type.Array(STRING_VALUE);
 const TOOL_LOADING_VALUE = Type.Union([Type.Literal("eager"), Type.Literal("deferred")]);
@@ -1503,9 +1519,13 @@ interface RuntimeUserMessageDeliveryOptions {
   expandPromptTemplates?: boolean;
 }
 
+interface RuntimeSessionDeliveryBinding {
+  readonly __runtimeSessionDeliveryBinding?: never;
+}
+
 interface RuntimeDirectMessagingActions {
   /** @internal Opaque identity for the currently bound live session. */
-  getSessionDeliveryBinding?(): object;
+  getSessionDeliveryBinding?(): RuntimeSessionDeliveryBinding;
   sendMessage<T = unknown>(
     message: RuntimeCustomMessageInput<T>,
     options?: RuntimeCustomMessageDeliveryOptions,
@@ -1519,14 +1539,14 @@ interface RuntimeDirectMessagingActions {
     message: RuntimeCustomMessageInput<T>,
     options?: RuntimeCustomMessageDeliveryOptions,
     targetSessionId?: string,
-    targetSessionBinding?: object,
+    targetSessionBinding?: RuntimeSessionDeliveryBinding,
   ): Promise<void>;
   /** Host-owned Promise boundary used by callback-captured session delivery. */
   sendUserMessageAcknowledged?(
     content: CustomMessage["content"],
     options?: RuntimeUserMessageDeliveryOptions,
     targetSessionId?: string,
-    targetSessionBinding?: object,
+    targetSessionBinding?: RuntimeSessionDeliveryBinding,
   ): Promise<void>;
   appendEntry<T = unknown>(customType: string, data?: T, provenance?: ExtensionSessionProvenance): void;
 }
@@ -2339,11 +2359,17 @@ function runtimeServiceName(value: string): string {
   return value;
 }
 
-function runtimeServiceValue(value: unknown): object {
-  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+function runtimeServiceValue<Service extends object>(value: Service): Service {
+  if (!isObjectValue(value) && !Value.Check(FUNCTION_VALUE, value)) {
     throw new TypeError("Runtime service value must be an object or function");
   }
   return value;
+}
+
+function runtimeWireServiceEndpoint<Service extends object>(
+  value: Service,
+): ExtensionWireServiceEndpoint | undefined {
+  return Value.Check(RUNTIME_WIRE_SERVICE_ENDPOINT_VALUE, value) ? value : undefined;
 }
 
 function sharedEventTopic(value: string): string {
@@ -3850,8 +3876,12 @@ function activation(
       const name = runtimeServiceName(nameValue);
       if (!staged.committed) {
         const pending = staged.services.find((candidate) => candidate.name === name);
-        if (pending !== undefined) return pending.service as Service;
+        if (pending !== undefined) {
+          // SAFETY: this trusted name-based registry preserves the reference under the caller-selected service contract.
+          return pending.service as Service;
+        }
       }
+      // SAFETY: this trusted name-based registry preserves the reference under the caller-selected service contract.
       return host.getService(name) as Service | undefined;
     },
   });
@@ -5367,38 +5397,6 @@ export class RuntimeExtensionHost {
       appendEntry<T = unknown>(customType: string, data?: T): void {
         handler.appendEntry(customType, data, provenance);
       },
-      ...(sendMessageAcknowledged === undefined ? {} : {
-        async sendMessageAcknowledged<T = unknown>(
-          message: RuntimeCustomMessageInput<T>,
-          options?: RuntimeCustomMessageDeliveryOptions,
-          targetSessionId?: string,
-          targetSessionBinding?: object,
-        ): Promise<void> {
-          await sendMessageAcknowledged.call(handler, {
-            customType: message.customType,
-            content: message.content,
-            display: message.display,
-            ...optionalProperties(message.details === undefined ? undefined : { details: message.details }),
-            ...optionalProperties(provenance === undefined ? undefined : { provenance }),
-          }, options, targetSessionId, targetSessionBinding);
-        },
-      }),
-      ...(sendUserMessageAcknowledged === undefined ? {} : {
-        async sendUserMessageAcknowledged(
-          content: CustomMessage["content"],
-          options?: RuntimeUserMessageDeliveryOptions,
-          targetSessionId?: string,
-          targetSessionBinding?: object,
-        ): Promise<void> {
-          await sendUserMessageAcknowledged.call(
-            handler,
-            content,
-            options,
-            targetSessionId,
-            targetSessionBinding,
-          );
-        },
-      }),
       registerProvider(
         providerOrName: ExtensionProvider | string,
         config?: RuntimeDirectProviderConfig,
@@ -5412,6 +5410,38 @@ export class RuntimeExtensionHost {
         handler.unregisterProvider(name, owner);
       },
     };
+    if (sendMessageAcknowledged !== undefined) {
+      actions.sendMessageAcknowledged = async <T = unknown>(
+        message: RuntimeCustomMessageInput<T>,
+        options?: RuntimeCustomMessageDeliveryOptions,
+        targetSessionId?: string,
+        targetSessionBinding?: RuntimeSessionDeliveryBinding,
+      ): Promise<void> => {
+        await sendMessageAcknowledged.call(handler, {
+          customType: message.customType,
+          content: message.content,
+          display: message.display,
+          ...optionalProperties(message.details === undefined ? undefined : { details: message.details }),
+          ...optionalProperties(provenance === undefined ? undefined : { provenance }),
+        }, options, targetSessionId, targetSessionBinding);
+      };
+    }
+    if (sendUserMessageAcknowledged !== undefined) {
+      actions.sendUserMessageAcknowledged = async (
+        content: CustomMessage["content"],
+        options?: RuntimeUserMessageDeliveryOptions,
+        targetSessionId?: string,
+        targetSessionBinding?: RuntimeSessionDeliveryBinding,
+      ): Promise<void> => {
+        await sendUserMessageAcknowledged.call(
+          handler,
+          content,
+          options,
+          targetSessionId,
+          targetSessionBinding,
+        );
+      };
+    }
     return actions;
   }
 
@@ -6120,18 +6150,14 @@ export class RuntimeExtensionHost {
     for (const owned of this.#services.values()) {
       if (!owned.generation.active) continue;
       try {
-        const endpoint = owned.registration.service as Partial<ExtensionWireServiceEndpoint>;
+        const endpoint = runtimeWireServiceEndpoint(owned.registration.service);
         if (
-          endpoint.protocolVersion !== EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION
-          || typeof endpoint.name !== "string"
-          || typeof endpoint.version !== "number"
-          || !Number.isSafeInteger(endpoint.version)
-          || typeof endpoint.request !== "function"
+          endpoint === undefined
           || extensionWireServiceRegistryName({ name: endpoint.name, version: endpoint.version })
             !== owned.registration.name
         ) continue;
         const descriptor = describeExtensionWireServiceEndpoint(
-          endpoint as ExtensionWireServiceEndpoint,
+          endpoint,
           owned.entry.extensionId,
         );
         if (descriptors.length >= EXTENSION_WIRE_SERVICE_LIMITS.maxCatalogEntries) {
@@ -6173,12 +6199,12 @@ export class RuntimeExtensionHost {
     if (owned === undefined || !owned.generation.active) {
       throw new TypeError("Extension wire service is unavailable");
     }
-    const endpoint = owned.registration.service as Partial<ExtensionWireServiceEndpoint>;
+    const endpoint = runtimeWireServiceEndpoint(owned.registration.service);
     if (
-      endpoint.protocolVersion !== EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION
+      endpoint === undefined
+      || endpoint.protocolVersion !== EXTENSION_WIRE_SERVICE_PROTOCOL_VERSION
       || endpoint.name !== request.service
       || endpoint.version !== request.serviceVersion
-      || typeof endpoint.request !== "function"
     ) throw new TypeError("Extension wire service endpoint is incompatible");
     try {
       return validateExtensionWireServiceResponse(
@@ -7336,9 +7362,9 @@ export class RuntimeExtensionHost {
     await this.#dispatchEvent(event, value, signal, "native");
   }
 
-  async #dispatchEvent(
+  async #dispatchEvent<EventValue>(
     event: RuntimeExtensionEvent,
-    value: unknown,
+    value: EventValue,
     signal: AbortSignal | undefined,
     projection: "native" | "agent_session_public",
   ): Promise<void> {

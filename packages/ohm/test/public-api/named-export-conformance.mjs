@@ -38,6 +38,8 @@ const SEMANTIC_FUNCTIONS = new Set([
   "startServeServer",
 ]);
 
+const TYPE_ONLY_NAMESPACE_EXPORTS = new Set(["tui:Tokens"]);
+
 function packageSpecifier(entry) {
   return entry === "." ? "ohm" : `ohm/${entry}`;
 }
@@ -126,9 +128,34 @@ function checkDeclarations(inventory, manifest) {
         runtime.push(symbol.name);
         runtimeBindings += 1;
       } else {
-        const declaredType = checker.getDeclaredTypeOfSymbol(resolved);
-        assert.equal((declaredType.flags & TypeFlags.Any) === 0, true, `${entry}:${symbol.name} leaked any/error`);
-        assert.notEqual(checker.typeToString(declaredType).trim(), "", `${entry}:${symbol.name} has no declared type`);
+        if ((resolved.flags & SymbolFlags.Namespace) !== 0) {
+          const namespaceName = `${entry}:${symbol.name}`;
+          assert.equal(
+            TYPE_ONLY_NAMESPACE_EXPORTS.has(namespaceName),
+            true,
+            `${namespaceName} is not an approved type-only namespace`,
+          );
+          const members = checker.getExportsOfModule(resolved);
+          assert.ok(members.length > 0, `${namespaceName} has no namespace members`);
+          for (const member of members) {
+            assert.ok(member.declarations?.length, `${namespaceName}.${member.name} must have a declaration`);
+            const declaredType = checker.getDeclaredTypeOfSymbol(member);
+            assert.equal(
+              (declaredType.flags & TypeFlags.Any) === 0,
+              true,
+              `${namespaceName}.${member.name} leaked any/error`,
+            );
+            assert.notEqual(
+              checker.typeToString(declaredType).trim(),
+              "",
+              `${namespaceName}.${member.name} has no declared type`,
+            );
+          }
+        } else {
+          const declaredType = checker.getDeclaredTypeOfSymbol(resolved);
+          assert.equal((declaredType.flags & TypeFlags.Any) === 0, true, `${entry}:${symbol.name} leaked any/error`);
+          assert.notEqual(checker.typeToString(declaredType).trim(), "", `${entry}:${symbol.name} has no declared type`);
+        }
         typeOnly.push(symbol.name);
         typeOnlyBindings += 1;
       }

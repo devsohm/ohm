@@ -13,15 +13,17 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ImageContent } from "@ohm/models";
 import { boundedJsonSnapshot } from "@ohm/kernel/runtime/core/bounded-json";
+import { Check } from "typebox/value";
 import {
   SESSION_V4_MAX_RECORD_BYTES,
   SESSION_V4_VERSION,
   parseSessionV4Header,
 } from "@ohm/kernel/session-v4";
 
-import { errorMessage } from "../core/errors.js";
-import { isJsonValue, type JsonValue } from "../core/json.js";
+import { errorCode, errorMessage } from "../core/errors.js";
+import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
 import type { ThinkingLevel } from "../core/settings-manager.js";
+import { FUNCTION_VALUE, NUMBER_VALUE, STRING_VALUE, isObjectValue } from "../core/value-schemas.js";
 import { RpcClient, type RpcClientOptions } from "../interfaces/rpc-client.js";
 import type { RpcSessionState } from "../interfaces/rpc-protocol.js";
 import { assertCanonicalDirectoryCreationPath } from "../config/canonical-path.js";
@@ -154,7 +156,19 @@ export interface ExtensionChildSessionService {
   state(id: ExtensionJobId): Promise<RpcSessionState>;
 }
 
-interface StoredJob {
+type MutableExtensionJobStatus = {
+  -readonly [Key in keyof ExtensionJobStatus]: ExtensionJobStatus[Key];
+};
+
+type MutableExtensionChildSessionStatus = {
+  -readonly [Key in keyof ExtensionChildSessionStatus]: ExtensionChildSessionStatus[Key];
+};
+
+type MutableExtensionJobStartOptions = {
+  -readonly [Key in keyof ExtensionJobStartOptions]: ExtensionJobStartOptions[Key];
+};
+
+interface StoredJob extends JsonObject {
   id: string;
   owner: string;
   kind: string;
@@ -171,17 +185,17 @@ interface StoredJob {
   host?: StoredHostOwner;
 }
 
-interface StoredHostOwner {
+interface StoredHostOwner extends JsonObject {
   pid: number;
   token: string;
 }
 
-interface StoredPayload {
+interface StoredPayload extends JsonObject {
   version: 1;
   jobs: StoredJob[];
 }
 
-interface StoredEnvelope {
+interface StoredEnvelope extends JsonObject {
   checksum: string;
   payload: StoredPayload;
 }
@@ -227,7 +241,7 @@ interface DurableJobSupervisorOptions {
   readonly now?: () => number;
 }
 
-interface ChildSessionMetadata {
+interface ChildSessionMetadata extends JsonObject {
   readonly schemaVersion: 1;
   readonly cwd: string;
   readonly args: string[];
@@ -242,25 +256,25 @@ function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
-function boundedString(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== "string" || value === "" || value.includes("\0") || byteLength(value) > maximum) {
+function boundedString(value: JsonValue | undefined, label: string, maximum: number): string {
+  if (!Check(STRING_VALUE, value) || value === "" || value.includes("\0") || byteLength(value) > maximum) {
     throw new TypeError(`${label} must be non-empty, contain no NUL, and be at most ${maximum} bytes`);
   }
   return value;
 }
 
-function boundedOptionalString(value: unknown, label: string, maximum: number): string | undefined {
+function boundedOptionalString(value: JsonValue | undefined, label: string, maximum: number): string | undefined {
   return value === undefined ? undefined : boundedString(value, label, maximum);
 }
 
-function boundedInteger(value: unknown, label: string, maximum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+function boundedInteger(value: JsonValue | undefined, label: string, maximum: number): number {
+  if (!Check(NUMBER_VALUE, value) || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new RangeError(`${label} must be an integer from 1 through ${maximum}`);
   }
-  return value as number;
+  return value;
 }
 
-function boundedJson(value: unknown, label: string, maximum: number): JsonValue {
+function boundedJson(value: JsonValue, label: string, maximum: number): JsonValue {
   const snapshot = boundedJsonSnapshot(value, {
     label,
     maximumBytes: maximum,
@@ -273,8 +287,8 @@ function boundedJson(value: unknown, label: string, maximum: number): JsonValue 
   return cloned;
 }
 
-function boundedError(value: unknown): string {
-  const text = errorMessage(value) || "Durable job failed";
+function boundedError(cause: unknown): string {
+  const text = errorMessage(cause) || "Durable job failed";
   const bytes = Buffer.from(text, "utf8");
   if (bytes.byteLength <= MAX_ERROR_BYTES) return text;
   let end = MAX_ERROR_BYTES;
@@ -282,19 +296,19 @@ function boundedError(value: unknown): string {
   return bytes.subarray(0, end).toString("utf8");
 }
 
-function checksum(payload: unknown): string {
+function checksum(payload: JsonValue | undefined): string {
   const serialized = JSON.stringify(payload);
   if (serialized === undefined) throw new Error("Durable job store payload is not serializable");
   return createHash("sha256").update(serialized).digest("hex");
 }
 
-function ownProperty(record: object, key: string): unknown {
-  return Object.hasOwn(record, key) ? Reflect.get(record, key) : undefined;
+function ownProperty(record: Readonly<JsonObject>, key: string): JsonValue | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
-function validateStoredHost(value: unknown): StoredHostOwner | undefined {
+function validateStoredHost(value: JsonValue | undefined): StoredHostOwner | undefined {
   if (value === undefined) return undefined;
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (!isJsonObject(value)) {
     throw new Error("Durable job store contains an invalid host owner");
   }
   const pid = boundedInteger(ownProperty(value, "pid"), "Durable job host pid", Number.MAX_SAFE_INTEGER);
@@ -303,8 +317,8 @@ function validateStoredHost(value: unknown): StoredHostOwner | undefined {
   return { pid, token };
 }
 
-function validateStoredJob(value: unknown): StoredJob {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+function validateStoredJob(value: JsonValue): StoredJob {
+  if (!isJsonObject(value)) {
     throw new Error("Durable job store contains an invalid job record");
   }
   const id = boundedString(ownProperty(value, "id"), "Durable job id", MAX_ID_BYTES);
@@ -325,11 +339,11 @@ function validateStoredJob(value: unknown): StoredJob {
   const label = boundedOptionalString(ownProperty(value, "label"), "Durable job label", MAX_LABEL_BYTES);
   const metadataValue = ownProperty(value, "metadata");
   const resultValue = ownProperty(value, "result");
-  const metadata = metadataValue === undefined ? undefined : boundedJson(metadataValue as JsonValue, "Durable job metadata", MAX_METADATA_BYTES);
-  const result = resultValue === undefined ? undefined : boundedJson(resultValue as JsonValue, "Durable job result", MAX_RESULT_BYTES);
+  const metadata = metadataValue === undefined ? undefined : boundedJson(metadataValue, "Durable job metadata", MAX_METADATA_BYTES);
+  const result = resultValue === undefined ? undefined : boundedJson(resultValue, "Durable job result", MAX_RESULT_BYTES);
   const storedError = boundedOptionalString(ownProperty(value, "error"), "Durable job error", MAX_ERROR_BYTES);
   const host = validateStoredHost(ownProperty(value, "host"));
-  return {
+  const job: StoredJob = {
     id,
     owner,
     kind,
@@ -338,17 +352,18 @@ function validateStoredJob(value: unknown): StoredJob {
     updatedAt,
     attempt,
     timeoutMs,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-    ...(label === undefined ? {} : { label }),
-    ...(metadata === undefined ? {} : { metadata }),
-    ...(result === undefined ? {} : { result }),
-    ...(storedError === undefined ? {} : { error: storedError }),
-    ...(host === undefined ? {} : { host }),
   };
+  if (idempotencyKey !== undefined) job.idempotencyKey = idempotencyKey;
+  if (label !== undefined) job.label = label;
+  if (metadata !== undefined) job.metadata = metadata;
+  if (result !== undefined) job.result = result;
+  if (storedError !== undefined) job.error = storedError;
+  if (host !== undefined) job.host = host;
+  return job;
 }
 
-function validatePayload(value: unknown): StoredPayload {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+function validatePayload(value: JsonValue): StoredPayload {
+  if (!isJsonObject(value)) {
     throw new Error("Durable job store payload is invalid");
   }
   if (ownProperty(value, "version") !== STORE_VERSION) throw new Error("Durable job store version is unsupported");
@@ -363,21 +378,22 @@ function validatePayload(value: unknown): StoredPayload {
   return { version: STORE_VERSION, jobs };
 }
 
-function validateEnvelope(value: unknown): StoredPayload {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+function validateEnvelope(value: JsonValue): StoredPayload {
+  if (!isJsonObject(value)) {
     throw new Error("Durable job store envelope is invalid");
   }
   const expected = ownProperty(value, "checksum");
-  if (typeof expected !== "string" || !/^[a-f0-9]{64}$/u.test(expected)) {
+  if (!Check(STRING_VALUE, expected) || !/^[a-f0-9]{64}$/u.test(expected)) {
     throw new Error("Durable job store checksum is invalid");
   }
   const storedPayload = ownProperty(value, "payload");
   if (checksum(storedPayload) !== expected) throw new Error("Durable job store checksum does not match its payload");
+  if (storedPayload === undefined) throw new Error("Durable job store payload is missing");
   return validatePayload(storedPayload);
 }
 
 function publicStatus(job: StoredJob): ExtensionJobStatus {
-  return Object.freeze({
+  const status: MutableExtensionJobStatus = {
     id: job.id,
     kind: job.kind,
     state: job.state,
@@ -385,12 +401,13 @@ function publicStatus(job: StoredJob): ExtensionJobStatus {
     updatedAt: job.updatedAt,
     attempt: job.attempt,
     timeoutMs: job.timeoutMs,
-    ...(job.idempotencyKey === undefined ? {} : { idempotencyKey: job.idempotencyKey }),
-    ...(job.label === undefined ? {} : { label: job.label }),
-    ...(job.metadata === undefined ? {} : { metadata: boundedJson(job.metadata, "Durable job metadata", MAX_METADATA_BYTES) }),
-    ...(job.result === undefined ? {} : { result: boundedJson(job.result, "Durable job result", MAX_RESULT_BYTES) }),
-    ...(job.error === undefined ? {} : { error: job.error }),
-  });
+  };
+  if (job.idempotencyKey !== undefined) status.idempotencyKey = job.idempotencyKey;
+  if (job.label !== undefined) status.label = job.label;
+  if (job.metadata !== undefined) status.metadata = boundedJson(job.metadata, "Durable job metadata", MAX_METADATA_BYTES);
+  if (job.result !== undefined) status.result = boundedJson(job.result, "Durable job result", MAX_RESULT_BYTES);
+  if (job.error !== undefined) status.error = job.error;
+  return Object.freeze(status);
 }
 
 function pathInside(root: string, target: string): boolean {
@@ -403,8 +420,7 @@ function processIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (cause) {
-    const code = cause !== null && typeof cause === "object" && "code" in cause ? cause.code : undefined;
-    return code !== "ESRCH";
+    return errorCode(cause) !== "ESRCH";
   }
 }
 
@@ -451,7 +467,7 @@ async function syncDirectory(path: string): Promise<void> {
     descriptor = await open(path, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
     await descriptor.sync();
   } catch (cause) {
-    const code = cause !== null && typeof cause === "object" && "code" in cause ? cause.code : undefined;
+    const code = errorCode(cause);
     if (process.platform !== "win32" || !["EISDIR", "EINVAL", "EPERM"].includes(String(code))) throw cause;
   } finally {
     await descriptor?.close();
@@ -485,7 +501,7 @@ class DurableJobStore {
     try {
       information = await lstat(this.#path);
     } catch (cause) {
-      const code = cause !== null && typeof cause === "object" && "code" in cause ? cause.code : undefined;
+      const code = errorCode(cause);
       if (code === "ENOENT") return { version: STORE_VERSION, jobs: [] };
       throw cause;
     }
@@ -503,6 +519,7 @@ class DurableJobStore {
       } catch (cause) {
         throw new Error("Durable job store contains invalid JSON", { cause });
       }
+      if (!isJsonValue(parsed)) throw new Error("Durable job store must contain JSON data");
       return validateEnvelope(parsed);
     } finally {
       await descriptor.close();
@@ -529,8 +546,16 @@ class DurableJobStore {
   }
 }
 
-function validateStartOptions(input: ExtensionJobStartOptions, reserved = false): Required<Pick<ExtensionJobStartOptions, "kind">> & Omit<ExtensionJobStartOptions, "kind"> & { timeoutMs: number } {
-  if (input === null || typeof input !== "object") throw new TypeError("Durable job options are required");
+interface ValidatedStartOptions {
+  kind: string;
+  timeoutMs: number;
+  idempotencyKey?: string;
+  label?: string;
+  metadata?: JsonValue;
+}
+
+function validateStartOptions(input: ExtensionJobStartOptions, reserved = false): ValidatedStartOptions {
+  if (!isObjectValue(input)) throw new TypeError("Durable job options are required");
   const kind = boundedString(input.kind, "Durable job kind", MAX_KIND_BYTES);
   if (!JOB_KIND.test(kind)) throw new Error("Durable job kind is invalid");
   if (!reserved && kind.startsWith("ohm.")) throw new Error("Durable job kinds beginning with ohm. are reserved by the host");
@@ -540,22 +565,29 @@ function validateStartOptions(input: ExtensionJobStartOptions, reserved = false)
   const timeoutMs = input.timeoutMs === undefined
     ? DEFAULT_JOB_TIMEOUT_MS
     : boundedInteger(input.timeoutMs, "Durable job timeoutMs", MAX_JOB_TIMEOUT_MS);
-  return {
-    kind,
-    timeoutMs,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-    ...(label === undefined ? {} : { label }),
-    ...(metadata === undefined ? {} : { metadata }),
-  };
+  const options: ValidatedStartOptions = { kind, timeoutMs };
+  if (idempotencyKey !== undefined) options.idempotencyKey = idempotencyKey;
+  if (label !== undefined) options.label = label;
+  if (metadata !== undefined) options.metadata = metadata;
+  return options;
 }
 
-function validateListOptions(options: ExtensionJobListOptions): Required<Pick<ExtensionJobListOptions, "limit">> & Omit<ExtensionJobListOptions, "limit"> {
+interface ValidatedListOptions {
+  limit: number;
+  state?: ExtensionJobState;
+  kind?: string;
+}
+
+function validateListOptions(options: ExtensionJobListOptions): ValidatedListOptions {
   const limit = options.limit === undefined ? MAX_LIST_LIMIT : boundedInteger(options.limit, "Durable job list limit", MAX_LIST_LIMIT);
   if (options.state !== undefined && !ACTIVE_STATES.has(options.state) && !PRUNABLE_STATES.has(options.state) && options.state !== "interrupted") {
     throw new Error("Durable job list state is invalid");
   }
   const kind = options.kind === undefined ? undefined : boundedString(options.kind, "Durable job list kind", MAX_KIND_BYTES);
-  return { limit, ...(options.state === undefined ? {} : { state: options.state }), ...(kind === undefined ? {} : { kind }) };
+  const selected: ValidatedListOptions = { limit };
+  if (options.state !== undefined) selected.state = options.state;
+  if (kind !== undefined) selected.kind = kind;
+  return selected;
 }
 
 function activeCount(jobs: readonly StoredJob[]): number {
@@ -760,7 +792,7 @@ export class DurableJobSupervisor {
     reserved: boolean,
   ): Promise<StartResult> {
     this.#assertOwner(owner, true);
-    if (typeof operation !== "function") throw new TypeError("Durable job operation must be a function");
+    if (!Check(FUNCTION_VALUE, operation)) throw new TypeError("Durable job operation must be a function");
     const options = validateStartOptions(input, reserved);
     const store = this.#store(owner);
     const ownerId = storedOwner(owner);
@@ -782,7 +814,7 @@ export class DurableJobSupervisor {
         }
         pruneForInsert(jobs);
         const now = this.#now();
-        created = {
+        const job: StoredJob = {
           id: randomUUID(),
           owner: ownerId,
           kind: options.kind,
@@ -791,14 +823,15 @@ export class DurableJobSupervisor {
           updatedAt: now,
           attempt: 1,
           timeoutMs: options.timeoutMs,
-          ...(options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey }),
-          ...(options.label === undefined ? {} : { label: options.label }),
-          ...(options.metadata === undefined ? {} : { metadata: options.metadata }),
           host: this.#hostOwner(),
         };
-        this.#launching.add(created.id);
-        jobs.push(created);
-        protectedIds.add(created.id);
+        if (options.idempotencyKey !== undefined) job.idempotencyKey = options.idempotencyKey;
+        if (options.label !== undefined) job.label = options.label;
+        if (options.metadata !== undefined) job.metadata = options.metadata;
+        created = job;
+        this.#launching.add(job.id);
+        jobs.push(job);
+        protectedIds.add(job.id);
       }, protectedIds);
     } catch (cause) {
       if (created !== undefined) this.#launching.delete(created.id);
@@ -820,7 +853,7 @@ export class DurableJobSupervisor {
     reservedKind?: "ohm.child-session",
   ): Promise<StartResult> {
     this.#assertOwner(owner, true);
-    if (typeof operation !== "function") throw new TypeError("Durable job operation must be a function");
+    if (!Check(FUNCTION_VALUE, operation)) throw new TypeError("Durable job operation must be a function");
     const store = this.#store(owner);
     const ownerId = storedOwner(owner);
     let selected: StoredJob | undefined;
@@ -1091,13 +1124,19 @@ export class DurableJobSupervisor {
       readyReject = rejectValue;
     });
     void ready.catch(() => undefined);
-    const launched = await this.#start(owner, {
+    const options: MutableExtensionJobStartOptions = {
       kind: "ohm.child-session",
-      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
-      ...(input.label === undefined ? {} : { label: input.label }),
-      metadata: metadata as unknown as JsonValue,
-      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-    }, async (context) => await this.#runChild(owner, context, metadata, readyResolve, readyReject), true);
+      metadata,
+    };
+    if (input.idempotencyKey !== undefined) options.idempotencyKey = input.idempotencyKey;
+    if (input.label !== undefined) options.label = input.label;
+    if (input.timeoutMs !== undefined) options.timeoutMs = input.timeoutMs;
+    const launched = await this.#start(
+      owner,
+      options,
+      async (context) => await this.#runChild(owner, context, metadata, readyResolve, readyReject),
+      true,
+    );
     if (launched.created) {
       await ready;
       return this.#childStatus(await this.#inspect(owner, launched.status.id));
@@ -1177,7 +1216,7 @@ export class DurableJobSupervisor {
   }
 
   async #newChildMetadata(owner: DurableJobOwner, input: ExtensionChildSessionStartOptions): Promise<ChildSessionMetadata> {
-    if (input === null || typeof input !== "object") throw new TypeError("Child session options must be an object");
+    if (!isObjectValue(input)) throw new TypeError("Child session options must be an object");
     const workspace = await canonicalDirectory(owner.workspace, "Child session workspace");
     const requestedCwd = input.cwd === undefined ? workspace : resolve(workspace, input.cwd);
     const cwd = await canonicalDirectory(requestedCwd, "Child session cwd");
@@ -1270,7 +1309,7 @@ export class DurableJobSupervisor {
   }
 
   async #validatedChildMetadata(owner: DurableJobOwner, value: JsonValue | undefined, requireSession: boolean): Promise<ChildSessionMetadata> {
-    if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) {
+    if (!isJsonObject(value)) {
       throw new Error("Child session metadata is missing");
     }
     if (ownProperty(value, "schemaVersion") !== STORE_VERSION) throw new Error("Child session metadata version is unsupported");
@@ -1286,21 +1325,23 @@ export class DurableJobSupervisor {
     const args = argsValue.map((argument) => boundedString(argument, "Child session argument", MAX_TEXT_BYTES));
     const sessionId = boundedOptionalString(ownProperty(value, "sessionId"), "Child session id", MAX_ID_BYTES);
     const rawSessionFile = boundedOptionalString(ownProperty(value, "sessionFile"), "Child session file", 16 * 1024);
-    if (rawSessionFile !== undefined && sessionId === undefined) throw new Error("Child session file has no matching session id");
-    const sessionFile = rawSessionFile === undefined
-      ? undefined
-      : await this.#canonicalSessionFile(sessionDirectory, rawSessionFile, sessionId!);
+    let sessionFile: string | undefined;
+    if (rawSessionFile !== undefined) {
+      if (sessionId === undefined) throw new Error("Child session file has no matching session id");
+      sessionFile = await this.#canonicalSessionFile(sessionDirectory, rawSessionFile, sessionId);
+    }
     if (requireSession && (sessionId === undefined || sessionFile === undefined)) {
       throw new Error("Interrupted child session has no persistent session identity to reattach");
     }
-    return {
+    const metadata = {
       schemaVersion: STORE_VERSION,
       cwd,
       args,
       sessionDirectory,
-      ...(sessionId === undefined ? {} : { sessionId }),
-      ...(sessionFile === undefined ? {} : { sessionFile }),
-    };
+    } satisfies ChildSessionMetadata;
+    if (sessionId === undefined) return metadata;
+    if (sessionFile === undefined) return { ...metadata, sessionId };
+    return { ...metadata, sessionId, sessionFile };
   }
 
   #childStatus(status: ExtensionJobStatus): ExtensionChildSessionStatus {
@@ -1308,18 +1349,19 @@ export class DurableJobSupervisor {
     let sessionId: string | undefined;
     let sessionFile: string | undefined;
     const metadata = status.metadata;
-    if (metadata !== undefined && metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)) {
+    if (isJsonObject(metadata)) {
       const storedId = ownProperty(metadata, "sessionId");
       const storedFile = ownProperty(metadata, "sessionFile");
-      if (typeof storedId === "string") sessionId = storedId;
-      if (typeof storedFile === "string") sessionFile = storedFile;
+      if (Check(STRING_VALUE, storedId)) sessionId = storedId;
+      if (Check(STRING_VALUE, storedFile)) sessionFile = storedFile;
     }
-    return Object.freeze({
+    const childStatus: MutableExtensionChildSessionStatus = {
       ...status,
       kind: "ohm.child-session",
-      ...(sessionId === undefined ? {} : { sessionId }),
-      ...(sessionFile === undefined ? {} : { sessionFile }),
-    });
+    };
+    if (sessionId !== undefined) childStatus.sessionId = sessionId;
+    if (sessionFile !== undefined) childStatus.sessionFile = sessionFile;
+    return Object.freeze(childStatus);
   }
 
   async #child(owner: DurableJobOwner, id: string): Promise<RpcClientLike> {

@@ -8804,7 +8804,7 @@ test("native detail prewarming yields until after paint and cancels across resiz
   context.after(() => controller.close());
   controller.start();
   let sequence = 0;
-  const renderCompleted = (callId: string, payload: string, index: number): { payload: string } => {
+  const renderCompleted = (callId: string, payload: string, index: number) => {
     const input = { payload };
     controller.render(envelope({
       type: "tool_requested",

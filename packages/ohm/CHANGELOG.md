@@ -13,6 +13,10 @@
   rich-TUI roles, with typed bounded wire services and named replicated JSON
   state. Portable presentations expose retained snapshots and validated actions
   across supported host adapters.
+- Expanded the public terminal authoring surface with safe math rendering and
+  parser access, richer scroll/list/settings controls, stable image identity,
+  terminal-sequence helpers, capability overrides, and main-screen renderer
+  handoff without introducing a second extension system.
 
 ### Fixed
 
@@ -22,6 +26,9 @@
 - Reduced rich-TUI stalls during tool updates and `Ctrl+O` expansion with
   bounded renderer and transcript caches plus idle detail prewarming. Cache-hit
   status now omits compaction activity instead of presenting a misleading rate.
+- Hardened durable jobs, child sessions, replicated state, portable
+  presentations, wire services, and their malformed-input tests with explicit
+  boundary contracts while preserving their public protocols and limits.
 
 ## [0.1.0] - 2026-08-31
 

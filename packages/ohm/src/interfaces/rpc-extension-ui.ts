@@ -1,5 +1,6 @@
 import { optionalProperties } from "../core/optional-properties.js";
 import { randomUUID } from "node:crypto";
+import { isNativeError } from "node:util/types";
 
 import {
   RPC_EXTENSION_UI_CAPABILITIES,
@@ -9,7 +10,7 @@ import {
 import { UNAVAILABLE_EXTENSION_UI_SLOTS } from "../extensions/runtime-internal/ui-slot-registrations.js";
 import { UNAVAILABLE_EXTENSION_UI_ROUTES } from "../extensions/runtime-internal/ui-route-registrations.js";
 import { createTheme } from "../tui/theme.js";
-import { boundedRpcExtensionId } from "./rpc-error.js";
+import { boundedRpcErrorMessage, boundedRpcExtensionId } from "./rpc-error.js";
 import type { RpcExtensionUiRequest, RpcExtensionUiResponse } from "./rpc-protocol.js";
 import { MAX_RPC_LINE_BYTES } from "./rpc.js";
 
@@ -47,7 +48,7 @@ interface RpcQueuedUiRequest {
   readonly coalescingKey: string | undefined;
   readonly completion: {
     resolve(): void;
-    reject(error: unknown): void;
+    reject(error: Error): void;
   } | undefined;
 }
 
@@ -65,6 +66,10 @@ const MAX_QUEUED_RPC_EXTENSION_UI_BYTES = MAX_RPC_LINE_BYTES;
 const MAX_QUEUED_RPC_EXTENSION_UI_RECORDS = MAX_QUEUED_RPC_EXTENSION_UI_PRESENTATIONS
   + MAX_PENDING_RPC_EXTENSION_UI_DIALOGS
   + MAX_RETAINED_RPC_EXTENSION_UI_OWNERS;
+
+function errorFromThrown<ErrorType>(error: ErrorType): Error {
+  return isNativeError(error) ? error : new Error(boundedRpcErrorMessage(error));
+}
 
 function serializedRequestBytes(request: RpcExtensionUiRequest): number {
   return Buffer.byteLength(JSON.stringify(request), "utf8");
@@ -269,7 +274,7 @@ export class RpcExtensionUiBridge {
       } catch (error) {
         this.#emitting = false;
         this.#outputBytes[queued.lane] -= queued.bytes;
-        queued.completion?.reject(error);
+        queued.completion?.reject(errorFromThrown(error));
         continue;
       }
       if (result === undefined) {
@@ -280,7 +285,7 @@ export class RpcExtensionUiBridge {
       }
       void Promise.resolve(result).then(
         () => queued.completion?.resolve(),
-        (error: unknown) => queued.completion?.reject(error),
+        (error) => queued.completion?.reject(errorFromThrown(error)),
       ).finally(() => {
         this.#emitting = false;
         this.#outputBytes[queued.lane] -= queued.bytes;

@@ -21,6 +21,7 @@ import {
   extensionModelRegistry,
   type ExtensionModelCompletion,
   type ExtensionModelRegistry,
+  type ExtensionProviderConfig,
 } from "./model-boundary.js";
 import {
   canonicalAgentMessages,
@@ -736,27 +737,81 @@ export class ExtensionRunner {
   }
 
   #contextModelRegistry(callbackSignal: AbortSignal | undefined): ExtensionModelRegistry {
-    const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
     const complete: ExtensionModelCompletion = (model, context, options) => {
       this.#assertActive();
       const signal = this.#modelCompletionSignal(callbackSignal, options?.signal);
       signal.throwIfAborted();
       return this.#completeModel(model, context, { ...options, signal });
     };
-    return new Proxy(this.#publicModelRegistry, {
-      get: (target, property) => {
+    const target = this.#publicModelRegistry;
+    const active = <Result>(operation: () => Result): Result => {
+      this.#assertActive();
+      return operation();
+    };
+    const registerProvider = (providerOrName: Provider | string, config?: ExtensionProviderConfig): void => {
+      active(() => {
+        if (Value.Check(STRING_VALUE, providerOrName)) {
+          if (config === undefined) {
+            throw new Error("A provider object is required when registration uses a string name");
+          }
+          target.registerProvider(providerOrName, config);
+        } else {
+          target.registerProvider(providerOrName);
+        }
+      });
+    };
+    const methods = {
+      complete,
+      find: (provider: string, modelId: string) => active(() => target.find(provider, modelId)),
+      getAll: () => active(() => target.getAll()),
+      getApiKeyAndHeaders: (model: Model<Api>) => active(() => target.getApiKeyAndHeaders(model)),
+      getApiKeyForProvider: (provider: string) => active(() => target.getApiKeyForProvider(provider)),
+      getAvailable: () => active(() => target.getAvailable()),
+      getError: () => active(() => target.getError()),
+      getProvider: (provider: string) => active(() => target.getProvider(provider)),
+      getProviderAuth: (provider: string) => active(() => target.getProviderAuth(provider)),
+      getProviderAuthStatus: (provider: string) => active(() => target.getProviderAuthStatus(provider)),
+      getProviderDisplayName: (provider: string) => active(() => target.getProviderDisplayName(provider)),
+      getRegisteredNativeProvider: (provider: string) => active(() => target.getRegisteredNativeProvider(provider)),
+      getRegisteredProviderConfig: (provider: string) => active(() => target.getRegisteredProviderConfig(provider)),
+      getRegisteredProviderIds: () => active(() => target.getRegisteredProviderIds()),
+      hasConfiguredAuth: (model: Model<Api>) => active(() => target.hasConfiguredAuth(model)),
+      isSubscription: (model: Model<Api>) => active(() => target.isSubscription(model)),
+      isUsingOAuth: (model: Model<Api>) => active(() => target.isUsingOAuth(model)),
+      present: (model: Parameters<ExtensionModelRegistry["present"]>[0]) => active(() => target.present(model)),
+      refresh: () => active(() => target.refresh()),
+      registerProvider,
+      resolve: (model: Model<Api>) => active(() => target.resolve(model)),
+      unregisterProvider: (provider: string) => active(() => target.unregisterProvider(provider)),
+    };
+    return new Proxy(target, {
+      get: (_target, property) => {
         this.#assertActive();
-        if (property === "complete") return complete;
-        const selected: unknown = Reflect.get(target, property, target);
-        if (typeof selected !== "function") return selected;
-        const existing = methods.get(property);
-        if (existing !== undefined) return existing;
-        const method = (...args: unknown[]): unknown => {
-          this.#assertActive();
-          return Reflect.apply(selected, target, args);
-        };
-        methods.set(property, method);
-        return method;
+        switch (property) {
+          case "complete": return methods.complete;
+          case "find": return methods.find;
+          case "getAll": return methods.getAll;
+          case "getApiKeyAndHeaders": return methods.getApiKeyAndHeaders;
+          case "getApiKeyForProvider": return methods.getApiKeyForProvider;
+          case "getAvailable": return methods.getAvailable;
+          case "getError": return methods.getError;
+          case "getProvider": return methods.getProvider;
+          case "getProviderAuth": return methods.getProviderAuth;
+          case "getProviderAuthStatus": return methods.getProviderAuthStatus;
+          case "getProviderDisplayName": return methods.getProviderDisplayName;
+          case "getRegisteredNativeProvider": return methods.getRegisteredNativeProvider;
+          case "getRegisteredProviderConfig": return methods.getRegisteredProviderConfig;
+          case "getRegisteredProviderIds": return methods.getRegisteredProviderIds;
+          case "hasConfiguredAuth": return methods.hasConfiguredAuth;
+          case "isSubscription": return methods.isSubscription;
+          case "isUsingOAuth": return methods.isUsingOAuth;
+          case "present": return methods.present;
+          case "refresh": return methods.refresh;
+          case "registerProvider": return methods.registerProvider;
+          case "resolve": return methods.resolve;
+          case "unregisterProvider": return methods.unregisterProvider;
+          default: return undefined;
+        }
       },
     });
   }

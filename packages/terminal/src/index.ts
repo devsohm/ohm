@@ -12,12 +12,22 @@ export { HStack } from "./components/h-stack.js";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.js";
 export { Input } from "./components/input.js";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.js";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.js";
+export {
+  type DefaultTextStyle,
+  Marked,
+  Markdown,
+  type MarkdownOptions,
+  type MarkdownTheme,
+  type Token,
+  type Tokens,
+} from "./components/markdown.js";
+export { renderLatex, type RenderLatexOptions } from "./latex.js";
 export {
   ScrollView,
   type ScrollbarVisibility,
   type ScrollViewOptions,
   type ScrollViewScrollbar,
+  type ScrollViewScrollToOptions,
 } from "./components/scroll-view.js";
 export {
   type SelectItem,
@@ -113,7 +123,7 @@ export {
   encodeITerm2, encodeKitty, getCapabilities, getCellDimensions,
   getGifDimensions, getImageDimensions, getJpegDimensions, getPngDimensions,
   getWebpDimensions, hyperlink, imageFallback, isImageLine, renderImage,
-  resetCapabilitiesCache, setCapabilities, setCellDimensions,
+  resetCapabilitiesCache, setCapabilities, setCapabilityOverrides, setCellDimensions,
 } from "./terminal-image.js";
 export type {
   CellDimensions, ImageCellSize, ImageDimensions, ImageProtocol,
@@ -125,10 +135,18 @@ export {
 export type {
   BackgroundCell, BackgroundComponent, Component, Focusable, OverlayAnchor,
   OverlayHandle, OverlayMargin, OverlayOptions, OverlayUnfocusOptions, SizeValue,
-  TuiInputListener, TuiInputListenerResult, TuiMode,
+  TuiInputListener, TuiInputListenerResult, TuiMainScreenRenderState, TuiMode, TuiStopOptions,
   ViewportTUI,
 } from "./tui.js";
-export { normalizeTerminalOutput, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
+export {
+  getOsc8LinkAtColumn,
+  normalizeTerminalOutput,
+  sliceByColumn,
+  stripTerminalSequences,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "./utils.js";
 export {
   cancelViewportPointer,
   dispatchViewportPointer,

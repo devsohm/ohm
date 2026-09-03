@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Type } from "typebox";
 
+import { isJsonValue } from "../../src/core/json.js";
 import type { ExtensionAPI } from "../../src/extensions/direct.js";
 import type { ExtensionContext } from "../../src/extensions/capabilities/host.js";
 import {
@@ -12,6 +13,7 @@ import {
   MAX_EXTENSION_FACETS,
   extensionFacetApplies,
   extensionFacetStateServiceName,
+  validateExtensionFacetDefinition,
   type ExtensionFacetRegistration,
   type ExtensionFacetSharedState,
   type ExtensionPortablePresentationRegistration,
@@ -29,7 +31,10 @@ import {
   extensionWireServiceRequest,
   type ExtensionWireServiceEndpoint,
 } from "../../src/extensions/wire-services.js";
-import { loadDirectExtensions } from "../../src/extensions/runtime.js";
+import {
+  FULL_TUI_EXTENSION_UI_CAPABILITIES,
+  loadDirectExtensions,
+} from "../../src/extensions/runtime.js";
 import {
   PORTABLE_PRESENTATION_LIMITS,
   PORTABLE_PRESENTATION_PROTOCOL_VERSION,
@@ -47,6 +52,16 @@ const SERVICE = defineExtensionWireService({
   requestSchema: Type.Object({ ping: Type.String() }, { additionalProperties: false }),
   responseSchema: Type.Object({ pong: Type.String() }, { additionalProperties: false }),
 });
+
+interface PresentationSupport {
+  extension?: ExtensionAPI;
+  session?: ExtensionContext;
+}
+
+interface FailedFacetResources {
+  state?: ReplicatedJsonState;
+  sharedState?: ExtensionFacetSharedState;
+}
 
 async function temporaryWorkspace(context: test.TestContext): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "ohm-facets-"));
@@ -300,12 +315,14 @@ test("named-state wire transport carries a locally valid maximum-sized delta", a
   };
   assert.ok(Buffer.byteLength(JSON.stringify(delta), "utf8") <= REPLICATED_JSON_STATE_LIMITS.maxDeltaBytes);
   assert.ok(Buffer.byteLength(JSON.stringify({ operation: "apply", delta }), "utf8") > 256 * 1024);
+  const payload = { operation: "apply" as const, delta };
+  if (!isJsonValue(payload)) throw new TypeError("Replicated state fixture must be JSON");
   const response = await host.invokeExtensionWireService({
     protocolVersion: 1,
     service: descriptor.name,
     serviceVersion: descriptor.version,
     id: "edge-state-apply",
-    payload: { operation: "apply", delta } as never,
+    payload,
   });
   assert.equal(response.ok, true);
 });
@@ -318,9 +335,37 @@ test("facet validation keeps rich terminal code host-only and reserves future we
   assert.equal(extensionFacetApplies("rich-tui", "rpc", { components: true }), false);
   assert.equal(extensionFacetApplies("web", "serve", { components: false }), false);
   assert.equal(extensionFacetApplies("desktop", "sdk", { components: false }), false);
+
+  const arrayDefinition = Object.assign([], {
+    apiVersion: EXTENSION_FACET_API_VERSION,
+    kind: "worker" as const,
+    name: "array_definition",
+    setup() {},
+  });
+  assert.throws(
+    () => validateExtensionFacetDefinition(arrayDefinition),
+    /must be an object/u,
+  );
 });
 
-test("worker presentations replay across TUI hosts and cross-facet removal clears rich projection", async () => {
+test("worker presentations replay across TUI hosts and cross-facet removal clears rich projection", async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  const support: PresentationSupport = {};
+  const supportHost = await loadDirectExtensions([], {
+    workspace,
+    mode: "tui",
+    activationFailure: "throw",
+    inlineExtensions: [(extension) => {
+      support.extension = extension;
+      extension.on("session_start", (_event, session) => { support.session = session; });
+    }],
+  });
+  context.after(async () => await supportHost.close());
+  await supportHost.dispatch("session_start", { reason: "startup", threadId: "facet-presentation" });
+  assert.ok(support.extension !== undefined);
+  assert.ok(support.session !== undefined);
+  const extension = support.extension;
+  const sessionTemplate = support.session;
   const lifecycle = new AbortController();
   const sessionStarts: Array<(context: ExtensionContext) => void | Promise<void>> = [];
   const sessionShutdowns: Array<() => void | Promise<void>> = [];
@@ -331,7 +376,7 @@ test("worker presentations replay across TUI hosts and cross-facet removal clear
     owner: "fixture.extension",
     signal: lifecycle.signal,
     committed: () => false,
-    extension: () => ({} as ExtensionAPI),
+    extension: () => extension,
     onSessionStart(handler) {
       sessionStarts.push(handler);
       return () => {
@@ -391,29 +436,34 @@ test("worker presentations replay across TUI hosts and cross-facet removal clear
     setup(facet) { facet.presentation.remove("worker"); },
   });
   await coordinator.activateWorkers();
-  const context = (components: boolean): ExtensionContext => ({
+  const sessionContext = (components: boolean): ExtensionContext => Object.freeze({
+    ...sessionTemplate,
     mode: "tui",
-    ui: {
+    ui: Object.freeze({
+      ...sessionTemplate.ui,
       capabilities: {
+        ...FULL_TUI_EXTENSION_UI_CAPABILITIES,
         components,
-        notifications: true,
         textWidgets: components,
       },
-      setWidget(name: string, lines: readonly string[] | undefined) { widgets.set(name, lines); },
+      setWidget(...parameters: Parameters<ExtensionContext["ui"]["setWidget"]>) {
+        const [name, content] = parameters;
+        if (content === undefined || Array.isArray(content)) widgets.set(name, content);
+      },
       notify(message: string) { notifications.push(message); },
-    },
-  }) as unknown as ExtensionContext;
+    }),
+  });
 
-  await sessionStarts[0]!(context(true));
-  await sessionStarts[1]!(context(true));
+  await sessionStarts[0]!(sessionContext(true));
+  await sessionStarts[1]!(sessionContext(true));
   assert.deepEqual(widgets.get("facet:presentation:worker"), ["Worker"]);
   assert.deepEqual(widgets.get("facet:presentation:persistent"), ["Persistent"]);
-  await sessionStarts[2]!(context(true));
+  await sessionStarts[2]!(sessionContext(true));
   assert.equal(removedView?.disposed, true);
   assert.equal(widgets.get("facet:presentation:worker"), undefined);
 
   for (const shutdown of Array.from(sessionShutdowns)) await shutdown();
-  for (const start of Array.from(sessionStarts)) await start(context(false));
+  for (const start of Array.from(sessionStarts)) await start(sessionContext(false));
   assert.deepEqual(notifications, ["Persistent"]);
   await coordinator.close();
 });
@@ -428,23 +478,20 @@ test("failed facet setup cleans generation-owned state and services, and registr
   });
   context.after(async () => await host.close());
   assert.ok(api !== undefined);
-  let failedState: ReplicatedJsonState | undefined;
-  let failedSharedState: ExtensionFacetSharedState | undefined;
+  const failed: FailedFacetResources = {};
   await assert.rejects(api.facets.register({
     apiVersion: EXTENSION_FACET_API_VERSION,
     kind: "worker",
     name: "fails",
     setup(facet) {
-      failedState = facet.createState({ transient: true });
-      failedSharedState = facet.states.open("transient", { transient: true });
+      failed.state = facet.createState({ transient: true });
+      failed.sharedState = facet.states.open("transient", { transient: true });
       facet.services.provide(SERVICE, () => ({ pong: "unreachable" }));
       throw new Error("setup failed");
     },
   }), /setup failed/u);
-  const closedFailedState = failedState as ReplicatedJsonState | undefined;
-  const closedFailedSharedState = failedSharedState as ExtensionFacetSharedState | undefined;
-  assert.equal(closedFailedState?.closed, true);
-  assert.equal(closedFailedSharedState?.closed, true);
+  assert.equal(failed.state?.closed, true);
+  assert.equal(failed.sharedState?.closed, true);
   assert.equal(api.services.get(extensionWireServiceRegistryName(SERVICE)), undefined);
   assert.equal(host.extensionWireServices().some((service) => service.name.endsWith(".transient")), false);
 

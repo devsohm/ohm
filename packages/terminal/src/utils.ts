@@ -13,23 +13,57 @@ export function isWhitespaceChar(value: string): boolean {
 }
 
 export function extractAnsiCode(value: string, offset: number): { code: string; length: number } | null {
-  if (value.charCodeAt(offset) !== 0x1b) return null;
+  const first = value.charCodeAt(offset);
+  if (first === 0x07) return { code: value[offset]!, length: 1 };
+  if (first === 0x9b) {
+    for (let i = offset + 1; i < value.length; i += 1) {
+      const byte = value.charCodeAt(i);
+      if (byte >= 0x40 && byte <= 0x7e) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
+    }
+    return { code: value.slice(offset), length: value.length - offset };
+  }
+  if (first >= 0x80 && first <= 0x9f) {
+    if (![0x90, 0x98, 0x9d, 0x9e, 0x9f].includes(first)) return { code: value[offset]!, length: 1 };
+    const allowBell = first === 0x9d || first === 0x9f;
+    for (let i = offset + 1; i < value.length; i += 1) {
+      if (allowBell && value.charCodeAt(i) === 0x07) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
+      if (value.charCodeAt(i) === 0x9c) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
+      if (value[i] === "\x1b" && value[i + 1] === "\\") return { code: value.slice(offset, i + 2), length: i - offset + 2 };
+    }
+    return { code: value.slice(offset), length: value.length - offset };
+  }
+  if (first !== 0x1b) return null;
   const kind = value[offset + 1];
+  if (kind === undefined) return { code: value[offset]!, length: 1 };
   if (kind === "[") {
     for (let i = offset + 2; i < value.length; i += 1) {
       const byte = value.charCodeAt(i);
       if (byte >= 0x40 && byte <= 0x7e) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
     }
-    return null;
+    return { code: value.slice(offset), length: value.length - offset };
   }
-  if (kind === "]" || kind === "P" || kind === "_") {
+  if (kind === "]" || kind === "P" || kind === "_" || kind === "^" || kind === "X") {
     for (let i = offset + 2; i < value.length; i += 1) {
       if ((kind === "]" || kind === "_") && value.charCodeAt(i) === 7) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
+      if (value.charCodeAt(i) === 0x9c) return { code: value.slice(offset, i + 1), length: i - offset + 1 };
       if (value[i] === "\x1b" && value[i + 1] === "\\") return { code: value.slice(offset, i + 2), length: i - offset + 2 };
     }
-    return null;
+    return { code: value.slice(offset), length: value.length - offset };
   }
-  return offset + 1 < value.length ? { code: value.slice(offset, offset + 2), length: 2 } : null;
+  return { code: value.slice(offset, offset + 2), length: 2 };
+}
+
+function startsTerminalSequence(value: string, offset: number): boolean {
+  const code = value.charCodeAt(offset);
+  return code === 0x07 || code === 0x1b || code >= 0x80 && code <= 0x9f;
+}
+
+function requiresTerminalSequenceStripping(value: string, offset: number): boolean {
+  const code = value.charCodeAt(offset);
+  return startsTerminalSequence(value, offset)
+    || code === 0x0d
+    || code < 0x20 && code !== 0x09 && code !== 0x0a
+    || code === 0x7f;
 }
 
 type Token = { value: string; width: number; escape: boolean };
@@ -45,7 +79,7 @@ function tokenize(value: string): Token[] {
       continue;
     }
     let end = offset;
-    while (end < value.length && value[end] !== "\x1b") end += 1;
+    while (end < value.length && !startsTerminalSequence(value, end)) end += 1;
     for (const item of graphemes.segment(value.slice(offset, end))) {
       result.push({ value: item.segment, width: graphemeWidth(item.segment), escape: false });
     }
@@ -68,6 +102,80 @@ export function visibleWidth(value: string): number {
   }
   widthCache.set(value, width);
   return width;
+}
+
+/** Remove terminal control sequences while preserving their visible text. */
+export function stripTerminalSequences(value: string): string {
+  let containsSequence = false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (requiresTerminalSequenceStripping(value, index)) {
+      containsSequence = true;
+      break;
+    }
+  }
+  if (!containsSequence) return value;
+  let result = "";
+  let offset = 0;
+  while (offset < value.length) {
+    const escape = extractAnsiCode(value, offset);
+    if (escape !== null) {
+      offset += escape.length;
+      continue;
+    }
+    const code = value.charCodeAt(offset);
+    if (code === 0x0d) {
+      result += "\n";
+      offset += value.charCodeAt(offset + 1) === 0x0a ? 2 : 1;
+      continue;
+    }
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a || code === 0x7f) {
+      offset += 1;
+      continue;
+    }
+    result += value[offset]!;
+    offset += 1;
+  }
+  return result;
+}
+
+/** Return the OSC 8 hyperlink covering one visible terminal column. */
+export function getOsc8LinkAtColumn(line: string, selectedColumn: number): string | undefined {
+  if (!Number.isSafeInteger(selectedColumn) || selectedColumn < 0) return undefined;
+  let target: string | undefined;
+  let column = 0;
+  let offset = 0;
+  while (offset < line.length) {
+    const escape = extractAnsiCode(line, offset);
+    if (escape !== null) {
+      const prefixLength = escape.code.startsWith("\x1b]8;") ? 4
+        : escape.code.startsWith("\u009d8;") ? 3 : 0;
+      if (prefixLength > 0) {
+        target = undefined;
+        const terminatorLength = escape.code.endsWith("\x1b\\") ? 2
+          : escape.code.endsWith("\x07") || escape.code.endsWith("\u009c") ? 1 : 0;
+        if (terminatorLength > 0) {
+          const payload = escape.code.slice(prefixLength, -terminatorLength);
+          const separator = payload.indexOf(";");
+          if (separator >= 0) target = payload.slice(separator + 1) || undefined;
+        }
+      }
+      offset += escape.length;
+      continue;
+    }
+    let end = offset;
+    while (end < line.length && !startsTerminalSequence(line, end)) end += 1;
+    if (end === offset) {
+      offset += 1;
+      continue;
+    }
+    for (const segment of graphemes.segment(line.slice(offset, end))) {
+      const width = segment.segment === "\t" ? 3 : graphemeWidth(segment.segment);
+      if (width > 0 && selectedColumn >= column && selectedColumn < column + width) return target;
+      column += width;
+    }
+    offset = end;
+  }
+  return undefined;
 }
 
 interface HyperlinkState {

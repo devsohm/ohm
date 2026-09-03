@@ -10,6 +10,7 @@ export interface ImageCellSize { columns: number; rows: number }
 export interface ImageRenderOptions {
   maxWidthCells?: number;
   maxHeightCells?: number;
+  preserveAspectRatio?: boolean;
   filename?: string;
   imageId?: number;
   moveCursor?: boolean;
@@ -22,9 +23,11 @@ interface KittyImageOptions extends ImageCellSize {
 
 interface ITermImageOptions extends ImageCellSize {
   filename?: string;
+  preserveAspectRatio?: boolean;
 }
 
 let selectedCapabilities: TerminalCapabilities | undefined;
+let capabilityOverrides: Partial<TerminalCapabilities> = {};
 let selectedCellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
 let imageId = 1;
 
@@ -39,7 +42,13 @@ export function detectCapabilities(commandExists: (command: string) => boolean =
 }
 
 export function setCapabilities(value: TerminalCapabilities): void { selectedCapabilities = { ...value }; }
-export function getCapabilities(): TerminalCapabilities { return selectedCapabilities ??= detectCapabilities(); }
+export function setCapabilityOverrides(value: Partial<TerminalCapabilities>): void {
+  capabilityOverrides = { ...value };
+  selectedCapabilities = undefined;
+}
+export function getCapabilities(): TerminalCapabilities {
+  return selectedCapabilities ??= { ...detectCapabilities(), ...capabilityOverrides };
+}
 export function resetCapabilitiesCache(): void { selectedCapabilities = undefined; }
 export function setCellDimensions(value: CellDimensions): void { selectedCellDimensions = { ...value }; }
 export function getCellDimensions(): CellDimensions { return { ...selectedCellDimensions }; }
@@ -119,7 +128,8 @@ export function encodeKitty(data: string, options: KittyImageOptions): string {
 
 export function encodeITerm2(data: string, options: ITermImageOptions): string {
   const name = options.filename === undefined ? "" : `;name=${Buffer.from(options.filename).toString("base64")}`;
-  return `\x1b]1337;File=inline=1;width=${options.columns};height=${options.rows}${name}:${data}\x07`;
+  const aspectRatio = options.preserveAspectRatio === false ? ";preserveAspectRatio=0" : "";
+  return `\x1b]1337;File=inline=1;width=${options.columns};height=${options.rows}${name}${aspectRatio}:${data}\x07`;
 }
 
 export function isImageLine(value: string): boolean { return value.includes("\x1b_G") || value.includes("\x1b]1337;File=inline=1"); }
@@ -160,6 +170,7 @@ export function renderImage(data: string, mimeType: string, width: number, optio
   if (capabilities.images === "iterm2") {
     const itermOptions: ITermImageOptions = { ...size };
     if (options.filename !== undefined) itermOptions.filename = options.filename;
+    if (options.preserveAspectRatio !== undefined) itermOptions.preserveAspectRatio = options.preserveAspectRatio;
     return [...Array.from({ length: size.rows - 1 }, () => ""), encodeITerm2(data, itermOptions)];
   }
   return [imageFallback(mimeType, dimensions, options.filename)];

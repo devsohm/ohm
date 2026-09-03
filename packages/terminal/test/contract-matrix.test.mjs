@@ -37,13 +37,13 @@ import { VirtualTerminal } from "./virtual-terminal-shim.mjs";
 
 const runtimeExports = [
   "Box", "CURSOR_MARKER", "CancellableLoader", "CombinedAutocompleteProvider", "Container", "Editor", "FullscreenTUI", "HStack", "Image", "Input", "Key",
-  "KeybindingsManager", "Loader", "Markdown", "MultilineEditor", "ProcessTerminal", "ScrollView", "SelectList", "SettingsList", "Spacer", "StdinBuffer", "TUI",
+  "KeybindingsManager", "Loader", "Marked", "Markdown", "MultilineEditor", "ProcessTerminal", "ScrollView", "SelectList", "SettingsList", "Spacer", "StdinBuffer", "TUI",
   "TUI_KEYBINDINGS", "Text", "TruncatedText", "TuiAltScreen", "TuiMainScreen", "VStack", "VIEWPORT_COMPONENT", "VIEWPORT_POINTER_REGIONS", "VIEWPORT_POINTER_TARGET", "VIEWPORT_WINDOW_SOURCE", "allocateImageId", "byteTail", "byteTruncate", "calculateImageCellSize", "calculateImageRows", "cancelViewportPointer", "cellWidth", "compositeTerminalLine", "compositeTerminalRows", "compositeTuiLine", "decodeKittyPrintable", "decodePrintableKey", "deleteAllKittyImages",
-  "deleteKittyImage", "detectCapabilities", "encodeITerm2", "encodeKitty", "fuzzyFilter", "fuzzyMatch", "getCapabilities",
+  "deleteKittyImage", "detectCapabilities", "encodeITerm2", "encodeKitty", "fuzzyFilter", "fuzzyMatch", "getCapabilities", "getOsc8LinkAtColumn",
   "getCellDimensions", "getGifDimensions", "getImageDimensions", "getJpegDimensions", "getKeybindings", "getPngDimensions",
   "dispatchViewportPointer", "fitViewportRows", "getWebpDimensions", "graphemeWidth", "hyperlink", "imageFallback", "isFocusable", "isImageLine", "isKeyRelease", "isKeyRepeat", "isKittyProtocolActive", "isOsc11BackgroundColorResponse", "isViewportComponent", "isViewportPointerTarget", "isViewportTUI", "isViewportWindowSource",
-  "matchesKey", "normalizeTerminalOutput", "padCells", "parseKey", "parseOsc11BackgroundColor", "parseTerminalColorSchemeReport", "renderImage", "renderViewport", "resetCapabilitiesCache", "sanitizeTerminalText",
-  "setCapabilities", "setCellDimensions", "setKeybindings", "setKittyProtocolActive", "sliceByColumn", "splitGraphemes", "stripAnsi", "truncateCells", "truncateToWidth",
+  "matchesKey", "normalizeTerminalOutput", "padCells", "parseKey", "parseOsc11BackgroundColor", "parseTerminalColorSchemeReport", "renderImage", "renderLatex", "renderViewport", "resetCapabilitiesCache", "sanitizeTerminalText",
+  "setCapabilities", "setCapabilityOverrides", "setCellDimensions", "setKeybindings", "setKittyProtocolActive", "sliceByColumn", "splitGraphemes", "stripAnsi", "stripTerminalSequences", "truncateCells", "truncateToWidth",
   "visibleWidth", "wrapCells", "wrapTextWithAnsi",
 ].sort();
 

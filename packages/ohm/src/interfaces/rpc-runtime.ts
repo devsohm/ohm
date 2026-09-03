@@ -9,8 +9,9 @@ import { Value } from "typebox/value";
 import { canonicalPublicImages } from "../core/public-image-content.js";
 import { errorMessage as safeErrorMessage } from "../core/errors.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
-import { BOOLEAN_VALUE, STRING_VALUE } from "../core/value-schemas.js";
+import { BOOLEAN_VALUE, FUNCTION_VALUE, STRING_VALUE } from "../core/value-schemas.js";
 import type { ExtensionRunner } from "../extensions/compat-runtime.js";
+import { validateExtensionWireServiceRequest } from "../extensions/wire-services.js";
 import {
   canonicalSessionEntryId,
   type SessionEntry as PublicSessionEntry,
@@ -1107,7 +1108,9 @@ export class RpcRuntimeDispatcher {
           return success(
             id,
             "extension_wire_request",
-            await this.#runtime.session.invokeExtensionWireService(selected.request as never),
+            await this.#runtime.session.invokeExtensionWireService(
+              validateExtensionWireServiceRequest(selected.request),
+            ),
           );
         }
         default:
@@ -1149,12 +1152,12 @@ export class RpcRuntimeDispatcher {
       throw error;
     }
     if (generation !== this.#bindingGeneration || this.#closed) return;
-    if (typeof session.onPortablePresentation === "function") {
+    if (Value.Check(FUNCTION_VALUE, session.onPortablePresentation)) {
       this.#unsubscribePresentation = session.onPortablePresentation((event) => {
         this.#publishPortablePresentation(event);
       });
     }
-    if (typeof session.listPortablePresentations === "function") {
+    if (Value.Check(FUNCTION_VALUE, session.listPortablePresentations)) {
       for (const event of session.listPortablePresentations()) this.#publishPortablePresentation(event);
     }
     this.#unsubscribe = session.subscribe((event) => {

@@ -2261,19 +2261,20 @@ test("agent persists a refusal explanation only when the provider emitted no res
 
   for (const source of ["streamed", "terminal"] as const) {
     await t.test(`${source} empty text still persists the explanation`, async () => {
+      const responseEnd: Extract<AdapterEvent, { type: "response_end" }> = {
+        type: "response_end",
+        reason: "refusal",
+        rawReason: "refusal",
+        explanation,
+        state,
+      };
+      if (source === "terminal") responseEnd.content = [{ type: "text", text: "" }];
       const provider = new ScriptedProvider([() => events([
         { type: "response_start", model: "model" },
         ...(source === "streamed"
           ? [{ type: "text_end", part: 0, text: "" } satisfies AdapterEvent]
           : []),
-        {
-          type: "response_end",
-          reason: "refusal",
-          rawReason: "refusal",
-          explanation,
-          state,
-          ...(source === "terminal" ? { content: [{ type: "text" as const, text: "" }] } : {}),
-        },
+        responseEnd,
       ])]);
       const harness = await setup(provider);
 
@@ -7229,7 +7230,7 @@ test("compaction bounds and accounts for provider reasoning output", async (t) =
       textMessageForTest(`${threadId}-user`, "user", `request ${"u".repeat(2_000)}`, 0),
       textMessageForTest(`${threadId}-assistant`, "assistant", `result ${"a".repeat(2_000)}`, 1, provider.id),
     );
-    const running = harness.runner.run({
+    const request: Parameters<typeof harness.runner.run>[0] = {
       threadId,
       prompt: "",
       provider,
@@ -7240,8 +7241,9 @@ test("compaction bounds and accounts for provider reasoning output", async (t) =
       summaryTokenBudget: 100,
       compactionRecentTokens: 100,
       manualCompaction: true,
-      ...(api === undefined ? {} : { api }),
-    });
+    };
+    if (api !== undefined) request.api = api;
+    const running = harness.runner.run(request);
     return { harness, provider, running };
   };
 

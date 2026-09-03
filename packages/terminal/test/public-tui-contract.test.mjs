@@ -68,6 +68,93 @@ describe("public TUI renderer contract", () => {
     tui.stop();
   });
 
+  it("hands an unchanged main-screen frame to a replacement without repainting it", () => {
+    const terminal = new MemoryTerminal();
+    const first = new TUI(terminal);
+    first.addChild({ render: () => ["steady"], invalidate() {} });
+    first.start();
+    first.renderNow();
+
+    const state = first.captureRenderState();
+    terminal.writes.length = 0;
+    first.stop({ preserveScreen: true });
+
+    assert.deepEqual(terminal.writes, []);
+    assert.deepEqual(state, { columns: 40, lines: ["steady"] });
+    assert.equal(Object.isFrozen(state), true);
+    assert.equal(Object.isFrozen(state.lines), true);
+
+    const second = new TUI(terminal);
+    const component = new MutableComponent();
+    component.value = "steady";
+    second.addChild(component);
+    second.restoreRenderState(state);
+    second.start();
+    second.renderNow();
+
+    assert.deepEqual(terminal.writes, []);
+    assert.equal(second.fullRedraws, 0);
+
+    component.value = "changed";
+    second.renderNow();
+    assert.match(terminal.writes.join(""), /changed/u);
+    assert.equal(terminal.writes.join("").includes("\x1b[2J\x1b[H"), false);
+    second.stop();
+  });
+
+  it("keeps captured main-screen state detached from later frames", () => {
+    const terminal = new MemoryTerminal();
+    const tui = new TUI(terminal);
+    const component = new MutableComponent();
+    tui.addChild(component);
+    tui.start();
+    tui.renderNow();
+
+    const state = tui.captureRenderState();
+    component.value = "second";
+    tui.renderNow();
+
+    assert.deepEqual(state.lines, ["first"]);
+    tui.stop();
+  });
+
+  it("falls back to a full repaint when restored state has a different width", () => {
+    const terminal = new MemoryTerminal();
+    const first = new TUI(terminal);
+    first.addChild({ render: () => ["steady"], invalidate() {} });
+    first.start();
+    first.renderNow();
+    terminal.columns = 60;
+    terminal.resize();
+    const state = first.captureRenderState();
+    assert.equal(state.columns, 40);
+    first.stop({ preserveScreen: true });
+
+    terminal.writes.length = 0;
+    const second = new TUI(terminal);
+    second.addChild({ render: () => ["steady"], invalidate() {} });
+    second.restoreRenderState(state);
+    second.start();
+    second.renderNow();
+
+    assert.equal(terminal.writes.join("").includes("\x1b[2J\x1b[H"), true);
+    second.stop();
+  });
+
+  it("does not let main-screen state bypass fullscreen cleanup", () => {
+    const terminal = new MemoryTerminal();
+    const fullscreen = new FullscreenTUI(terminal, undefined, undefined, { mouse: false });
+    fullscreen.setRoot({ render: () => ["full"], invalidate() {} });
+    fullscreen.start();
+    fullscreen.renderNow();
+
+    assert.throws(() => fullscreen.captureRenderState(), /main-screen/u);
+    terminal.writes.length = 0;
+    fullscreen.stop({ preserveScreen: true });
+
+    assert.equal(terminal.writes.join("").includes("\x1b[?1049l"), true);
+  });
+
   it("positions overlays by percentage and honors their minimum width", () => {
     const tui = new RecordingTUI(new MemoryTerminal());
     tui.addChild({

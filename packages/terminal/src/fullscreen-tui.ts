@@ -1,7 +1,6 @@
 import type { Terminal } from "./terminal.js";
-import { graphemeWidth } from "./internal-unicode.js";
 import { type Component, TUI } from "./tui.js";
-import { extractAnsiCode, getGraphemeSegmenter } from "./utils.js";
+import { getOsc8LinkAtColumn } from "./utils.js";
 import {
   cancelViewportPointer,
   dispatchViewportPointer,
@@ -108,35 +107,6 @@ function safeLinkTarget(value: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function linkAtColumn(line: string, selectedColumn: number): string | undefined {
-  if (!Number.isSafeInteger(selectedColumn) || selectedColumn < 0) return undefined;
-  let target: string | undefined;
-  let column = 0;
-  let offset = 0;
-  while (offset < line.length) {
-    const escape = extractAnsiCode(line, offset);
-    if (escape !== null) {
-      if (escape.code.startsWith("\x1b]8;")) {
-        const terminator = escape.code.endsWith("\x07") ? 1 : 2;
-        const payload = escape.code.slice(4, -terminator);
-        const separator = payload.indexOf(";");
-        target = separator < 0 ? undefined : safeLinkTarget(payload.slice(separator + 1));
-      }
-      offset += escape.length;
-      continue;
-    }
-    let end = offset;
-    while (end < line.length && line[end] !== "\x1b") end += 1;
-    for (const segment of getGraphemeSegmenter().segment(line.slice(offset, end))) {
-      const visible = graphemeWidth(segment.segment);
-      if (visible > 0 && selectedColumn >= column && selectedColumn < column + visible) return target;
-      column += visible;
-    }
-    offset = end;
-  }
-  return undefined;
 }
 
 /** Fixed-height terminal surface. The existing TUI class remains the main-screen surface. */
@@ -271,7 +241,7 @@ export class FullscreenTUI extends TUI {
       const click = this.#click;
       this.#click = undefined;
       if (click !== undefined && !click.dragged && click.row === event.row && click.column === event.column) {
-        const target = linkAtColumn(this.#frame[event.row] ?? "", event.column);
+        const target = safeLinkTarget(getOsc8LinkAtColumn(this.#frame[event.row] ?? "", event.column) ?? "");
         if (target !== undefined) this.#openUrl?.(target);
       }
     }

@@ -5,14 +5,16 @@ import {
   REPLICATED_JSON_STATE_PROTOCOL_VERSION,
   createReplicatedJsonState,
 } from "../../src/extensions/replicated-state.js";
+import { isJsonObject } from "../../src/core/json.js";
 
 test("replicated JSON state applies bounded deltas deterministically across replicas", () => {
   const source = createReplicatedJsonState({ tasks: [{ state: "queued" }], count: 1 });
   const replica = createReplicatedJsonState({ tasks: [{ state: "queued" }], count: 1 });
   const observed: number[] = [];
   source.subscribe((delta) => {
-    const changed = delta.operations[0] as unknown as { value: { phase: string } };
-    changed.value.phase = "corrupt";
+    const changed = delta.operations[0];
+    if (changed?.type !== "set" || !isJsonObject(changed.value)) throw new Error("Expected set operation with an object value");
+    changed.value["phase"] = "corrupt";
   });
   source.subscribe(() => { throw new Error("observer failed"); });
   source.subscribe((delta) => observed.push(delta.revision));
@@ -30,13 +32,13 @@ test("replicated JSON state applies bounded deltas deterministically across repl
   assert.deepEqual(observed, [1, 2]);
   assert.equal(first.protocolVersion, REPLICATED_JSON_STATE_PROTOCOL_VERSION);
   assert.throws(() => {
-    (first.operations[0] as { value: unknown }).value = "corrupt";
-  }, /read only|Cannot assign/iu);
+    Object.defineProperty(first.operations[0]!, "value", { value: "corrupt" });
+  }, /read only|Cannot assign|Cannot redefine/iu);
   assert.deepEqual(source.deltasSince(0), [first, second]);
 
   const detached = source.snapshot();
   assert.throws(() => {
-    (detached.value.tasks as unknown[]).push("local-only");
+    detached.value.tasks.push({ state: "local-only" });
   }, /read only|not extensible/iu);
   assert.deepEqual(source.snapshot().value.tasks, []);
 });

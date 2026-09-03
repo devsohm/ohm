@@ -181,12 +181,13 @@ test("CLI-bound callback completion stays outside an enclosing provider lifecycl
   const originalComplete = modelRuntime.complete;
   modelRuntime.complete = async (model, _modelContext, options): Promise<AssistantMessage> => {
     const fetch = wire.wrapFetch(model.provider, async () => new Response("{}"));
-    await fetch("https://provider.example/v1/responses", {
+    const request: RequestInit = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
-      ...(options?.signal === undefined ? {} : { signal: options.signal }),
-    });
+    };
+    if (options?.signal !== undefined) request.signal = options.signal;
+    await fetch("https://provider.example/v1/responses", request);
     return {
       role: "assistant",
       content: [],

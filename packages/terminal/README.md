@@ -57,16 +57,18 @@ The package includes:
 
 - `Container`, `Box`, `Text`, `Spacer`, and `TruncatedText` for composition.
 - `HStack` and `VStack` for constrained horizontal and vertical regions.
-- `ScrollView` for a fixed-height vertical viewport with follow, overscroll, and scrollbar policies.
+- `ScrollView` for a fixed-height vertical viewport with follow, overscroll, arbitrary `scrollTo()`, and runtime scrollbar policies.
 - `ViewportWindowSource` for large text surfaces that expose an exact row count and render only the requested window.
 - `Editor` and `Input` for multiline and single-line editing.
-- `SelectList` and `SettingsList` for interactive choices.
-- `Markdown` for lists, tables, quotes, fenced code, links, and styled inline content. Its optional `transform` receives the exact content width before parsing; a failed display transform leaves the source readable.
+- `SelectList` and `SettingsList` for interactive choices, programmatic selection, bounded primary columns, and nested settings controls.
+- `Markdown` for lists, tables, quotes, fenced code, links, styled inline content, and terminal-safe math. Math is enabled by default for complete `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` spans; `renderLatex: false` preserves the source delimiters. Its optional `transform` receives the exact content width before parsing; a failed display transform leaves the source readable.
 - `Loader` and `CancellableLoader` for active work.
-- `Image` for Kitty and iTerm2 image placement with a text fallback.
+- `Image` for Kitty and iTerm2 image placement with a text fallback, stable Kitty identity, and optional iTerm aspect-ratio control.
 
 These are the public component and editor capabilities; undo, redo, history, and kill-ring state belong to
 `MultilineEditor` rather than separate state-container entry points.
+
+`renderLatex()` exposes the bounded math renderer directly and returns `undefined` for unsupported or malformed input. `Marked`, `Token`, and `Tokens` expose the parser authoring types used by `Markdown`; a caller that customizes parsing should create its own `Marked` instance.
 
 The renderer compares physical rows and uses changed-region updates when safe. `FullscreenTUI` repaints changed ordinary-text rows independently; frames containing terminal controls or images take the conservative whole-frame path. It contains style and hyperlink state at row boundaries and tracks terminal scrollback separately from logical content. Kitty image placements are deleted before their reserved rows are redrawn.
 
@@ -91,6 +93,8 @@ screen.start();
 ```
 
 `StackEntryOptions` controls basis, growth, shrink, size bounds, and responsive visibility. `renderViewport()` and `fitViewportRows()` let custom components participate in fixed rectangles. `compositeTerminalLine()` and `compositeTerminalRows()` place trusted text without splitting ANSI state or wide cells.
+
+A main-screen host can hand its last frame to a replacement without repainting unchanged rows: call `captureRenderState()`, stop with `{ preserveScreen: true }`, restore the captured state on the replacement before `start()`, and then render. A width change still forces a full repaint. Alternate-screen hosts always retain their normal teardown and cannot use this handoff.
 
 Use `addChild()`, `removeChild()`, and `clear()` to change stacks. Use `setRoot()` or its `setLayoutRoot()` alias to change a `FullscreenTUI` root.
 
@@ -133,7 +137,9 @@ Focus ownership survives temporary base controls and dynamic visibility without 
 
 ## Terminal capabilities
 
-Image, true-color, and hyperlink support is detected from the active terminal environment. Call `getCapabilities()` to inspect it. Tests and embedding hosts can use `setCapabilities()` and `resetCapabilitiesCache()` to install a known capability set.
+Image, true-color, and hyperlink support is detected from the active terminal environment. Call `getCapabilities()` to inspect it. `setCapabilities()` installs one complete cached value. `setCapabilityOverrides()` installs partial overrides that survive `resetCapabilitiesCache()` and are reapplied to later detection; passing `{}` clears them.
+
+`stripTerminalSequences()` removes terminal controls while retaining visible text. `getOsc8LinkAtColumn()` resolves the raw OSC 8 target at a visible cell; callers remain responsible for validating schemes and trust before opening it.
 
 `TUI` exposes terminal color-scheme notifications and background-color queries. Their responses are consumed before normal input routing. Cell-size reports update image layout without swallowing unrelated keystrokes.
 

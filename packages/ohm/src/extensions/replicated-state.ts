@@ -1,6 +1,8 @@
 import { boundedJsonSnapshot } from "@ohm/kernel/runtime/core/bounded-json";
+import { Check } from "typebox/value";
 
-import type { JsonValue } from "../core/json.js";
+import type { JsonObject, JsonValue } from "../core/json.js";
+import { FUNCTION_VALUE, isObjectValue, NUMBER_VALUE, STRING_VALUE } from "../core/value-schemas.js";
 
 export const REPLICATED_JSON_STATE_PROTOCOL_VERSION = 1 as const;
 
@@ -74,6 +76,10 @@ interface SelectedLimits {
   maxListeners: number;
 }
 
+function isJsonRecord(value: JsonValue): value is JsonObject {
+  return !Array.isArray(value) && isObjectValue(value);
+}
+
 function positiveLimit(value: number | undefined, fallback: number, maximum: number, label: string): number {
   const selected = value ?? fallback;
   if (!Number.isSafeInteger(selected) || selected < 1 || selected > maximum) {
@@ -118,17 +124,20 @@ function selectedLimits(options: ReplicatedJsonStateOptions): SelectedLimits {
 }
 
 function snapshotJson<T extends JsonValue>(value: T, label: string, maximumBytes: number): T {
-  const snapshot = structuredClone(boundedJsonSnapshot(value, {
+  const bounded = boundedJsonSnapshot(value, {
     label,
     maximumBytes,
     maximumValues: REPLICATED_JSON_STATE_LIMITS.maxValues,
     maximumContainers: REPLICATED_JSON_STATE_LIMITS.maxContainers,
     maximumDepth: REPLICATED_JSON_STATE_LIMITS.maxDepth,
-  }).value) as T;
+  });
+  // SAFETY: the bounded snapshot preserves the input JSON shape while canonicalizing its runtime representation.
+  const snapshot = structuredClone(bounded.value) as T;
   const pending: JsonValue[] = [snapshot];
   while (pending.length > 0) {
     const current = pending.pop();
-    if (current !== null && typeof current === "object" && !Object.isFrozen(current)) {
+    if (current === undefined) break;
+    if ((Array.isArray(current) || isJsonRecord(current)) && !Object.isFrozen(current)) {
       Object.freeze(current);
       pending.push(...Object.values(current));
     }
@@ -136,27 +145,27 @@ function snapshotJson<T extends JsonValue>(value: T, label: string, maximumBytes
   return snapshot;
 }
 
-function revision(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+function revision(value: JsonValue | undefined, label: string): number {
+  if (!Check(NUMBER_VALUE, value) || !Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative safe integer`);
   }
-  return value as number;
+  return value;
 }
 
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+function record(value: JsonValue, label: string): JsonObject {
+  if (!isJsonRecord(value)) {
     throw new TypeError(`${label} must be an object`);
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
-function exact(value: Readonly<Record<string, unknown>>, keys: readonly string[], label: string): void {
+function exact(value: JsonObject, keys: readonly string[], label: string): void {
   const allowed = new Set(keys);
   const unexpected = Object.keys(value).find((key) => !allowed.has(key));
   if (unexpected !== undefined) throw new TypeError(`${label}.${unexpected} is not allowed`);
 }
 
-function path(value: unknown, label: string, allowEmpty: boolean): readonly string[] {
+function path(value: JsonValue | undefined, label: string, allowEmpty: boolean): readonly string[] {
   if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
     throw new TypeError(`${label} must be a non-empty array`);
   }
@@ -165,7 +174,7 @@ function path(value: unknown, label: string, allowEmpty: boolean): readonly stri
   }
   return Object.freeze(value.map((segment, index) => {
     if (
-      typeof segment !== "string"
+      !Check(STRING_VALUE, segment)
       || segment === ""
       || segment.includes("\0")
       || Buffer.byteLength(segment, "utf8") > 1_024
@@ -175,14 +184,19 @@ function path(value: unknown, label: string, allowEmpty: boolean): readonly stri
   }));
 }
 
-function operation(value: unknown, index: number, maxDeltaBytes: number): ReplicatedJsonStateOperation {
+function requiredJsonValue(value: JsonValue | undefined, label: string): JsonValue {
+  if (value === undefined) throw new TypeError(`${label} is required`);
+  return value;
+}
+
+function operation(value: JsonValue, index: number, maxDeltaBytes: number): ReplicatedJsonStateOperation {
   const label = `Replicated JSON state operation ${index}`;
   const selected = record(value, label);
   if (selected["type"] === "replace") {
     exact(selected, ["type", "value"], label);
     return Object.freeze({
       type: "replace",
-      value: snapshotJson(selected["value"] as JsonValue, `${label} value`, maxDeltaBytes),
+      value: snapshotJson(requiredJsonValue(selected["value"], `${label}.value`), `${label} value`, maxDeltaBytes),
     });
   }
   if (selected["type"] === "set") {
@@ -190,7 +204,7 @@ function operation(value: unknown, index: number, maxDeltaBytes: number): Replic
     return Object.freeze({
       type: "set",
       path: path(selected["path"], `${label} path`, false),
-      value: snapshotJson(selected["value"] as JsonValue, `${label} value`, maxDeltaBytes),
+      value: snapshotJson(requiredJsonValue(selected["value"], `${label}.value`), `${label} value`, maxDeltaBytes),
     });
   }
   if (selected["type"] === "delete") {
@@ -204,7 +218,7 @@ function operation(value: unknown, index: number, maxDeltaBytes: number): Replic
 }
 
 function operations(
-  values: unknown,
+  values: JsonValue | undefined,
   maxDeltaBytes: number,
 ): readonly ReplicatedJsonStateOperation[] {
   if (!Array.isArray(values) || values.length === 0) {
@@ -213,8 +227,8 @@ function operations(
   if (values.length > REPLICATED_JSON_STATE_LIMITS.maxOperationsPerDelta) {
     throw new RangeError(`Replicated JSON state delta exceeds ${REPLICATED_JSON_STATE_LIMITS.maxOperationsPerDelta} operations`);
   }
+  snapshotJson(values, "Replicated JSON state delta operations", maxDeltaBytes);
   const selected = Object.freeze(values.map((value, index) => operation(value, index, maxDeltaBytes)));
-  snapshotJson(selected as unknown as JsonValue, "Replicated JSON state delta operations", maxDeltaBytes);
   return selected;
 }
 
@@ -232,17 +246,22 @@ function arrayIndex(segment: string, length: number, allowEnd: boolean, label: s
   return selected;
 }
 
-function containerAt(root: JsonValue, pathValue: readonly string[]): { container: JsonValue[] | Record<string, JsonValue>; key: string } {
+interface JsonTarget {
+  container: JsonObject | JsonValue[];
+  key: string;
+}
+
+function containerAt(root: JsonValue, pathValue: readonly string[]): JsonTarget {
   let selected: JsonValue = root;
   for (const [index, segment] of pathValue.slice(0, -1).entries()) {
     if (Array.isArray(selected)) {
       selected = selected[arrayIndex(segment, selected.length, false, `Replicated JSON state path ${index}`)]!;
-    } else if (selected !== null && typeof selected === "object") {
+    } else if (isJsonRecord(selected)) {
       if (!Object.hasOwn(selected, segment)) throw new TypeError(`Replicated JSON state path ${index} is missing`);
       selected = selected[segment]!;
     } else throw new TypeError(`Replicated JSON state path ${index} is not a container`);
   }
-  if (Array.isArray(selected) || selected !== null && typeof selected === "object") {
+  if (Array.isArray(selected) || isJsonRecord(selected)) {
     return { container: selected, key: pathValue.at(-1)! };
   }
   throw new TypeError("Replicated JSON state target parent is not a container");
@@ -269,8 +288,15 @@ function applyOperations(current: JsonValue, selected: readonly ReplicatedJsonSt
   return result;
 }
 
-function validateDelta(value: ReplicatedJsonStateDelta, maxDeltaBytes: number): ReplicatedJsonStateDelta {
-  const selected = record(value, "Replicated JSON state delta");
+function validateDelta<Value>(value: Value, maxDeltaBytes: number): ReplicatedJsonStateDelta {
+  const parsed = boundedJsonSnapshot(value, {
+    label: "Replicated JSON state delta",
+    maximumBytes: maxDeltaBytes,
+    maximumValues: REPLICATED_JSON_STATE_LIMITS.maxValues,
+    maximumContainers: REPLICATED_JSON_STATE_LIMITS.maxContainers,
+    maximumDepth: REPLICATED_JSON_STATE_LIMITS.maxDepth,
+  }).value;
+  const selected = record(parsed, "Replicated JSON state delta");
   exact(selected, ["protocolVersion", "baseRevision", "revision", "operations"], "Replicated JSON state delta");
   if (selected["protocolVersion"] !== REPLICATED_JSON_STATE_PROTOCOL_VERSION) {
     throw new TypeError("Replicated JSON state protocol version is unsupported");
@@ -285,7 +311,6 @@ function validateDelta(value: ReplicatedJsonStateDelta, maxDeltaBytes: number): 
     revision: nextRevision,
     operations: selectedOperations,
   });
-  snapshotJson(delta as unknown as JsonValue, "Replicated JSON state delta", maxDeltaBytes);
   return delta;
 }
 
@@ -322,6 +347,7 @@ export function createReplicatedJsonState<T extends JsonValue>(
     if (delta.baseRevision !== currentRevision) {
       throw new TypeError(`Replicated JSON state expected revision ${currentRevision}, received ${delta.baseRevision}`);
     }
+    // SAFETY: T is the caller's stable view of this state handle; every replacement is parsed and bounded as JSON before commit.
     const next = snapshotJson(
       applyOperations(value, delta.operations),
       "Replicated JSON state",
@@ -385,7 +411,7 @@ export function createReplicatedJsonState<T extends JsonValue>(
     },
     subscribe(listener: (delta: ReplicatedJsonStateDelta) => void) {
       assertOpen();
-      if (typeof listener !== "function") throw new TypeError("Replicated JSON state listener must be a function");
+      if (!Check(FUNCTION_VALUE, listener)) throw new TypeError("Replicated JSON state listener must be a function");
       if (listeners.size >= limits.maxListeners) {
         throw new RangeError(`Replicated JSON state exceeds ${limits.maxListeners} listeners`);
       }

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { Value } from "typebox/value";
 
 import type { JsonValue } from "../core/json.js";
+import { FUNCTION_VALUE, STRING_VALUE, isObjectValue } from "../core/value-schemas.js";
 import type {
   PortablePresentationActionRequest,
   PortablePresentationActionResult,
@@ -101,7 +103,7 @@ const FACET_STATE_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,47}$/u;
 
 export function extensionFacetStateServiceName(owner: string, stateName: string): string {
   if (
-    typeof owner !== "string"
+    !Value.Check(STRING_VALUE, owner)
     || owner.length === 0
     || owner.includes("\0")
     || Buffer.byteLength(owner, "utf8") > 512
@@ -114,7 +116,7 @@ export function extensionFacetStateServiceName(owner: string, stateName: string)
 export function validateExtensionFacetDefinition(
   value: ExtensionFacetDefinition,
 ): ExtensionFacetDefinition {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (!isObjectValue(value) || Array.isArray(value)) {
     throw new TypeError("Extension facet definition must be an object");
   }
   const unexpected = Object.keys(value).find((key) =>
@@ -125,7 +127,7 @@ export function validateExtensionFacetDefinition(
   }
   if (!EXTENSION_FACET_KINDS.includes(value.kind)) throw new TypeError("Extension facet kind is invalid");
   if (!FACET_NAME.test(value.name)) throw new TypeError("Extension facet name is invalid");
-  if (typeof value.setup !== "function") throw new TypeError("Extension facet setup must be a function");
+  if (!Value.Check(FUNCTION_VALUE, value.setup)) throw new TypeError("Extension facet setup must be a function");
   return Object.freeze({ ...value });
 }
 

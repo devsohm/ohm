@@ -5891,7 +5891,7 @@ export class TuiController {
         shell: "default" | "self" | undefined,
         call: RuntimeUiBlock | undefined,
         result: RuntimeUiBlock | undefined,
-      ): { readonly bytes: number; readonly retained: boolean } => {
+      ) => {
         const bytes = cached !== undefined && cached.call === call && cached.result === result
           ? cached.bytes
           : cachedToolRenderBlockBytes(call, result);

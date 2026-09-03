@@ -193,6 +193,7 @@ test("service values and registry size are bounded while safe events remain JSON
           () => ohm.services.register(`a${"x".repeat(128)}`, {}),
           /service name is invalid/iu,
         );
+        // SAFETY: this negative test bypasses the static object constraint to exercise runtime admission.
         assert.throws(
           () => ohm.services.register("example.primitive", 1 as never),
           /service value must be an object or function/iu,

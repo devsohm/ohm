@@ -3,6 +3,8 @@
 Facets are optional lifecycle components inside one trusted extension
 generation. They do not replace `ExtensionAPI` or create another plugin system.
 Use `ohm.facets.register()` only when one package needs work split by host role.
+There is no user-facing facet switch: the extension author registers the parts,
+and the host automatically starts only the parts that match its active role.
 
 ```ts
 await ohm.facets.register({
