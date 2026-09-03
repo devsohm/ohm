@@ -51,6 +51,10 @@ const AWS_SDK_LICENSE = pinnedDocument(
   true,
 );
 const PACKAGE_DOCUMENT_OVERRIDES = new Map([
+  ["@img/sharp-libvips-darwin-arm64@1.3.2", { license: "LGPL-3.0-or-later", documents: [] }],
+  ["@img/sharp-libvips-darwin-x64@1.3.2", { license: "LGPL-3.0-or-later", documents: [] }],
+  ["@img/sharp-libvips-linux-arm64@1.3.2", { license: "LGPL-3.0-or-later", documents: [] }],
+  ["@img/sharp-libvips-linux-x64@1.3.2", { license: "LGPL-3.0-or-later", documents: [] }],
   ["proxy-agent-negotiate@1.1.0", {
     license: "MIT",
     documents: [{

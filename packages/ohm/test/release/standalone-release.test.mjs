@@ -36,6 +36,12 @@ const PINNED_LICENSE_ASSETS = [
   "data-uri-to-buffer-4.0.1-LICENSE.txt",
   "standardwebhooks-1.0.0-LICENSE.txt",
 ];
+const SHARP_LIBVIPS_BINARY_PACKAGES = [
+  "@img/sharp-libvips-darwin-arm64",
+  "@img/sharp-libvips-darwin-x64",
+  "@img/sharp-libvips-linux-arm64",
+  "@img/sharp-libvips-linux-x64",
+];
 
 function parseTarEntries(buffer) {
   const entries = [];
@@ -487,6 +493,38 @@ test("standalone license bundle pins the missing proxy-agent-negotiate notice", 
   await assert.rejects(
     createThirdPartyLicenseBundle(modules, licenses),
     /Package .*unknown has no license or notice document and no pinned override/u,
+  );
+});
+
+test("standalone license bundle records exact Sharp libvips binaries without bundled documents", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-standalone-sharp-libvips-license-test-"));
+  context.after(async () => await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
+  const modules = resolve(root, "node_modules");
+  const licenses = resolve(root, "LICENSES");
+  for (const name of SHARP_LIBVIPS_BINARY_PACKAGES) {
+    const directory = resolve(modules, ...name.split("/"));
+    await mkdir(directory, { recursive: true });
+    await writeFile(resolve(directory, "package.json"), `${JSON.stringify({
+      name, version: "1.3.2", license: "LGPL-3.0-or-later",
+    })}\n`);
+  }
+
+  const manifest = await createThirdPartyLicenseBundle(modules, licenses);
+  assert.deepEqual(
+    manifest.packages.map(({ name, version, license, documents }) => ({ name, version, license, documents })),
+    SHARP_LIBVIPS_BINARY_PACKAGES.map((name) => ({
+      name, version: "1.3.2", license: "LGPL-3.0-or-later", documents: [],
+    })),
+  );
+  await assert.doesNotReject(verifyThirdPartyLicenseBundle(modules, licenses));
+
+  const nearMiss = resolve(modules, "@img", "sharp-libvips-linux-x64", "package.json");
+  await writeFile(nearMiss, `${JSON.stringify({
+    name: "@img/sharp-libvips-linux-x64", version: "1.3.3", license: "LGPL-3.0-or-later",
+  })}\n`);
+  await assert.rejects(
+    createThirdPartyLicenseBundle(modules, licenses),
+    /sharp-libvips-linux-x64 has no license or notice document and no pinned override/u,
   );
 });
 
