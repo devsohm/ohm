@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +23,7 @@ import {
 import type { PluginAPI, PluginSessionDelivery } from "../../src/plugins/direct.js";
 import { UNAVAILABLE_PLUGIN_UI_ROUTES } from "../../src/plugins/runtime-internal/ui-route-registrations.js";
 import { UNAVAILABLE_PLUGIN_UI_SLOTS } from "../../src/plugins/runtime-internal/ui-slot-registrations.js";
+import { runRuntimeCleanupPhase } from "../../src/plugins/runtime-internal/generation-lifecycle.js";
 import { pluginSessionManager } from "../../src/plugins/session-contract.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
 import { createModels } from "../../src/providers/models.js";
@@ -548,6 +550,25 @@ test("public host imports retain identity and attachment state across plugin and
   }
 });
 
+test("runtime host attachment preserves unbound lookup and rejects a different generation", async (context) => {
+  const root = await workspace(context, "ohm-direct-runtime-attachment-");
+  const runtime = publicPlugins.createPluginRuntime();
+  assert.equal(publicPlugins.getPluginRuntimeHost(runtime), undefined);
+  const host = publicPlugins.ensurePluginRuntimeHost(runtime, root);
+  context.after(async () => await host.close());
+  assert.equal(publicPlugins.getPluginRuntimeHost(runtime), host);
+  assert.doesNotThrow(() => publicPlugins.attachPluginRuntimeHost(runtime, host));
+  assert.equal(publicPlugins.ensurePluginRuntimeHost(runtime, root), host);
+
+  const other = publicPlugins.ensurePluginRuntimeHost(publicPlugins.createPluginRuntime(), root);
+  context.after(async () => await other.close());
+  assert.throws(
+    () => publicPlugins.attachPluginRuntimeHost(runtime, other),
+    /already attached to another host generation/u,
+  );
+  assert.equal(publicPlugins.getPluginRuntimeHost(runtime), host);
+});
+
 test("empty activation groups preserve caller cancellation", async (context) => {
   const root = await workspace(context, "ohm-direct-runtime-empty-cancel-");
   const loadController = new AbortController();
@@ -712,6 +733,92 @@ test("direct cleanup contains hostile thrown objects without inspecting them", a
   assert.equal(conversionTrapCalls, 0);
 });
 
+for (const asynchronous of [false, true]) {
+  for (const rollback of [false, true]) {
+    test(`${rollback ? "activation rollback" : "host close"} reports ${asynchronous ? "rejected" : "thrown"} undefined cleanup and continues`, async (context) => {
+      const root = await workspace(context, "ohm-undefined-cleanup-");
+      const order: string[] = [];
+      const host = await loadDirectPlugins([], {
+        workspace: root,
+        inlinePlugins: [(api) => {
+          api.onDispose(() => { order.push("after"); });
+          api.onDispose(() => {
+            order.push("failure");
+            if (asynchronous) return Promise.reject(undefined);
+            throw undefined;
+          });
+          if (rollback) throw new Error("factory failure");
+        }],
+      });
+      context.after(async () => await host.close());
+      if (rollback) {
+        assert.equal(host.diagnostics().some((entry) => /cleanup failed: undefined/u.test(entry.message)), true);
+        assert.equal(host.plugins().length, 0);
+      } else await assert.rejects(host.close(), /cleanup failed: undefined/u);
+      assert.deepEqual(order, ["failure", "after"]);
+      await host.close();
+      assert.deepEqual(order, ["failure", "after"]);
+    });
+  }
+}
+
+test("pre-aborted runtime waits observe rejected work without changing abort precedence", () => {
+  const moduleUrl = new URL("../../src/plugins/runtime-internal/generation-lifecycle.ts", import.meta.url).href;
+  const script = `
+    import assert from "node:assert/strict";
+    import { withAbort } from ${JSON.stringify(moduleUrl)};
+    for (const late of [false, true]) {
+      const controller = new AbortController();
+      const reason = new Error("selected abort");
+      const failure = new Error("hook rejection must be observed");
+      let reject;
+      const invoke = () => {
+        controller.abort(reason);
+        return late ? new Promise((_, selected) => { reject = selected; }) : Promise.reject(failure);
+      };
+      await assert.rejects(withAbort(invoke(), controller.signal), (cause) => cause === reason);
+      reject?.(failure);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  `;
+  const child = spawnSync(process.execPath, [
+    "--unhandled-rejections=strict", "--import", "tsx", "--input-type=module", "--eval", script,
+  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
+  assert.equal(child.error, undefined);
+  assert.equal(child.signal, null);
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, "");
+  assert.equal(child.stderr, "");
+});
+
+test("settled runtime cleanup phases clear their deadline timers", async (context) => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Set<Parameters<typeof clearTimeout>[0]>();
+  let scheduled = 0;
+  context.mock.method(globalThis, "setTimeout", (
+    callback: (...argumentsValue: unknown[]) => void,
+    milliseconds?: number,
+    ...argumentsValue: unknown[]
+  ) => {
+    const timer = originalSetTimeout(callback, milliseconds, ...argumentsValue);
+    scheduled += 1;
+    timers.add(timer);
+    return timer;
+  });
+  context.mock.method(globalThis, "clearTimeout", (timer: Parameters<typeof clearTimeout>[0]) => {
+    timers.delete(timer);
+    originalClearTimeout(timer);
+  });
+  const failures = await runRuntimeCleanupPhase([
+    async () => undefined,
+    async () => { throw new Error("cleanup failure"); },
+  ], 1_000, "Test cleanup");
+  assert.equal(failures.length, 1);
+  assert.equal(scheduled, 2);
+  assert.equal(timers.size, 0);
+});
+
 test("direct cleanup bounds huge failures and redacts secrets straddling the output cutoff", async (context) => {
   const hugeRoot = await workspace(context, "ohm-direct-runtime-huge-dispose-");
   const hugeHost = await loadDirectPlugins([], {
@@ -723,7 +830,7 @@ test("direct cleanup bounds huge failures and redacts secrets straddling the out
   });
   await assert.rejects(hugeHost.close(), (cause: unknown) => {
     assert.ok(cause instanceof Error);
-    assert.equal(cause.message.startsWith("Runtime extension disposer cleanup failed: retained-"), true);
+    assert.equal(cause.message.startsWith("Runtime plugin disposer cleanup failed: retained-"), true);
     assert.equal(Buffer.byteLength(cause.message, "utf8") <= 4_096, true);
     return true;
   });
@@ -1657,90 +1764,61 @@ test("the default supplied event bus treats error as an ordinary activation and 
   assert.deepEqual(live, { phase: "live" });
 });
 
-test("a supplied event bus cannot leave a half-committed generation", async (context) => {
-  const root = await workspace(context, "ohm-direct-runtime-event-bus-failure-");
-  const sourcePath = join(root, "candidate.mjs");
-  await writeFile(sourcePath, `export default (ohm) => {
-    ohm.events.on("audit:first", () => undefined);
-    ohm.events.on("audit:reject", () => undefined);
-    ohm.registerCommand("must-not-commit", { handler() {} });
-  };\n`);
-  let activeListeners = 0;
-  let unsubscriptions = 0;
-  const eventBus: EventBus = {
-    emit() {},
-    on(topic) {
-      if (topic === "audit:reject") throw new Error("supplied bus rejected subscription");
-      activeListeners += 1;
-      return () => {
-        activeListeners -= 1;
-        unsubscriptions += 1;
-      };
-    },
-  };
-  const host = await loadDirectPlugins([], { workspace: root });
-  context.after(async () => await host.close());
+for (const selected of [{
+  name: "a supplied event bus cannot leave a half-committed generation",
+  topic: "audit:reject",
+  reject() { throw new Error("supplied bus rejected subscription"); },
+  diagnostic: /supplied bus rejected subscription/u,
+}, {
+  name: "a supplied event bus with an invalid unsubscribe result rejects and rolls back the candidate",
+  topic: "audit:invalid",
+  reject() { return undefined; },
+  diagnostic: /unsubscribe function/u,
+}]) {
+  test(selected.name, async (context) => {
+    const root = await workspace(context, "ohm-direct-runtime-event-bus-failure-");
+    const sourcePath = join(root, "candidate.mjs");
+    await writeFile(sourcePath, `export default (ohm) => {
+      ohm.events.on("audit:first", () => undefined);
+      ohm.events.on(${JSON.stringify(selected.topic)}, () => undefined);
+      ohm.registerCommand("must-not-commit", { handler() {} });
+    };\n`);
+    let activeListeners = 0;
+    let unsubscriptions = 0;
+    const eventBus = {
+      emit() {},
+      on() {
+        activeListeners += 1;
+        return () => {
+          activeListeners -= 1;
+          unsubscriptions += 1;
+        };
+      },
+    } satisfies EventBus;
+    const subscribe = eventBus.on;
+    Object.defineProperty(eventBus, "on", {
+      value(topic: string) {
+        return topic === selected.topic ? selected.reject() : subscribe();
+      },
+    });
+    const host = await loadDirectPlugins([], { workspace: root });
+    context.after(async () => await host.close());
 
-  await assert.rejects(
-    appendDirectPlugins(host, [sourcePath], {
-      workspace: root,
-      activationFailure: "throw",
-      eventBus,
-    }),
-    /supplied bus rejected subscription/u,
-  );
-  assert.equal(activeListeners, 0);
-  assert.equal(unsubscriptions, 1);
-  assert.deepEqual(host.plugins(), []);
-  assert.deepEqual(host.commands(), []);
-});
-
-test("a supplied event bus with an invalid unsubscribe result rejects and rolls back the candidate", async (context) => {
-  const root = await workspace(context, "ohm-direct-runtime-event-bus-unsubscribe-");
-  const sourcePath = join(root, "candidate.mjs");
-  await writeFile(sourcePath, `export default (ohm) => {
-    ohm.events.on("audit:first", () => undefined);
-    ohm.events.on("audit:invalid", () => undefined);
-    ohm.registerCommand("must-not-commit", { handler() {} });
-  };\n`);
-  let activeListeners = 0;
-  let unsubscriptions = 0;
-  const eventBus = {
-    emit() {},
-    on() {
-      activeListeners += 1;
-      return () => {
-        activeListeners -= 1;
-        unsubscriptions += 1;
-      };
-    },
-  } satisfies EventBus;
-  Object.defineProperty(eventBus, "on", {
-    value(topic: string) {
-      if (topic === "audit:invalid") return undefined;
-      activeListeners += 1;
-      return () => {
-        activeListeners -= 1;
-        unsubscriptions += 1;
-      };
-    },
+    await assert.rejects(
+      appendDirectPlugins(host, [sourcePath], {
+        workspace: root,
+        activationFailure: "throw",
+        eventBus,
+      }),
+      selected.diagnostic,
+    );
+    assert.equal(activeListeners, 0);
+    assert.equal(unsubscriptions, 1);
+    assert.deepEqual(host.plugins(), []);
+    assert.deepEqual(host.commands(), []);
+    await assert.doesNotReject(host.close());
   });
-  const host = await loadDirectPlugins([], { workspace: root });
-
-  await assert.rejects(
-    appendDirectPlugins(host, [sourcePath], {
-      workspace: root,
-      activationFailure: "throw",
-      eventBus,
-    }),
-    /unsubscribe function/u,
-  );
-  assert.equal(activeListeners, 0);
-  assert.equal(unsubscriptions, 1);
-  assert.deepEqual(host.plugins(), []);
-  assert.deepEqual(host.commands(), []);
-  await assert.doesNotReject(host.close());
-});
+}
 
 test("a reentrant supplied event bus cannot leak a live subscription while closing the host", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-direct-runtime-event-bus-reentrant-"));
@@ -1775,7 +1853,7 @@ test("a reentrant supplied event bus cannot leak a live subscription while closi
   if (capturedEvents === undefined) throw new Error("Shared event API was not captured");
   assert.throws(
     () => capturedEvents.on("audit:reentrant", () => undefined),
-    /Runtime extension host is closed/u,
+    /Runtime plugin host is closed/u,
   );
   await closePromise;
   assert.equal(activeListeners, 0);

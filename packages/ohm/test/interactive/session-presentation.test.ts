@@ -25,17 +25,23 @@ import type {
   TuiTranscriptItem,
 } from "../../src/tui/types.js";
 
-const roots = new Set<string>();
+const roots = new Map<string, SessionManager | undefined>();
 
 test.afterEach(async () => {
-  await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
+  const pending = [...roots];
   roots.clear();
+  await Promise.all(pending.map(async ([root, storage]) => {
+    storage?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  }));
 });
 
 async function manager(): Promise<SessionManager> {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-presentation-"));
-  roots.add(root);
-  return SessionManager.create(root, join(root, "sessions"), { id: "presentation" });
+  roots.set(root, undefined);
+  const storage = SessionManager.create(root, join(root, "sessions"), { id: "presentation" });
+  roots.set(root, storage);
+  return storage;
 }
 
 function fakeSession(
@@ -839,6 +845,25 @@ test("live presentation teardown releases both subscriptions when the first unsu
   assert.throws(unsubscribe, (error) => error === unsubscribeError);
   assert.deepEqual(fixture.listenerCounts(), { envelopes: 0, sessions: 0 });
 });
+
+for (const boundary of ["second subscription", "history cleanup"]) {
+  test(`live presentation releases acquired subscriptions after ${boundary} fails`, async (context) => {
+    const fixture = fakeSession(await manager());
+    const failure = new Error(`${boundary} failed`);
+    if (boundary === "second subscription") context.mock.method(fixture.session, "subscribe", () => { throw failure; });
+    const terminal: InteractiveSessionPresentationTerminal = {
+      replaceTranscript() {}, setUsageBaseline() {}, renderSessionEntry() {}, render() {},
+      setTranscriptHistory(history) { if (history === undefined) throw failure; },
+    };
+    if (boundary === "second subscription") {
+      assert.throws(() => bindInteractiveSessionPresentation(fixture.session, terminal), (error) => error === failure);
+    } else {
+      const dispose = bindInteractiveSessionPresentation(fixture.session, terminal);
+      assert.throws(dispose, (error) => error === failure);
+    }
+    assert.deepEqual(fixture.listenerCounts(), { envelopes: 0, sessions: 0 });
+  });
+}
 
 test("live presentation replay failure releases both subscriptions when the first unsubscriber throws", async () => {
   const storage = await manager();

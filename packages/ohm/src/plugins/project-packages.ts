@@ -3281,7 +3281,12 @@ export class ProjectPackageManager {
     const committed = currentLock !== undefined && lockSha256(currentLock) === expectedLockSha256;
     if (committed) {
       if (!await directoryExists(active)) {
-        throw new Error("Committed project package transaction is missing its active package set");
+        if (phase === "activated" || !await directoryExists(stage)) {
+          throw new Error("Committed project package transaction is missing its active package set");
+        }
+        // Reconciliation retains the lock; its matching stage can precede activation.
+        await this.#installed(currentLock, stage, signal, true);
+        await rename(stage, active);
       }
       await this.#installed(currentLock, active, signal);
       await rm(backup, { recursive: true, force: true });

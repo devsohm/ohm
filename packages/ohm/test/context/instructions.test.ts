@@ -24,6 +24,29 @@ function directory(prefix: string): string {
   return path;
 }
 
+test("instruction invalid UTF-8 retains its valid prefix with bounded decoding work", async (t) => {
+  const root = directory("harness-instruction-invalid-utf8-");
+  const prefix = "a".repeat(4_096);
+  const bytes = Buffer.concat([Buffer.from(prefix), Buffer.from([0xff]), Buffer.alloc(4_096, 98)]);
+  const filename = "BOUNDED-INSTRUCTIONS.md";
+  writeFileSync(join(root, filename), bytes);
+  let decodedBytes = 0;
+  const originalDecode = TextDecoder.prototype.decode;
+  const observer = t.mock.method(TextDecoder.prototype, "decode", function(this: TextDecoder, ...args: Parameters<TextDecoder["decode"]>) {
+    decodedBytes += args[0]?.byteLength ?? 0;
+    return originalDecode.apply(this, args);
+  });
+  let discovered: Awaited<ReturnType<typeof discoverInstructions>>;
+  try {
+    discovered = await discoverInstructions({ workspaceRoot: root, cwd: root, trusted: true, filenames: [filename] });
+  } finally {
+    observer.mock.restore();
+  }
+  assert.deepEqual(discovered.entries.map((entry) => entry.text), [prefix]);
+  assert.equal(discovered.truncated, true);
+  assert.ok(decodedBytes <= bytes.length * 8, `decoding revisited ${decodedBytes} bytes for ${bytes.length} input bytes`);
+});
+
 test("instructions load user then root-to-cwd with nearest override and provenance", async () => {
   const root = directory("harness-instructions-");
   const nested = join(root, "packages", "app");

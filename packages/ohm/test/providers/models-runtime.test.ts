@@ -103,6 +103,54 @@ test("direct models collection replaces providers in place and supports exact sy
   assert.deepEqual(models.getProviders(), []);
 });
 
+for (const mutation of ["write", "delete"] as const) {
+  test(`retired direct provider cannot ${mutation} the replacement catalog`, async () => {
+    const modelsStore = new InMemoryProviderModelsStore();
+    const id = "replacement-catalog";
+    const models = createModels({ modelsStore });
+    const auth = { apiKey: {
+      name: "Catalog fixture",
+      resolve: async () => ({ auth: { apiKey: "catalog-fixture-key" } }),
+    } };
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let releaseRefresh!: () => void;
+    const release = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    models.setProvider({
+      ...provider(id, [model(id, "retired")]),
+      auth,
+      async refreshModels(context) {
+        if (!context.allowNetwork) return;
+        markStarted();
+        await release;
+        if (mutation === "write") await context.store.write({ models: [model(id, "retired")] });
+        else await context.store.delete();
+      },
+    });
+    const retired = models.refreshProvider(id);
+    try {
+      await started;
+      models.setProvider({
+        ...provider(id, [model(id, "replacement")]),
+        auth,
+        async refreshModels(context) {
+          if (context.allowNetwork) await context.store.write({ models: [model(id, "replacement")] });
+        },
+      });
+      const current = await models.refreshProvider(id);
+      assert.equal(current.errors.size, 0);
+      assert.deepEqual((await modelsStore.read(id))?.models.map((entry) => entry.id), ["replacement"]);
+      releaseRefresh();
+      await retired;
+      assert.deepEqual(models.getModels(id).map((entry) => entry.id), ["replacement"]);
+      assert.deepEqual((await modelsStore.read(id))?.models.map((entry) => entry.id), ["replacement"]);
+    } finally {
+      releaseRefresh();
+      await retired;
+    }
+  });
+}
+
 test("provider credential mutation lanes release settled IDs and preserve same-ID ordering", async () => {
   const credentials = new InMemoryProviderCredentialStore();
   const failure = new Error("provider credential mutation failed");

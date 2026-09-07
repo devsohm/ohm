@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { lstat, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { isProxy } from "node:util/types";
 
@@ -204,12 +204,10 @@ import {
   canonicalContent,
   canonicalMessage,
   canonicalUsage,
-  extensionCanonicalMessages,
   extensionContextMessages,
   extensionContent,
   extensionInputContent,
   extensionMessage,
-  extensionSessionEntries,
   extensionUsage,
   type PluginSessionManager,
   type ReadonlyPluginSessionManager,
@@ -226,6 +224,7 @@ import {
   directDispatchEvents,
   directEventRecord,
   freezeRuntimeRunEvent,
+  projectSessionListenerEvent,
   runtimeRequesterSession,
   type RuntimeRequesterSession,
 } from "./runtime-internal/event-projection.js";
@@ -750,7 +749,7 @@ export interface RuntimeAfterProviderResponseEvent {
   type: "after_provider_response";
   /** HTTP status observed for this transport attempt. */
   status: number;
-  /** Complete normalized response headers for trusted in-process direct extensions. */
+  /** Complete normalized response headers for trusted in-process direct plugins. */
   headers: Record<string, string>;
 }
 
@@ -857,7 +856,7 @@ export interface RuntimeToolCallReduction {
 export interface RuntimeToolResultEvent extends RuntimeRunScope {
   invocation: ToolInvocation;
   result: ToolResult;
-  /** Usage attributed to the tool result presented to extension listeners. */
+  /** Usage attributed to the tool result presented to plugin listeners. */
   usage?: NormalizedUsage;
 }
 
@@ -912,9 +911,9 @@ export interface RuntimeProjectTrustResult {
 }
 
 export interface RuntimePluginDataPaths {
-  /** Durable data shared by this extension across workspaces. Never contains host credentials. */
+  /** Durable data shared by this plugin across workspaces. Never contains host credentials. */
   user: string;
-  /** Durable data isolated to this extension and the current canonical workspace. */
+  /** Durable data isolated to this plugin and the current canonical workspace. */
   workspace: string;
 }
 
@@ -1384,7 +1383,7 @@ export const HEADLESS_PLUGIN_UI_CAPABILITIES: Readonly<PluginUICapabilities> = O
   routes: false,
 });
 
-/** Unrestricted UI contract available to explicitly trusted direct extensions. */
+/** Unrestricted UI contract available to explicitly trusted direct plugins. */
 export interface RuntimeDirectUiContext
   extends RuntimeDirectUiThemeCatalogControls,
     RuntimeDirectUiThemeSelectionControls,
@@ -1405,7 +1404,7 @@ export interface RuntimeDirectUiContext
 export interface RuntimePluginListenerContext {
   /** Current working directory. Trusted direct factories receive the host value unchanged. */
   readonly cwd: string;
-  /** Secure host-created durable storage owned by the current extension generation. */
+  /** Secure host-created durable storage owned by the current plugin generation. */
   readonly paths: {
     readonly userData: string;
     readonly workspaceData: string;
@@ -1423,7 +1422,7 @@ export interface RuntimePluginListenerContext {
   readonly sessionManager: ReadonlyPluginSessionManager;
   /** Promise-returning delivery bound to this callback's exact live session. */
   readonly sessionDelivery: PluginSessionDelivery;
-  /** Active model directory, including credential resolution for trusted extensions. */
+  /** Active model directory, including credential resolution for trusted plugins. */
   readonly modelRegistry: RuntimePluginModelRegistry;
   /** Currently selected model, when one is selected. */
   readonly model: Model<Api> | undefined;
@@ -1487,7 +1486,7 @@ export type RuntimeDirectUiHandler = (
   /** Callback-scoped cancellation used by dialogs and presentation ownership. */
   signal: AbortSignal,
   ownerKey: string,
-  /** Stable extension-generation lifetime used to cache heavyweight host resources. */
+  /** Stable plugin-generation lifetime used to cache heavyweight host resources. */
   generationSignal: AbortSignal,
 ) => RuntimeDirectUiContext;
 
@@ -1573,7 +1572,7 @@ interface RuntimeDirectToolSelectionActions {
   setActiveTools(toolNames: string[]): void;
   /** Queue the host's complete live registry for the next provider boundary. */
   refreshTools?(): void;
-  /** Unified extension-command, prompt-template, and skill-command catalog. */
+  /** Unified plugin-command, prompt-template, and skill-command catalog. */
   getCommands?(): readonly SlashCommandInfo[];
 }
 
@@ -1899,7 +1898,7 @@ export interface RuntimeCommandRegistration {
   execute(context: RuntimeDirectCommandContext & { args: string }): RuntimeCommandResult | Promise<RuntimeCommandResult>;
 }
 
-/** Direct-factory command shape used by trusted runtime extensions. */
+/** Direct-factory command shape used by trusted runtime plugins. */
 export interface RuntimeDirectCommandRegistration {
   description?: string;
   argumentHint?: string;
@@ -1981,7 +1980,7 @@ export interface RuntimeCommandDescription {
   trusted: boolean;
   /** Name accepted by the command dispatcher. Duplicate base names receive :N suffixes. */
   name: string;
-  /** Name originally registered by the extension. */
+  /** Name originally registered by the plugin. */
   baseName: string;
   description?: string;
   argumentHint?: string;
@@ -2091,14 +2090,8 @@ interface StagedActivation {
   sharedEmissions: Array<{ topic: string; payload: JsonValue; bytes: number }>;
   sharedEmissionBytes: number;
   disposers: Array<() => void | Promise<void>>;
-  moduleDisposers: Array<() => void | Promise<void>>;
   ui: RuntimeInitialUiOperation[];
   advancedUi: RuntimeAdvancedUiOperation[];
-}
-
-interface RuntimePreparedToolRegistration {
-  accepted: boolean;
-  registration: RuntimeToolRegistration;
 }
 
 interface RuntimeNamedToolRenderer {
@@ -2240,7 +2233,7 @@ function unavailableDirectContext(): RuntimeDirectContextSnapshot {
     shutdown() {},
     getContextUsage: () => undefined,
     compact(options) {
-      options?.onError?.(new Error("Compaction is unavailable before the direct extension host is bound"));
+      options?.onError?.(new Error("Compaction is unavailable before the direct plugin host is bound"));
     },
     getSystemPrompt: () => "",
   };
@@ -2745,7 +2738,7 @@ function validDirectAgentMessage<Input>(value: Input): boolean {
 function runtimeAgentMessages<Input>(value: Input, label: string): DirectAgentMessage[] {
   const snapshot = cloneConversation(value, label);
   if (!Array.isArray(snapshot)) {
-    throw new TypeError(`${label} must be an array of extension agent messages`);
+    throw new TypeError(`${label} must be an array of plugin agent messages`);
   }
   const messages = snapshot.map((message) => {
     if (
@@ -2756,7 +2749,7 @@ function runtimeAgentMessages<Input>(value: Input, label: string): DirectAgentMe
     return message;
   });
   if (!messages.every(validDirectAgentMessage)) {
-    throw new TypeError(`${label} must be an array of extension agent messages`);
+    throw new TypeError(`${label} must be an array of plugin agent messages`);
   }
   // SAFETY: every entry passed its public role boundary; canonicalMessage validates assistant content immediately after.
   return messages as DirectAgentMessage[];
@@ -3466,6 +3459,11 @@ function directToolRegistration<TParams extends TSchema, TDetails, TState>(
   if (!Value.Check(OBJECT_VALUE, tool)) throw new TypeError("Plugin tool must be an object");
   const prepareArguments = tool.prepareArguments;
   const resources = tool.resources;
+  for (const [name, callback] of [["execute", tool.execute], ["prepareArguments", prepareArguments], ["resources", resources]] as const) {
+    if ((name === "execute" || callback !== undefined) && !Value.Check(FUNCTION_VALUE, callback)) {
+      throw new TypeError(`Plugin tool ${name} must be a function`);
+    }
+  }
   return {
     name: tool.name,
     ...optionalProperties(tool.label === undefined ? undefined : { label: tool.label }),
@@ -3567,9 +3565,14 @@ function directToolRenderer<TParams extends TSchema, TDetails, TState>(
   tool: DirectToolDefinition<TParams, TDetails, TState>,
   workspace: string,
 ): DirectRuntimeToolRenderer | undefined {
-  if (tool.renderShell === undefined && tool.renderCall === undefined && tool.renderResult === undefined) return undefined;
   const renderCall = tool.renderCall;
   const renderResultDefinition = tool.renderResult;
+  for (const [name, callback] of [["renderCall", renderCall], ["renderResult", renderResultDefinition]] as const) {
+    if (callback !== undefined && !Value.Check(FUNCTION_VALUE, callback)) {
+      throw new TypeError(`Plugin tool ${name} must be a function`);
+    }
+  }
+  if (tool.renderShell === undefined && renderCall === undefined && renderResultDefinition === undefined) return undefined;
   const states = new Map<string, DirectToolRendererState<TState>>();
   const componentReferences = new WeakMap<DisposableComponent, number>();
   const disposedComponents = new WeakSet<DisposableComponent>();
@@ -3594,12 +3597,12 @@ function directToolRenderer<TParams extends TSchema, TDetails, TState>(
   ): void => {
     const prior = state[slot];
     if (prior === next) return;
-    releaseComponent(prior);
     if (next === undefined) delete state[slot];
     else {
       state[slot] = next;
       componentReferences.set(next, (componentReferences.get(next) ?? 0) + 1);
     }
+    releaseComponent(prior);
   };
   const disposeState = (state: DirectToolRendererState<TState>): void => {
     let failure: Error | undefined;
@@ -3748,7 +3751,7 @@ export interface DirectToolRendererDiagnostic {
   message: string;
 }
 
-/** Internal session adapter for direct definitions supplied outside an extension generation. */
+/** Internal session adapter for direct definitions supplied outside a plugin generation. */
 export function directToolRendererBinding(
   tools: readonly DirectToolDefinition<any, any, any>[],
   workspace: string,
@@ -3854,7 +3857,6 @@ function activation(
     sharedEmissions: [],
     sharedEmissionBytes: 0,
     disposers: [],
-    moduleDisposers: [],
     ui: [],
     advancedUi: [],
   };
@@ -3866,7 +3868,7 @@ function activation(
   const processes = host.managedProcesses(entry, generation, () => staged.committed);
   const jobs = host.durableJobs(entry, generation, dataPaths, () => staged.committed);
   const assertActive = (): void => {
-    if (!generation.active) throw new Error(`Runtime extension context is no longer active: ${entry.extensionId}`);
+    if (!generation.active) throw new Error(`Runtime plugin context is no longer active: ${entry.extensionId}`);
   };
   const events: PluginAPI["events"] = {
     on(topicValue, handler) {
@@ -3955,7 +3957,7 @@ function activation(
       const registration = { name, service };
       if (!staged.committed) {
         if (staged.services.some((candidate) => candidate.name === name)) {
-          throw new Error(`Runtime service ${name} is already registered by this extension activation`);
+          throw new Error(`Runtime service ${name} is already registered by this plugin activation`);
         }
         host.assertServiceRegistrationAvailable(name, staged.services.length + 1);
         staged.services.push(registration);
@@ -4035,19 +4037,6 @@ function activation(
       ...optionalProperties(promptGuidelines === undefined ? undefined : { promptGuidelines }),
     };
   };
-  const registerRuntimeTool = (
-    tool: RuntimeToolCandidate,
-  ): RuntimePreparedToolRegistration => {
-    const registration = prepareRuntimeTool(tool);
-    if (staged.committed) {
-      return {
-        accepted: host.registerLiveTool(staged.entry, staged.generation, registration),
-        registration,
-      };
-    }
-    staged.tools.push(registration);
-    return { accepted: true, registration };
-  };
   const prepareRuntimeToolRenderer = (
     name: string,
     renderer: RuntimeToolRenderer,
@@ -4068,15 +4057,6 @@ function activation(
       throw new Error("Runtime tool renderer must define renderShell, renderCall, or renderResult");
     }
     return { name, renderer };
-  };
-  const registerRuntimeToolRenderer = (
-    name: string,
-    renderer: RuntimeToolRenderer,
-  ): RuntimeNamedToolRenderer => {
-    const registration = prepareRuntimeToolRenderer(name, renderer);
-    if (staged.committed) host.registerLiveToolRenderer(staged.entry, staged.generation, name, renderer);
-    else staged.toolRenderers.push(registration);
-    return registration;
   };
   const registerRuntimeCommand = (
     name: string,
@@ -4207,7 +4187,7 @@ function activation(
     services,
     onDispose(dispose) {
       assertActive();
-      if (!Value.Check(FUNCTION_VALUE, dispose)) throw new Error("Runtime extension disposer must be a function");
+      if (!Value.Check(FUNCTION_VALUE, dispose)) throw new Error("Runtime plugin disposer must be a function");
       const cleanup = onceRuntimeCleanup(dispose);
       if (staged.committed) host.registerLiveDisposer(staged.entry, staged.generation, cleanup);
       else staged.disposers.push(cleanup);
@@ -4235,28 +4215,30 @@ function activation(
       });
     },
     registerTool(tool) {
-      const {
-        accepted,
-        registration: runtimeRegistration,
-      } = registerRuntimeTool(directToolRegistration(tool));
-      if (!accepted) {
-        compatibilityProjection.tools.delete(tool.name);
-        return runtimeRegistrationHandle(staged.generation, () => undefined, false);
-      }
+      const runtimeRegistration = prepareRuntimeTool(directToolRegistration(tool));
       const projectedRegistration = {
         definition: compatibilityToolDefinition(tool),
         sourceInfo: compatibilitySourceInfo,
       };
-      compatibilityProjection.tools.set(tool.name, projectedRegistration);
       const renderer = directToolRenderer(tool, workspace);
-      let rendererRegistration: RuntimeNamedToolRenderer | undefined;
+      const rendererRegistration = renderer === undefined
+        ? undefined
+        : prepareRuntimeToolRenderer(tool.name, renderer);
+      if (staged.committed) {
+        if (!host.registerLiveTool(staged.entry, staged.generation, runtimeRegistration)) {
+          compatibilityProjection.tools.delete(tool.name);
+          return runtimeRegistrationHandle(staged.generation, () => undefined, false);
+        }
+      } else staged.tools.push(runtimeRegistration);
+      compatibilityProjection.tools.set(tool.name, projectedRegistration);
       if (!staged.committed) {
         for (let index = staged.toolRenderers.length - 1; index >= 0; index -= 1) {
           if (staged.toolRenderers[index]?.name === tool.name) staged.toolRenderers.splice(index, 1);
         }
       }
-      if (renderer !== undefined) {
-        rendererRegistration = registerRuntimeToolRenderer(tool.name, renderer);
+      if (rendererRegistration !== undefined) {
+        if (staged.committed) host.registerLiveToolRenderer(staged.entry, staged.generation, tool.name, rendererRegistration.renderer);
+        else staged.toolRenderers.push(rendererRegistration);
       } else if (staged.committed) {
         host.unregisterLiveToolRenderer(staged.entry, staged.generation, tool.name);
       }
@@ -4534,7 +4516,7 @@ export interface RuntimePluginHostOptions {
   shutdownTimeoutMs?: number;
   /** Aggregate bound for resources_discover when the caller does not supply a signal. */
   resourceDiscoveryTimeoutMs?: number;
-  /** Root for extension-owned durable data; callers embedding the loader may override it. */
+  /** Root for plugin-owned durable data; callers embedding the loader may override it. */
   dataRoot?: string;
   /** Initial callback mode; embedded/headless loaders use print semantics by default. */
   mode?: RuntimePluginMode;
@@ -4563,7 +4545,7 @@ export async function dispatchAgentSessionMessageUpdate(
   signal?: AbortSignal,
 ): Promise<void> {
   const dispatch = agentSessionMessageUpdateDispatchers.get(host);
-  if (dispatch === undefined) throw new Error("Runtime extension host is unavailable");
+  if (dispatch === undefined) throw new Error("Runtime plugin host is unavailable");
   await dispatch(value, signal);
 }
 
@@ -4595,7 +4577,6 @@ export class RuntimePluginHost {
   #portablePresentationSnapshotItemBytes = 0;
   readonly #externalSharedListeners = new Set<OwnedExternalSharedListener>();
   readonly #disposers: Array<() => void | Promise<void>> = [];
-  readonly #moduleDisposers: Array<() => void | Promise<void>> = [];
   readonly #initialUi: RuntimeInitialUiOperation[] = [];
   readonly #initialAdvancedUi: RuntimeAdvancedUiOperation[] = [];
   readonly #diagnostics: RuntimePluginDiagnostic[] = [];
@@ -4657,7 +4638,7 @@ export class RuntimePluginHost {
     this.#directUiHandler = options.directUiHandler;
     const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_RUNTIME_PLUGIN_SHUTDOWN_TIMEOUT_MS;
     if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 300_000) {
-      throw new RangeError("Runtime extension shutdownTimeoutMs must be from 1 through 300000");
+      throw new RangeError("Runtime plugin shutdownTimeoutMs must be from 1 through 300000");
     }
     this.#shutdownTimeoutMs = shutdownTimeoutMs;
     const resourceDiscoveryTimeoutMs = options.resourceDiscoveryTimeoutMs ?? DEFAULT_RUNTIME_RESOURCE_DISCOVERY_TIMEOUT_MS;
@@ -4721,27 +4702,27 @@ export class RuntimePluginHost {
     return this.#durableJobSupervisor.jobs(owner);
   }
 
-  /** Aborts exactly once when this loaded extension generation is replaced or closed. */
+  /** Aborts exactly once when this loaded plugin generation is replaced or closed. */
   lifecycleSignal(): AbortSignal {
     return this.#lifecycle.signal;
   }
 
   setHostContext(input: { mode?: RuntimePluginMode; projectTrusted?: boolean }): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (input.mode !== undefined) {
       if (!["tui", "rpc", "json", "print", "serve", "sdk"].includes(input.mode)) {
-        throw new Error("Runtime extension host mode is invalid");
+        throw new Error("Runtime plugin host mode is invalid");
       }
       this.#mode = input.mode;
     }
     if (input.projectTrusted !== undefined) {
-      if (!Value.Check(BOOLEAN_VALUE, input.projectTrusted)) throw new Error("Runtime extension project trust must be a boolean");
+      if (!Value.Check(BOOLEAN_VALUE, input.projectTrusted)) throw new Error("Runtime plugin project trust must be a boolean");
       this.#projectTrusted = input.projectTrusted;
     }
   }
 
   hostContext(): RuntimeHostContext {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return { mode: this.#mode, projectTrusted: this.#projectTrusted };
   }
 
@@ -4758,7 +4739,7 @@ export class RuntimePluginHost {
     | { name: string; config: RuntimeDirectProviderConfig }
     | { name: string; provider: PluginProvider }
   > {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return this.#directProviders
       .filter((entry) => entry.generation.active)
       .map((entry) => ({ ...entry.registration }));
@@ -4771,7 +4752,7 @@ export class RuntimePluginHost {
       | { name: string; config: RuntimeDirectProviderConfig }
       | { name: string; provider: PluginProvider };
   }> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return this.#directProviders
       .filter((entry) => entry.generation.active)
       .map((entry) => ({
@@ -4792,14 +4773,14 @@ export class RuntimePluginHost {
 
   /** Read-only compatibility metadata for a loaded direct factory; execution remains host-owned. */
   compatibilityProjection(sourcePath: string): DirectPlugin | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return this.#generations.find((generation) =>
       generation.active && generation.entry.sourcePath === sourcePath)?.compatibilityProjection;
   }
 
-  /** Secure durable paths prepared for one active direct-extension generation. */
+  /** Secure durable paths prepared for one active direct-plugin generation. */
   pluginDataPaths(sourcePath: string): RuntimePluginDataPaths | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#generations.find((generation) =>
       generation.active && generation.entry.sourcePath === sourcePath)?.dataPaths;
     return selected === undefined ? undefined : Object.freeze({ ...selected });
@@ -4813,9 +4794,9 @@ export class RuntimePluginHost {
    * transactionally after it has started serving runs.
    */
   reorderCommittedPlugins(sourcePaths: readonly string[]): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (this.#liveRegistrationHandler !== undefined) {
-      throw new Error("Runtime extensions cannot be reordered after live registration is bound");
+      throw new Error("Runtime plugins cannot be reordered after live registration is bound");
     }
     const pathOrder = new Map<string, number>();
     for (const sourcePath of sourcePaths) {
@@ -4931,12 +4912,12 @@ export class RuntimePluginHost {
   }
 
   messageRenderer(customType: string): RuntimeDirectMessageRenderer | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return this.#messageRenderers.find((entry) => entry.generation.active && entry.customType === customType)?.renderer;
   }
 
   transformMarkdown(markdown: string, context: Readonly<MarkdownTransformContext>): string {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     let transformed = bounded(markdown, "Markdown input", 2 * 1024 * 1024);
     const safeContext = Object.freeze({
       messageType: context.messageType,
@@ -4964,19 +4945,19 @@ export class RuntimePluginHost {
   }
 
   entryRenderer(customType: string): RuntimeDirectEntryRenderer | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return this.#entryRenderers.find((entry) => entry.generation.active && entry.customType === customType)?.renderer;
   }
 
   renderShell(name: string): "default" | "self" | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#toolRenderers.get(name);
     return selected?.generation.active === true ? selected.renderer.renderShell : undefined;
   }
 
   /** Generation-bound adapter consumed directly by the interactive TUI. */
   toolRendererBinding(): RuntimeToolRendererBinding {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     return {
       has: (name) => this.#toolRenderers.get(name)?.generation.active === true,
       renderShell: (name) => this.renderShell(name),
@@ -5027,7 +5008,7 @@ export class RuntimePluginHost {
     context: RuntimeUiRenderContext,
     bridge?: RuntimeToolRenderBridge,
   ): RuntimeUiBlock | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#toolRenderers.get(name);
     if (selected?.renderer.renderCall === undefined) return undefined;
     return this.#renderBlock(selected, `tool call ${name}`, context, (safeContext) => selected.renderer.renderCall?.(
@@ -5043,7 +5024,7 @@ export class RuntimePluginHost {
     context: RuntimeUiRenderContext,
     bridge?: RuntimeToolRenderBridge,
   ): RuntimeUiBlock | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#toolRenderers.get(name);
     if (selected?.renderer.renderResult === undefined) return undefined;
     return this.#renderBlock(selected, `tool result ${name}`, context, (safeContext) => selected.renderer.renderResult?.(
@@ -5060,7 +5041,7 @@ export class RuntimePluginHost {
     context: RuntimeUiRenderContext,
     bridge?: RuntimeToolRenderBridge,
   ): RuntimeUiBlock | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#toolRenderers.get(name);
     if (selected === undefined) return undefined;
     const renderer = selected.renderer;
@@ -5114,9 +5095,9 @@ export class RuntimePluginHost {
   }
 
   setFlagValue(name: string, value: boolean | string): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const flag = this.#flags.get(name);
-    if (flag === undefined) throw new Error(`Unknown runtime extension flag: ${name}`);
+    if (flag === undefined) throw new Error(`Unknown runtime plugin flag: ${name}`);
     const validValue = flag.registration.type === "boolean"
       ? Value.Check(BOOLEAN_VALUE, value)
       : Value.Check(STRING_VALUE, value);
@@ -5154,7 +5135,7 @@ export class RuntimePluginHost {
 
   /** Observes sanitized runtime diagnostics as they are recorded. */
   onError(listener: (diagnostic: RuntimePluginDiagnostic) => void): () => void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#errorListeners.add(listener);
     return () => { this.#errorListeners.delete(listener); };
   }
@@ -5164,7 +5145,7 @@ export class RuntimePluginHost {
   }
 
   /**
-   * Asks only already-active extensions for a project-resource decision.
+   * Asks only already-active plugins for a project-resource decision.
    * Listener failures are diagnostic and do not prevent a later listener or
    * the host policy from deciding. The first affirmative or negative result
    * wins; undecided listeners are advisory only.
@@ -5174,9 +5155,9 @@ export class RuntimePluginHost {
     ui?: RuntimeProjectTrustUi,
     signal?: AbortSignal,
   ): Promise<RuntimeProjectTrustResult> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const workspace = resolve(bounded(event.workspace, "Runtime project trust workspace", 16 * 1024));
-    if (workspace !== this.#workspace) throw new Error("Runtime project trust workspace does not match the extension host");
+    if (workspace !== this.#workspace) throw new Error("Runtime project trust workspace does not match the plugin host");
     const cwd = resolve(bounded(event.cwd, "Runtime project trust cwd", 16 * 1024));
     const selectedUi: RuntimeProjectTrustUi = ui ?? Object.freeze({
       hasUI: false,
@@ -5187,7 +5168,7 @@ export class RuntimePluginHost {
     if (!Value.Check(BOOLEAN_VALUE, selectedUi.hasUI) || !Value.Check(FUNCTION_VALUE, selectedUi.confirm)) {
       throw new Error("Runtime project trust UI is invalid");
     }
-    for (const owned of this.#listeners.get("project_trust") ?? []) {
+    for (const owned of (this.#listeners.get("project_trust") ?? []).slice()) {
       const scope = owned.entry.scope ?? "project";
       if (owned.entry.trusted !== true || (scope !== "user" && scope !== "invocation")) continue;
       signal?.throwIfAborted();
@@ -5256,12 +5237,12 @@ export class RuntimePluginHost {
     reason: RuntimeResourcesDiscoverEvent["reason"],
     signal?: AbortSignal,
   ): Promise<RuntimeDiscoveredResources> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (reason !== "startup" && reason !== "refresh") throw new Error("Runtime resource discovery reason is invalid");
     const discoverySignal = signal ?? AbortSignal.timeout(this.#resourceDiscoveryTimeoutMs);
     const discovered: RuntimeDiscoveredResources = { skillPaths: [], promptPaths: [], themePaths: [] };
     let total = 0;
-    for (const owned of this.#listeners.get("resources_discover") ?? []) {
+    for (const owned of (this.#listeners.get("resources_discover") ?? []).slice()) {
       discoverySignal.throwIfAborted();
       const scope = owned.entry.scope ?? "project";
       const trusted = owned.entry.trusted ?? true;
@@ -5269,7 +5250,7 @@ export class RuntimePluginHost {
         this.addDiagnostic({
           extensionId: owned.entry.extensionId,
           sourcePath: owned.entry.sourcePath,
-          message: `Runtime resources_discover ignored resources from an untrusted ${scope} extension`,
+          message: `Runtime resources_discover ignored resources from an untrusted ${scope} plugin`,
         });
         continue;
       }
@@ -5340,7 +5321,7 @@ export class RuntimePluginHost {
       this.#diagnostics.push(diagnostic);
       for (const listener of this.#errorListeners) {
         try { listener({ ...diagnostic }); }
-        catch { /* Diagnostic observers must not destabilize the extension host. */ }
+        catch { /* Diagnostic observers must not destabilize the plugin host. */ }
       }
       return;
     }
@@ -5348,28 +5329,28 @@ export class RuntimePluginHost {
     const diagnostic = {
       extensionId: "runtime",
       sourcePath: "",
-      message: `Runtime extension diagnostics exceeded ${MAX_RUNTIME_DIAGNOSTICS} entries`,
+      message: `Runtime plugin diagnostics exceeded ${MAX_RUNTIME_DIAGNOSTICS} entries`,
     };
     this.#diagnostics[MAX_RUNTIME_DIAGNOSTICS - 1] = diagnostic;
     for (const listener of this.#errorListeners) {
       try { listener({ ...diagnostic }); }
-      catch { /* Diagnostic observers must not destabilize the extension host. */ }
+      catch { /* Diagnostic observers must not destabilize the plugin host. */ }
     }
   }
 
   setLiveRegistrationHandler(handler: RuntimeLiveRegistrationHandler): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (this.#liveRegistrationHandler !== undefined) throw new Error("Runtime live registration handler is already set");
     this.#liveRegistrationHandler = handler;
   }
 
   setDirectDiscoveryHandler(handler: RuntimeDirectDiscoveryHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#directDiscoveryHandler = handler;
   }
 
   setNativeUiHandler(handler: ((extensionId: string, signal: AbortSignal) => NativeUiHost) | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (handler === this.#nativeUiHandler) return;
     for (const host of this.#nativeUiHosts.values()) host.dispose();
     this.#nativeUiHosts.clear();
@@ -5379,7 +5360,7 @@ export class RuntimePluginHost {
   }
 
   setUnsafeTerminalHandler(handler: ((extensionId: string, signal: AbortSignal) => UnsafeTerminalHost) | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (handler === this.#unsafeTerminalHandler) return;
     for (const host of this.#unsafeTerminalHosts.values()) host.dispose();
     this.#unsafeTerminalHosts.clear();
@@ -5424,27 +5405,27 @@ export class RuntimePluginHost {
 
   /** Binds the raw, synchronous context exposed to trusted direct factories. */
   setDirectContextHandler(handler: RuntimeDirectContextHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#directContextHandler = handler;
     this.#directSessionBindingRevision += 1;
   }
 
   /** Binds implicit-current actions used by the trusted direct factory API. */
   setDirectActionsHandler(handler: RuntimeDirectActionsHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#directActionsHandler = handler;
     this.#directSessionBindingRevision += 1;
   }
 
   setDirectUiHandler(handler: RuntimeDirectUiHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#directUiHandler = handler;
     this.#directSessionBindingRevision += 1;
   }
 
   /** Binds compatibility session UI beneath an owner-aware direct UI host. */
   setSessionUiHandler(handler: RuntimeDirectUiHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#sessionUiHandler = handler;
     this.#directSessionBindingRevision += 1;
   }
@@ -5461,7 +5442,7 @@ export class RuntimePluginHost {
   ): RuntimeDirectActionsHandler {
     this.#assertLive(entry, generation);
     const handler = this.#directActionsHandler;
-    if (handler === undefined) throw new Error("Direct extension actions are unavailable before the session host is bound");
+    if (handler === undefined) throw new Error("Direct plugin actions are unavailable before the session host is bound");
     const owner: RuntimeDirectProviderOwner = {
       key: ownerKey(entry),
       extensionId: entry.extensionId,
@@ -5536,22 +5517,22 @@ export class RuntimePluginHost {
   }
 
   setInteractiveUiHandler(handler: RuntimeInteractiveUiHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#interactiveUiHandler = handler;
   }
 
   addRegistrationCleanup(cleanup: () => void | Promise<void>): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#registrationCleanups.push({ cleanup });
   }
 
   setUiHandler(handler: ((operation: RuntimeInitialUiOperation) => void) | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#uiHandler = handler;
   }
 
   setAdvancedUiHandler(handler: RuntimeAdvancedUiHostHandler | undefined): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#advancedUiHandler = handler;
     if (handler === undefined) return;
     for (const operation of this.#initialAdvancedUi.slice()) {
@@ -5570,18 +5551,18 @@ export class RuntimePluginHost {
   }
 
   onChange(listener: (change: RuntimePluginChange) => void): () => void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     this.#changeListeners.add(listener);
     return () => this.#changeListeners.delete(listener);
   }
 
   applyUi(operation: RuntimeInitialUiOperation): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     operation.signal.throwIfAborted();
     if (this.#uiHandler === undefined) {
       pruneAbortedInitialUiOperations(this.#initialUi);
       if (this.#initialUi.length >= MAX_RETAINED_RUNTIME_UI_OPERATIONS) {
-        throw new Error(`Runtime extension initial UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
+        throw new Error(`Runtime plugin initial UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
       }
       this.#initialUi.push({ ...operation });
     }
@@ -5589,7 +5570,7 @@ export class RuntimePluginHost {
   }
 
   applyAdvancedUi(operation: RuntimeAdvancedUiOperation): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     operation.signal.throwIfAborted();
     this.#assertAdvancedUiOperationCapacity(operation);
     if (this.#advancedUiHandler === undefined) {
@@ -5704,7 +5685,8 @@ export class RuntimePluginHost {
     }
     this.#changed("tool", entry);
     this.#directActionsHandler?.refreshTools?.();
-    return ownedCleanup?.cleanup() ?? this.#liveRegistrationHandler?.unregisterTool(owned.tool);
+    if (ownedCleanup !== undefined) return ownedCleanup.cleanup();
+    return this.#liveRegistrationHandler?.unregisterTool(owned.tool);
   }
 
   registerLiveCommand(
@@ -5724,7 +5706,7 @@ export class RuntimePluginHost {
       this.addDiagnostic({
         extensionId: entry.extensionId,
         sourcePath: entry.sourcePath,
-        message: `Runtime extension command ${command.name} conflicts with a built-in command and is available as ${command.name}:${occurrence}`,
+        message: `Runtime plugin command ${command.name} conflicts with a built-in command and is available as ${command.name}:${occurrence}`,
       });
     }
     this.#changed("command", entry);
@@ -5744,8 +5726,8 @@ export class RuntimePluginHost {
   }
 
   suppressCommands(staged: StagedActivation, names: readonly string[]): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
-    if (staged.committed) throw new Error("Runtime extension activation is already committed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
+    if (staged.committed) throw new Error("Runtime plugin activation is already committed");
     const disabled = new Set(names);
     this.#disabledCommands.set(staged.generation, disabled);
     staged.commands.splice(0, staged.commands.length, ...staged.commands.filter((command) => !disabled.has(command.name)));
@@ -5755,8 +5737,8 @@ export class RuntimePluginHost {
     staged: StagedActivation,
     filters: Readonly<Partial<Record<"skill" | "prompt" | "theme", readonly string[]>>>,
   ): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
-    if (staged.committed) throw new Error("Runtime extension activation is already committed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
+    if (staged.committed) throw new Error("Runtime plugin activation is already committed");
     this.#disabledResources.set(staged.generation, filters);
   }
 
@@ -5953,7 +5935,7 @@ export class RuntimePluginHost {
     this.#assertLive(entry, generation);
     const prior = this.#toolRenderers.get(name);
     if (prior !== undefined && ownerKey(prior.entry) !== ownerKey(entry)) {
-      throw new Error("Runtime extension registered a duplicate tool renderer");
+      throw new Error("Runtime plugin registered a duplicate tool renderer");
     }
     const committedIndex = generation.committedToolRenderers.findIndex((entry) => entry.name === name);
     if (committedIndex < 0) generation.committedToolRenderers.push({ name, renderer });
@@ -6215,7 +6197,7 @@ export class RuntimePluginHost {
   }
 
   assertServiceRegistrationAvailable(name: string, additionalCount = 1): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const existing = this.#services.get(name);
     if (existing !== undefined) {
       throw new Error(
@@ -6228,13 +6210,13 @@ export class RuntimePluginHost {
   }
 
   getService(name: string): object | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const owned = this.#services.get(name);
     return owned?.generation.active === true ? owned.registration.service : undefined;
   }
 
   pluginWireServices(): readonly PluginWireServiceDescriptor[] {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const descriptors: PluginWireServiceDescriptor[] = [];
     let catalogBytes = 2;
     for (const owned of this.#services.values()) {
@@ -6279,7 +6261,7 @@ export class RuntimePluginHost {
     value: PluginWireServiceRequest,
     signal?: AbortSignal,
   ): Promise<PluginWireServiceResponse> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     signal?.throwIfAborted();
     const request = validatePluginWireServiceRequest(value);
     const owned = this.#services.get(pluginWireServiceRegistryName({
@@ -6343,7 +6325,7 @@ export class RuntimePluginHost {
   }
 
   onPortablePresentation(listener: (event: PortablePresentationEvent) => void): () => void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (!Value.Check(FUNCTION_VALUE, listener)) throw new TypeError("Portable presentation listener must be a function");
     if (this.#portablePresentationListeners.size >= MAX_RUNTIME_PORTABLE_PRESENTATION_LISTENERS) {
       throw new RangeError(
@@ -6360,7 +6342,7 @@ export class RuntimePluginHost {
   }
 
   portablePresentations(): readonly PortablePresentationEvent[] {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const presentations = [...this.#portablePresentations.values()]
       .filter((owned) => owned.generation.active)
       .map((owned) => portablePresentationShowEvent(
@@ -6379,7 +6361,7 @@ export class RuntimePluginHost {
     for (const listener of Array.from(this.#portablePresentationListeners)) {
       try { listener(event); }
       catch {
-        // One presentation adapter cannot break the extension generation or another host adapter.
+        // One presentation adapter cannot break the plugin generation or another host adapter.
       }
     }
   }
@@ -6393,7 +6375,7 @@ export class RuntimePluginHost {
   ): PluginPortablePresentationRegistration {
     this.#assertLive(entry, generation);
     if (!generation.committed) {
-      throw new Error("Portable presentations are unavailable before extension activation commits");
+      throw new Error("Portable presentations are unavailable before plugin activation commits");
     }
     signal.throwIfAborted();
     if (this.#portablePresentations.size >= MAX_RUNTIME_PORTABLE_PRESENTATIONS) {
@@ -6517,7 +6499,7 @@ export class RuntimePluginHost {
     value: PortablePresentationActionRequest,
     signal?: AbortSignal,
   ): Promise<PortablePresentationActionResult> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     signal?.throwIfAborted();
     const request = validatePortablePresentationActionRequest(value);
     const selected = this.#portablePresentations.get(`${request.owner}\u0000${request.presentationId}`);
@@ -6570,8 +6552,8 @@ export class RuntimePluginHost {
   }
 
   #assertLive(entry: PluginRuntimeEntry, generation: RuntimePluginGeneration): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
-    if (!generation.active) throw new Error(`Runtime extension context is no longer active: ${entry.extensionId}`);
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
+    if (!generation.active) throw new Error(`Runtime plugin context is no longer active: ${entry.extensionId}`);
   }
 
   #generationBoundView<T extends object>(
@@ -6671,7 +6653,7 @@ export class RuntimePluginHost {
     name: string,
     context: Omit<RuntimeCommandContext, "workspace" | "ui" | "mode" | "hasUI" | "isProjectTrusted"> & { ui?: RuntimeCommandUi },
   ): Promise<{ handled: boolean; prompt?: string }> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#resolvedCommands().find((entry) => entry.invocationName === name)?.command;
     if (selected === undefined) return { handled: false };
     this.#assertLive(selected.entry, selected.generation);
@@ -6716,7 +6698,7 @@ export class RuntimePluginHost {
       }),
     });
     try {
-      // Session replacement closes the command's extension generation. Keep the
+      // Session replacement closes the command's plugin generation. Keep the
       // handler alive until replacement finishes; the caller signal still owns
       // explicit cancellation.
       const result = await withAbort(
@@ -6745,7 +6727,7 @@ export class RuntimePluginHost {
   }
 
   async completeCommandArguments(name: string, prefix: string, signal?: AbortSignal): Promise<RuntimeCommandCompletion[] | null> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     bounded(prefix, "Runtime command completion prefix", 64 * 1024);
     const selected = this.#resolvedCommands().find((entry) => entry.invocationName === name)?.command;
     if (selected === undefined) return null;
@@ -6804,7 +6786,7 @@ export class RuntimePluginHost {
     shortcut: string,
     context: Omit<RuntimeShortcutContext, "workspace" | "mode" | "hasUI" | "isProjectTrusted">,
   ): Promise<{ handled: boolean }> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     const selected = this.#shortcuts.get(normalizeShortcut(shortcut));
     if (selected === undefined) return { handled: false };
     this.#assertLive(selected.entry, selected.generation);
@@ -7255,7 +7237,7 @@ export class RuntimePluginHost {
     const bindingRevision = this.#directSessionBindingRevision;
     const assertCurrent = (): void => {
       if (this.#directSessionBindingRevision !== bindingRevision) {
-        throw new Error("Runtime extension session context is no longer active");
+        throw new Error("Runtime plugin session context is no longer active");
       }
     };
     const uiOwner = runtimeUiOwner(owned.entry, owned.generation);
@@ -7264,7 +7246,7 @@ export class RuntimePluginHost {
       ? undefined
       : this.#interactiveUiHandler?.(owned.entry.extensionId, signal, uiOwner.ownerKey);
     const unavailable = async (): Promise<never> => {
-      throw new Error("Interactive extension UI is unavailable in this host");
+      throw new Error("Interactive plugin UI is unavailable in this host");
     };
     const ui: RuntimeCommandUi = interactive ?? {
       notify: (message, kind = "status") => this.applyUi({
@@ -7322,10 +7304,10 @@ export class RuntimePluginHost {
       confirm: unavailable,
       input: unavailable,
       editor: unavailable,
-      setEditorText: () => { throw new Error("Interactive extension UI is unavailable in this host"); },
-      getEditorText: () => { throw new Error("Interactive extension UI is unavailable in this host"); },
+      setEditorText: () => { throw new Error("Interactive plugin UI is unavailable in this host"); },
+      getEditorText: () => { throw new Error("Interactive plugin UI is unavailable in this host"); },
       custom: unavailable,
-      showOverlay: () => { throw new Error("Interactive extension UI is unavailable in this host"); },
+      showOverlay: () => { throw new Error("Interactive plugin UI is unavailable in this host"); },
     };
     const hasUI = !headless && (this.#mode === "tui" || this.#mode === "rpc");
     const directTarget = selectedSession === undefined
@@ -7345,7 +7327,7 @@ export class RuntimePluginHost {
     const assertDeliverySession = (): void => {
       this.#assertLive(owned.entry, owned.generation);
       if (direct.sessionManager.getSessionId() !== deliverySessionId) {
-        throw new Error("Runtime extension session delivery target is no longer active");
+        throw new Error("Runtime plugin session delivery target is no longer active");
       }
     };
     const sessionDelivery: PluginSessionDelivery = Object.freeze({
@@ -7465,7 +7447,7 @@ export class RuntimePluginHost {
     signal: AbortSignal | undefined,
     projection: "native" | "agent_session_public",
   ): Promise<void> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (event === "project_trust") throw new Error("Use resolveProjectTrust for the project_trust decision lifecycle");
     const lifecycleSignal = event === "session_start" || event === "session_end" || event === "session_shutdown"
       ? AbortSignal.timeout(this.#shutdownTimeoutMs)
@@ -7489,7 +7471,7 @@ export class RuntimePluginHost {
         : value;
       const listeners = event === "event" && isRuntimeUserShellEvent(snapshot)
         ? [...(this.#listeners.get("event") ?? []), ...(this.#listeners.get("user_shell") ?? [])]
-        : this.#listeners.get(event) ?? [];
+        : (this.#listeners.get(event) ?? []).slice();
       const invoke = async (owned: OwnedListener): Promise<void> => {
         try {
           this.#assertLive(owned.entry, owned.generation);
@@ -7500,7 +7482,8 @@ export class RuntimePluginHost {
           const listenerSnapshot = event === "event"
             ? observedEventForListener(runtimeObservedEvent(snapshot))
             : snapshot;
-          const eventValues = event === "event"
+          const projectsSessionEntries = (event === "session_tree" || event === "session_compact") && projection === "native";
+          const eventValues = event === "event" || projectsSessionEntries
             ? [cloneBounded(listenerSnapshot, `Runtime ${event} listener event`)]
             : projection === "native"
               ? directDispatchEvents(event, cloneBounded(listenerSnapshot, `Runtime ${event} listener event`))
@@ -7511,12 +7494,17 @@ export class RuntimePluginHost {
               event === "event" ? eventValue : { ...directEventRecord(eventValue), type: event },
             );
             const context = this.#listenerContext(owned, listenerSignal, runtimeRequesterSession(event, listenerEvent));
+            const projectedEvent = projectsSessionEntries
+              ? freezeRuntimeRunEvent(event, {
+                ...directEventRecord(directDispatchEvents(event, eventValue, context.sessionManager)[0]), type: event,
+              })
+              : listenerEvent;
             await this.#withRequesterThread(
               event,
               listenerEvent,
               async () => await withAbort(Promise.resolve(invokeRuntimeListener(
                 listenerFor(owned, owned.event),
-                listenerEvent,
+                projectedEvent,
                 context,
               )), listenerSignal),
             );
@@ -7531,7 +7519,7 @@ export class RuntimePluginHost {
       for (const owned of listeners) await invoke(owned);
       if (cancellations.length === 1) throw cancellations[0];
       if (cancellations.length > 1) {
-        throw new AggregateError(cancellations, `Runtime extension ${event} listeners were cancelled`);
+        throw new AggregateError(cancellations, `Runtime plugin ${event} listeners were cancelled`);
       }
     } finally {
       for (const detach of detachCancellationSources) detach();
@@ -7564,9 +7552,9 @@ export class RuntimePluginHost {
       signal?: AbortSignal;
     } = {},
   ): Promise<T> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     let current = initial;
-    for (const owned of this.#listeners.get(event) ?? []) {
+    for (const owned of (this.#listeners.get(event) ?? []).slice()) {
       options.signal?.throwIfAborted();
       const listenerSignal = options.signal === undefined
         ? owned.generation.abortController.signal
@@ -7578,12 +7566,13 @@ export class RuntimePluginHost {
         const listener = (value: RuntimePluginEventMap[K]) => {
           const requester = options.requester ?? runtimeRequesterSession(event, value);
           const context = this.#listenerContext(owned, listenerSignal, requester);
+          const projected = projectSessionListenerEvent(event, value, context.sessionManager);
           return this.#withRequesterThread(
             event,
             value,
             () => this.#callbackPhase.run(event, () => invokeRuntimeListener(
               ownedListener,
-              freezeRuntimeRunEvent(event, { ...value, type: event }),
+              freezeRuntimeRunEvent(event, { ...projected, type: event }),
               context,
             )),
           );
@@ -7668,7 +7657,7 @@ export class RuntimePluginHost {
     const cwd = runtimeUserShellCwd(initial.cwd);
     if (!Value.Check(BOOLEAN_VALUE, initial.hidden)) throw new Error("Runtime before-user-shell hidden must be a boolean");
     const hidden = initial.hidden;
-    for (const owned of this.#listeners.get("user_bash") ?? []) {
+    for (const owned of (this.#listeners.get("user_bash") ?? []).slice()) {
       const listenerSignal = signal === undefined
         ? owned.generation.abortController.signal
         : AbortSignal.any([signal, owned.generation.abortController.signal]);
@@ -7928,9 +7917,9 @@ export class RuntimePluginHost {
     requester?: RuntimeRequesterSession,
     signal?: AbortSignal,
   ): Promise<JsonValue> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     let current = cloneConversation(payload, "Direct provider request payload");
-    for (const owned of this.#listeners.get("before_provider_request") ?? []) {
+    for (const owned of (this.#listeners.get("before_provider_request") ?? []).slice()) {
       const listenerSignal = signal === undefined
         ? owned.generation.abortController.signal
         : AbortSignal.any([signal, owned.generation.abortController.signal]);
@@ -7964,11 +7953,11 @@ export class RuntimePluginHost {
     signal?: AbortSignal,
     requester?: RuntimeRequesterSession,
   ): Promise<Record<string, string | null>> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (!Value.Check(OBJECT_VALUE, headers)) {
       throw new Error("Provider headers must be an object");
     }
-    for (const owned of this.#listeners.get("before_provider_headers") ?? []) {
+    for (const owned of (this.#listeners.get("before_provider_headers") ?? []).slice()) {
       const listenerSignal = signal === undefined
         ? owned.generation.abortController.signal
         : AbortSignal.any([signal, owned.generation.abortController.signal]);
@@ -7998,7 +7987,7 @@ export class RuntimePluginHost {
     requester?: RuntimeRequesterSession,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     if (!Number.isSafeInteger(status) || status < 100 || status > 999) {
       throw new Error("Provider response status is invalid");
     }
@@ -8007,7 +7996,7 @@ export class RuntimePluginHost {
       status,
       headers: Object.freeze({ ...headers }),
     });
-    for (const owned of this.#listeners.get("after_provider_response") ?? []) {
+    for (const owned of (this.#listeners.get("after_provider_response") ?? []).slice()) {
       const listenerSignal = signal === undefined
         ? owned.generation.abortController.signal
         : AbortSignal.any([signal, owned.generation.abortController.signal]);
@@ -8101,10 +8090,10 @@ export class RuntimePluginHost {
     signal?: AbortSignal,
     requester?: RuntimeRequesterSession,
   ): Promise<RuntimeToolCallReduction> {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
     let invocation = cloneBounded(event, "Runtime tool call");
     let transformations: ToolInputTransformationAudit[] | undefined;
-    for (const owned of this.#listeners.get("tool_call") ?? []) {
+    for (const owned of (this.#listeners.get("tool_call") ?? []).slice()) {
       const listenerSignal = signal === undefined
         ? owned.generation.abortController.signal
         : AbortSignal.any([signal, owned.generation.abortController.signal]);
@@ -8278,16 +8267,9 @@ export class RuntimePluginHost {
   }
 
   async reduceSessionBeforeTree(event: RuntimeSessionBeforeTreeEvent, signal?: AbortSignal): Promise<RuntimeTreeResult> {
-    const listenerEvent = {
-      preparation: {
-        ...structuredClone(event.preparation),
-        entriesToSummarize: extensionSessionEntries(event.preparation.entriesToSummarize),
-      },
-      signal: event.signal,
-    };
     const initial: RuntimeTreeResult = {};
     return await this.#reduce("session_before_tree", initial, async (current, listener) => {
-      const result = await invokeProjectedListener(listener, listenerEvent);
+      const result = await listener(event);
       if (result === undefined) return { value: current };
       const selected = runtimeSessionRecord(
         result,
@@ -8358,21 +8340,9 @@ export class RuntimePluginHost {
   }
 
   async reduceSessionBeforeCompact(event: RuntimeSessionBeforeCompactEvent): Promise<RuntimeSessionBeforeCompactResult> {
-    const listenerEvent = {
-      preparation: {
-        ...structuredClone(event.preparation),
-        messagesToSummarize: extensionCanonicalMessages(event.preparation.messagesToSummarize),
-        turnPrefixMessages: extensionCanonicalMessages(event.preparation.turnPrefixMessages),
-      },
-      branchEntries: extensionSessionEntries(event.branchEntries),
-      ...optionalProperties(event.customInstructions === undefined ? undefined : { customInstructions: event.customInstructions }),
-      reason: event.reason,
-      willRetry: event.willRetry,
-      signal: event.signal,
-    };
     const initial: RuntimeSessionBeforeCompactResult = {};
     return await this.#reduce("session_before_compact", initial, async (current, listener) => {
-      const result = await invokeProjectedListener(listener, listenerEvent);
+      const result = await listener(event);
       if (result === undefined) return { value: current };
       const selected = runtimeSessionRecord(
         result,
@@ -8464,8 +8434,8 @@ export class RuntimePluginHost {
     context: RuntimeUiRenderContext,
     render: (context: RuntimeUiRenderContext) => RuntimeUiBlock | undefined,
   ): RuntimeUiBlock | undefined {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
-    if (!selected.generation.active) throw new Error(`Runtime extension context is no longer active: ${selected.entry.extensionId}`);
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
+    if (!selected.generation.active) throw new Error(`Runtime plugin context is no longer active: ${selected.entry.extensionId}`);
     try {
       const safeContext = sanitizeRuntimeUiRenderContext(context);
       const value = render(safeContext);
@@ -8516,10 +8486,10 @@ export class RuntimePluginHost {
   }
 
   commit(staged: StagedActivation): void {
-    if (this.#closed) throw new Error("Runtime extension host is closed");
-    if (staged.committed) throw new Error("Runtime extension activation is already committed");
+    if (this.#closed) throw new Error("Runtime plugin host is closed");
+    if (staged.committed) throw new Error("Runtime plugin activation is already committed");
     if (this.#initialUi.length + staged.ui.length > MAX_RETAINED_RUNTIME_UI_OPERATIONS) {
-      throw new Error(`Runtime extension initial UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
+      throw new Error(`Runtime plugin initial UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
     }
     const retainedAdvancedUi = [...this.#initialAdvancedUi];
     pruneAbortedAdvancedUiOperations(retainedAdvancedUi);
@@ -8558,7 +8528,7 @@ export class RuntimePluginHost {
         );
       }
     }
-    if (toolRendererNames.size !== toolRenderers.length || toolRenderers.some((entry) => this.#toolRenderers.has(entry.name))) throw new Error("Runtime extension registered a duplicate tool renderer");
+    if (toolRendererNames.size !== toolRenderers.length || toolRenderers.some((entry) => this.#toolRenderers.has(entry.name))) throw new Error("Runtime plugin registered a duplicate tool renderer");
     if (staged.eventBus !== undefined) {
       for (const registration of staged.sharedListeners) {
         registration.externalCleanup = this.registerLiveExternalSharedListener(
@@ -8600,7 +8570,7 @@ export class RuntimePluginHost {
         this.addDiagnostic({
           extensionId: staged.entry.extensionId,
           sourcePath: staged.entry.sourcePath,
-          message: `Runtime extension command ${command.name} conflicts with a built-in command and is available as ${command.name}:${occurrence}`,
+          message: `Runtime plugin command ${command.name} conflicts with a built-in command and is available as ${command.name}:${occurrence}`,
         });
       }
     }
@@ -8684,7 +8654,6 @@ export class RuntimePluginHost {
       }
     }
     this.#disposers.push(...staged.disposers);
-    this.#moduleDisposers.push(...staged.moduleDisposers);
     this.#initialUi.push(...staged.ui);
     this.#initialAdvancedUi.splice(0, this.#initialAdvancedUi.length, ...retainedAdvancedUi);
     for (const registration of staged.services) this.#services.set(registration.name, {
@@ -8718,7 +8687,7 @@ export class RuntimePluginHost {
   async #close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#lifecycle.abort(new Error("Runtime extension host closed"));
+    this.#lifecycle.abort(new Error("Runtime plugin host closed"));
     const generations = [...this.#generations];
     const failures: unknown[] = [];
     const ownedToolRenderers = new Map<RuntimeToolRenderer, OwnedRenderer<RuntimeToolRenderer>>();
@@ -8732,7 +8701,7 @@ export class RuntimePluginHost {
       }
       generation.active = false;
       generation.committed = false;
-      generation.abortController.abort(new Error("Runtime extension host closed"));
+      generation.abortController.abort(new Error("Runtime plugin host closed"));
     }
     this.#uiSlotCompositor.clear();
     for (const selected of this.#toolRenderers.values()) {
@@ -8772,13 +8741,7 @@ export class RuntimePluginHost {
     failures.push(...await runRuntimeCleanupPhase(
       this.#disposers.splice(0).reverse(),
       this.#shutdownTimeoutMs,
-      "Runtime extension disposer cleanup",
-    ));
-    const moduleDisposers = this.#moduleDisposers.splice(0).reverse();
-    failures.push(...await runRuntimeCleanupPhase(
-      moduleDisposers,
-      this.#shutdownTimeoutMs,
-      "Runtime module loader cleanup",
+      "Runtime plugin disposer cleanup",
     ));
     this.#tools.clear();
     this.#commands.length = 0;
@@ -8818,7 +8781,7 @@ export class RuntimePluginHost {
     this.#sessionUiHandler = undefined;
     this.#directDiscoveryHandler = undefined;
     if (failures.length === 1) throw failures[0];
-    if (failures.length > 1) throw new AggregateError(failures, "Runtime extension disposers failed");
+    if (failures.length > 1) throw new AggregateError(failures, "Runtime plugin disposers failed");
   }
 }
 
@@ -8887,6 +8850,34 @@ interface DirectPluginSourceSnapshot {
   bytes: Buffer;
 }
 
+async function rollbackActivation(
+  host: RuntimePluginHost,
+  staged: StagedActivation,
+  shutdownTimeoutMs: number,
+  kind: "Runtime" | "Inline",
+): Promise<Error[]> {
+  staged.generation.active = false;
+  staged.generation.abortController.abort(new Error(`${kind} plugin activation failed`));
+  host.rollbackNativeUi(staged.generation);
+  host.rollbackUnsafeTerminal(staged.generation);
+  const externalListenerCleanups = staged.sharedListeners
+    .map((registration) => registration.externalCleanup)
+    .filter((cleanup): cleanup is () => void => cleanup !== undefined);
+  deactivateRuntimeRegistrationHandles(staged.generation);
+  return [
+    ...await runRuntimeCleanupPhase(
+      externalListenerCleanups,
+      shutdownTimeoutMs,
+      `${kind} plugin activation listener cleanup`,
+    ),
+    ...await runRuntimeCleanupPhase(
+      staged.disposers.splice(0).reverse(),
+      shutdownTimeoutMs,
+      `${kind} plugin activation disposer cleanup`,
+    ),
+  ];
+}
+
 async function activateRuntimePluginEntries(
   host: RuntimePluginHost,
   entries: readonly DirectPluginSourceSnapshot[],
@@ -8894,26 +8885,26 @@ async function activateRuntimePluginEntries(
 ): Promise<void> {
   const activationTimeoutMs = options.activationTimeoutMs ?? DEFAULT_RUNTIME_PLUGIN_ACTIVATION_TIMEOUT_MS;
   if (!Number.isSafeInteger(activationTimeoutMs) || activationTimeoutMs < 1 || activationTimeoutMs > 300_000) {
-    throw new RangeError("Runtime extension activationTimeoutMs must be from 1 through 300000");
+    throw new RangeError("Runtime plugin activationTimeoutMs must be from 1 through 300000");
   }
   const loadTimeoutMs = options.loadTimeoutMs ?? DEFAULT_RUNTIME_PLUGIN_LOAD_TIMEOUT_MS;
   if (!Number.isSafeInteger(loadTimeoutMs) || loadTimeoutMs < 1 || loadTimeoutMs > 300_000) {
-    throw new RangeError("Runtime extension loadTimeoutMs must be from 1 through 300000");
+    throw new RangeError("Runtime plugin loadTimeoutMs must be from 1 through 300000");
   }
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_RUNTIME_PLUGIN_SHUTDOWN_TIMEOUT_MS;
   if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 300_000) {
-    throw new RangeError("Runtime extension shutdownTimeoutMs must be from 1 through 300000");
+    throw new RangeError("Runtime plugin shutdownTimeoutMs must be from 1 through 300000");
   }
   const activationFailure = options.activationFailure ?? "diagnostic";
   if (activationFailure !== "diagnostic" && activationFailure !== "throw") {
-    throw new TypeError("Runtime extension activationFailure must be diagnostic or throw");
+    throw new TypeError("Runtime plugin activationFailure must be diagnostic or throw");
   }
   options.signal?.throwIfAborted();
   const workspace = await realpath(resolve(options.workspace));
-  if (host.workspace !== workspace) throw new Error("Runtime extension host belongs to a different workspace");
+  if (host.workspace !== workspace) throw new Error("Runtime plugin host belongs to a different workspace");
   const existing = new Set(host.plugins().map((entry) => entry.sourcePath));
   const duplicate = entries.find(({ entry }) => existing.has(entry.sourcePath));
-  if (duplicate !== undefined) throw new Error(`Runtime extension is already active: ${duplicate.entry.sourcePath}`);
+  if (duplicate !== undefined) throw new Error(`Runtime plugin is already active: ${duplicate.entry.sourcePath}`);
   const dataRoot = resolve(options.dataRoot ?? host.dataRoot);
   const loadTimeoutSignal = AbortSignal.timeout(loadTimeoutMs);
   const loadSignal = options.signal === undefined
@@ -8926,7 +8917,7 @@ async function activateRuntimePluginEntries(
     try {
       loadSignal.throwIfAborted();
       if (entry.trusted === false) {
-        throw new Error(`Runtime extension is not trusted and was not imported: ${entry.extensionId}`);
+        throw new Error(`Runtime plugin is not trusted and was not imported: ${entry.extensionId}`);
       }
       const dataPathPreparation = preparePluginDataPaths(
         extensionDataPaths(dataRoot, workspace, entry),
@@ -8937,7 +8928,7 @@ async function activateRuntimePluginEntries(
         dataPaths = await withAbort(dataPathPreparation, loadSignal);
       } catch (cause) {
         // Filesystem directory preparation cannot be cancelled. Drain it so a
-        // timed-out load cannot recreate extension state after the host returns.
+        // timed-out load cannot recreate plugin state after the host returns.
         await dataPathPreparation.catch(() => undefined);
         throw cause;
       }
@@ -8946,7 +8937,7 @@ async function activateRuntimePluginEntries(
       const generationSignal = AbortSignal.any([staged.generation.abortController.signal, loadSignal]);
       // Share native host namespaces; only plugin code and relative helpers re-evaluate.
       runtimeHostVirtualModules ??= Promise.all([...RUNTIME_HOST_IMPORTS].map(
-        async ([name, url]): Promise<[string, unknown]> => [name, await import(url)],
+        async ([name, url]): Promise<[string, unknown]> => [name, await import(isAbsolute(url) ? pathToFileURL(url).href : url)],
       )).then((modules) => ({ ...Object.fromEntries(modules), ...RUNTIME_HOST_VIRTUAL_MODULES }));
       const virtualModules = await withAbort(runtimeHostVirtualModules, generationSignal);
       const loader = createJiti(import.meta.url, {
@@ -8958,7 +8949,7 @@ async function activateRuntimePluginEntries(
       });
       // Force source evaluation for every generation. Native ESM imports are
       // process-cached even when Jiti's CommonJS module cache is disabled,
-      // which otherwise leaves edited .mjs extensions stale after /refresh.
+      // which otherwise leaves edited .mjs plugins stale after /refresh.
       const loaded = await withAbort(Promise.resolve(loader.evalModule(bytes.toString("utf8"), {
         filename: entry.sourcePath,
         ext: extname(entry.sourcePath),
@@ -8969,7 +8960,7 @@ async function activateRuntimePluginEntries(
         ? loaded.default
         : loaded;
       if (!Value.Check(DIRECT_PLUGIN_FACTORY_VALUE, activate)) {
-        throw new Error("Direct extension must export a default factory function");
+        throw new Error("Direct plugin must export a default factory function");
       }
       activationTimeoutSignal = AbortSignal.timeout(activationTimeoutMs);
       const activationSignal = AbortSignal.any([generationSignal, activationTimeoutSignal]);
@@ -8996,41 +8987,18 @@ async function activateRuntimePluginEntries(
     } catch (cause) {
       const externalAbort = options.signal?.aborted === true ? abortError(options.signal) : undefined;
       const activationError = loadTimeoutSignal.aborted
-        ? new Error(`Runtime extension load timed out after ${loadTimeoutMs}ms`)
+        ? new Error(`Runtime plugin load timed out after ${loadTimeoutMs}ms`)
         : activationTimeoutSignal?.aborted === true
-          ? new Error(`Runtime extension activation timed out after ${activationTimeoutMs}ms`)
+          ? new Error(`Runtime plugin activation timed out after ${activationTimeoutMs}ms`)
           : error(cause);
-      const cleanupFailures: Error[] = [];
-      if (staged !== undefined) {
-        staged.generation.active = false;
-        staged.generation.abortController.abort(new Error("Runtime extension activation failed"));
-        host.rollbackNativeUi(staged.generation);
-        host.rollbackUnsafeTerminal(staged.generation);
-        const externalListenerCleanups = staged.sharedListeners
-          .map((registration) => registration.externalCleanup)
-          .filter((cleanup): cleanup is () => void => cleanup !== undefined);
-        deactivateRuntimeRegistrationHandles(staged.generation);
-        cleanupFailures.push(...await runRuntimeCleanupPhase(
-          externalListenerCleanups,
-          shutdownTimeoutMs,
-          "Runtime extension activation listener cleanup",
-        ));
-        cleanupFailures.push(...await runRuntimeCleanupPhase(
-          staged.disposers.splice(0).reverse(),
-          shutdownTimeoutMs,
-          "Runtime extension activation disposer cleanup",
-        ));
-        cleanupFailures.push(...await runRuntimeCleanupPhase(
-          staged.moduleDisposers.splice(0).reverse(),
-          shutdownTimeoutMs,
-          "Runtime extension activation module cleanup",
-        ));
-      }
+      const cleanupFailures = staged === undefined
+        ? []
+        : await rollbackActivation(host, staged, shutdownTimeoutMs, "Runtime");
       if (externalAbort !== undefined) throw externalAbort;
       if (activationFailure === "throw") {
         const failures: unknown[] = [activationError, ...cleanupFailures];
         if (failures.length > 1) {
-          throw new AggregateError(failures, "Runtime extension activation and cleanup failed");
+          throw new AggregateError(failures, "Runtime plugin activation and cleanup failed");
         }
         throw activationError;
       }
@@ -9052,20 +9020,20 @@ async function activateRuntimePluginEntries(
 }
 
 function validateInlinePlugins(inlinePlugins: readonly RuntimeInlinePlugin[]): void {
-  if (inlinePlugins.length > 128) throw new Error("At most 128 inline extensions may be loaded");
+  if (inlinePlugins.length > 128) throw new Error("At most 128 inline plugins may be loaded");
   const explicitNames = new Set<string>();
   for (const [index, selected] of inlinePlugins.entries()) {
     const selectedIsFactory = isRuntimeInlinePluginFactory(selected);
     const factory = selectedIsFactory ? selected : selected.factory;
     const label = selectedIsFactory ? String(index + 1) : selected.name;
     if (!Value.Check(DIRECT_PLUGIN_FACTORY_VALUE, factory)) {
-      throw new Error(`Inline extension ${index + 1} factory is invalid`);
+      throw new Error(`Inline plugin ${index + 1} factory is invalid`);
     }
     if (!Value.Check(STRING_VALUE, label) || label.trim() === "" || label.includes("\0")) {
-      throw new Error(`Inline extension ${index + 1} name is invalid`);
+      throw new Error(`Inline plugin ${index + 1} name is invalid`);
     }
     if (!selectedIsFactory) {
-      if (explicitNames.has(label)) throw new Error(`Duplicate inline extension name: ${label}`);
+      if (explicitNames.has(label)) throw new Error(`Duplicate inline plugin name: ${label}`);
       explicitNames.add(label);
     }
   }
@@ -9092,10 +9060,10 @@ async function activateInlinePlugins(
     const factory = selectedIsFactory ? selected : selected.factory;
     const label = selectedIsFactory ? String(index + 1) : selected.name;
     if (!Value.Check(DIRECT_PLUGIN_FACTORY_VALUE, factory)) {
-      throw new Error(`Inline extension ${index + 1} factory is invalid`);
+      throw new Error(`Inline plugin ${index + 1} factory is invalid`);
     }
     if (!Value.Check(STRING_VALUE, label) || label.trim() === "" || label.includes("\0")) {
-      throw new Error(`Inline extension ${index + 1} name is invalid`);
+      throw new Error(`Inline plugin ${index + 1} name is invalid`);
     }
     const slug = label.normalize("NFKD").toLowerCase().replace(/[^a-z0-9._-]+/gu, "-")
       .replace(/^[^a-z]+/u, "").replace(/-+$/u, "").slice(0, 80) || `extension-${index + 1}`;
@@ -9120,7 +9088,7 @@ async function activateInlinePlugins(
         dataPaths = await withAbort(dataPathPreparation, loadSignal);
       } catch (cause) {
         // Filesystem directory preparation cannot be cancelled. Drain it so a
-        // timed-out load cannot recreate extension state after the host returns.
+        // timed-out load cannot recreate plugin state after the host returns.
         await dataPathPreparation.catch(() => undefined);
         throw cause;
       }
@@ -9155,41 +9123,16 @@ async function activateInlinePlugins(
       const activationError = externalAbort !== undefined
         ? error(externalAbort)
         : loadTimeoutSignal.aborted
-          ? new Error(`Runtime extension load timed out after ${loadTimeoutMs}ms`)
+          ? new Error(`Runtime plugin load timed out after ${loadTimeoutMs}ms`)
           : activationTimeoutSignal?.aborted === true
-            ? new Error(`Runtime extension activation timed out after ${activationTimeoutMs}ms`)
+            ? new Error(`Runtime plugin activation timed out after ${activationTimeoutMs}ms`)
             : error(cause);
-      let cleanupFailures: Error[] = [];
-      if (candidate !== undefined) {
-        candidate.staged.generation.active = false;
-        candidate.staged.generation.abortController.abort(new Error("Inline extension activation failed"));
-        host.rollbackNativeUi(candidate.staged.generation);
-        host.rollbackUnsafeTerminal(candidate.staged.generation);
-        const externalListenerCleanups = candidate.staged.sharedListeners
-          .map((registration) => registration.externalCleanup)
-          .filter((cleanup): cleanup is () => void => cleanup !== undefined);
-        deactivateRuntimeRegistrationHandles(candidate.staged.generation);
-        cleanupFailures = [
-          ...await runRuntimeCleanupPhase(
-            externalListenerCleanups,
-            shutdownTimeoutMs,
-            "Inline extension activation listener cleanup",
-          ),
-          ...await runRuntimeCleanupPhase(
-            candidate.staged.disposers.splice(0).reverse(),
-            shutdownTimeoutMs,
-            "Inline extension activation disposer cleanup",
-          ),
-          ...await runRuntimeCleanupPhase(
-            candidate.staged.moduleDisposers.splice(0).reverse(),
-            shutdownTimeoutMs,
-            "Inline extension activation module cleanup",
-          ),
-        ];
-      }
+      const cleanupFailures = candidate === undefined
+        ? []
+        : await rollbackActivation(host, candidate.staged, shutdownTimeoutMs, "Inline");
       if (activationFailure === "throw" || externalAbort !== undefined) {
         if (cleanupFailures.length > 0) {
-          throw new AggregateError([activationError, ...cleanupFailures], "Inline extension activation and cleanup failed");
+          throw new AggregateError([activationError, ...cleanupFailures], "Inline plugin activation and cleanup failed");
         }
         throw externalAbort ?? activationError;
       }
@@ -9208,7 +9151,7 @@ async function directPluginEntry(
   metadata?: RuntimeDirectPathMetadata,
 ): Promise<DirectPluginSourceSnapshot> {
   if (!Value.Check(STRING_VALUE, pathValue) || pathValue.trim() === "" || pathValue.includes("\0")) {
-    throw new TypeError(`Direct extension path ${index + 1} is invalid`);
+    throw new TypeError(`Direct plugin path ${index + 1} is invalid`);
   }
   let sourcePath = await realpath(resolve(pathValue));
   const information = await lstat(sourcePath);
@@ -9227,25 +9170,25 @@ async function directPluginEntry(
       }
     }
     if (selected === undefined) {
-      throw new Error(`Direct extension directory has no supported index file: ${sourcePath}`);
+      throw new Error(`Direct plugin directory has no supported index file: ${sourcePath}`);
     }
     sourcePath = selected;
   } else if (!information.isFile()) {
-    throw new Error(`Direct extension path is not a regular file or directory: ${sourcePath}`);
+    throw new Error(`Direct plugin path is not a regular file or directory: ${sourcePath}`);
   }
   if (!isPluginSourcePath(sourcePath)) {
-    throw new Error(`Direct extension entry has an unsupported file type: ${sourcePath}`);
+    throw new Error(`Direct plugin entry has an unsupported file type: ${sourcePath}`);
   }
   const snapshot = await readFileSnapshotBounded(sourcePath, MAX_TRUSTED_RESOURCE_FILE_BYTES);
   if (snapshot.truncated) {
     throw new TrustedResourceFileLimitError(
-      `Direct extension source exceeds ${MAX_TRUSTED_RESOURCE_FILE_BYTES} bytes: ${sourcePath}`,
+      `Direct plugin source exceeds ${MAX_TRUSTED_RESOURCE_FILE_BYTES} bytes: ${sourcePath}`,
     );
   }
   const bytes = snapshot.data;
   const contentSha256 = sha256(bytes);
   if (metadata?.expectedSha256 !== undefined && metadata.expectedSha256 !== contentSha256) {
-    throw new Error(`Direct extension changed after resolution: ${sourcePath}`);
+    throw new Error(`Direct plugin changed after resolution: ${sourcePath}`);
   }
   const identity = sha256(sourcePath);
   const label = basename(sourcePath, extname(sourcePath)).replace(/[^A-Za-z0-9_.-]+/gu, "-").slice(0, 40) || "extension";
@@ -9272,8 +9215,8 @@ async function resolveDirectPluginEntries(
   paths: readonly string[],
   options: RuntimePluginLoadOptions,
 ): Promise<{ entries: DirectPluginSourceSnapshot[]; pathFailures: Array<{ path: string; error: Error }> }> {
-  if (!Array.isArray(paths)) throw new TypeError("Direct extension paths must be an array");
-  if (paths.length > 4_096) throw new RangeError("Direct extension paths exceed 4096 entries");
+  if (!Array.isArray(paths)) throw new TypeError("Direct plugin paths must be an array");
+  if (paths.length > 4_096) throw new RangeError("Direct plugin paths exceed 4096 entries");
   options.signal?.throwIfAborted();
   const entries: DirectPluginSourceSnapshot[] = [];
   const pathFailures: Array<{ path: string; error: Error }> = [];
@@ -9294,7 +9237,7 @@ async function resolveDirectPluginEntries(
   }
   const duplicate = entries.find(({ entry }, index) => entries.some(({ entry: candidate }, candidateIndex) =>
     candidateIndex < index && candidate.sourcePath === entry.sourcePath));
-  if (duplicate !== undefined) throw new Error(`Direct extension path is duplicated: ${duplicate.entry.sourcePath}`);
+  if (duplicate !== undefined) throw new Error(`Direct plugin path is duplicated: ${duplicate.entry.sourcePath}`);
   return { entries, pathFailures };
 }
 
@@ -9331,7 +9274,7 @@ export async function appendDirectPlugins(
   const { entries, pathFailures } = await resolveDirectPluginEntries(paths, options);
   const active = new Set(host.plugins().map((entry) => entry.sourcePath));
   const duplicate = entries.find(({ entry }) => active.has(entry.sourcePath));
-  if (duplicate !== undefined) throw new Error(`Direct extension is already active: ${duplicate.entry.sourcePath}`);
+  if (duplicate !== undefined) throw new Error(`Direct plugin is already active: ${duplicate.entry.sourcePath}`);
   await activateRuntimePluginEntries(host, entries, options);
   addDirectPathDiagnostics(host, pathFailures);
 }
@@ -9342,7 +9285,7 @@ async function loadResolvedDirectPlugins(
 ): Promise<RuntimePluginHost> {
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_RUNTIME_PLUGIN_SHUTDOWN_TIMEOUT_MS;
   if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 300_000) {
-    throw new RangeError("Runtime extension shutdownTimeoutMs must be from 1 through 300000");
+    throw new RangeError("Runtime plugin shutdownTimeoutMs must be from 1 through 300000");
   }
   options.signal?.throwIfAborted();
   validateInlinePlugins(options.inlinePlugins ?? []);
@@ -9365,7 +9308,7 @@ async function loadResolvedDirectPlugins(
     try {
       await host.close();
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Runtime extension activation and cleanup failed");
+      throw new AggregateError([error, cleanupError], "Runtime plugin activation and cleanup failed");
     }
     throw error;
   }

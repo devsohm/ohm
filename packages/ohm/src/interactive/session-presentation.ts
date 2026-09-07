@@ -610,19 +610,22 @@ export function bindInteractiveSessionPresentation(
     terminal.render(event);
     options.onEnvelope?.(event);
   }));
-  const unsubscribeSession = session.subscribe((event) => deliver(() => {
-    if (
-      event.type === "entry_appended"
-      && (event.entry.type === "custom" || (event.entry.type === "custom_message" && event.entry.display === true))
-    ) {
-      terminal.renderSessionEntry(event.entry);
-    }
-    options.onSessionEvent?.(event);
-  }));
+  let unsubscribeSession = (): void => {};
+  let historyBound = false;
   try {
+    unsubscribeSession = session.subscribe((event) => deliver(() => {
+      if (
+        event.type === "entry_appended"
+        && (event.entry.type === "custom" || (event.entry.type === "custom_message" && event.entry.display === true))
+      ) {
+        terminal.renderSessionEntry(event.entry);
+      }
+      options.onSessionEvent?.(event);
+    }));
     terminal.replaceTranscript(interactiveTranscriptHistory(session), "main", {
       preserveExisting: options.preserveTranscript === true,
     });
+    historyBound = true;
     terminal.setTranscriptHistory?.(interactiveTranscriptHistoryProvider(session));
     const usage = interactiveTranscriptUsageBaseline(session);
     terminal.setUsageBaseline(
@@ -636,7 +639,9 @@ export function bindInteractiveSessionPresentation(
     pending.length = 0;
   } catch (error) {
     const failures: unknown[] = [error];
-    try { terminal.setTranscriptHistory?.(undefined); } catch (cleanupError) { failures.push(cleanupError); }
+    if (historyBound) {
+      try { terminal.setTranscriptHistory?.(undefined); } catch (cleanupError) { failures.push(cleanupError); }
+    }
     unsubscribeInteractiveSessionPresentation(
       unsubscribeSession,
       unsubscribeEnvelope,
@@ -645,13 +650,14 @@ export function bindInteractiveSessionPresentation(
     );
   }
   return () => {
-    terminal.setTranscriptHistory?.(undefined);
+    const failures: unknown[] = [];
+    try { terminal.setTranscriptHistory?.(undefined); } catch (error) { failures.push(error); }
     replaying = false;
     pending.length = 0;
     unsubscribeInteractiveSessionPresentation(
       unsubscribeSession,
       unsubscribeEnvelope,
-      [],
+      failures,
       "Interactive session presentation cleanup failed",
     );
   };

@@ -271,10 +271,10 @@ export function lazyStream(
       return (await get()).result();
     },
     [Symbol.asyncIterator]() {
-      let iterator: AsyncIterator<AssistantMessageEvent> | undefined;
+      let iterator: Promise<AsyncIterator<AssistantMessageEvent>> | undefined;
       let active = true;
-      const getIterator = async (): Promise<AsyncIterator<AssistantMessageEvent>> =>
-        iterator ??= (await get())[Symbol.asyncIterator]();
+      const getIterator = (): Promise<AsyncIterator<AssistantMessageEvent>> =>
+        iterator ??= get().then((source) => source[Symbol.asyncIterator]());
       return {
         async next() {
           if (!active) return { value: undefined, done: true };

@@ -6,6 +6,7 @@ import { MAX_RPC_LINE_BYTES } from "../../src/interfaces/rpc.js";
 import { runRpcMode } from "../../src/modes/rpc-mode.js";
 import type { AgentSession, PluginBindings } from "../../src/service/agent-session.js";
 import type { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
+import { SessionManager } from "../../src/storage/session-manager.js";
 
 function rpcSessionFixture<Value>(value: Value): AgentSession {
   // SAFETY: this fixture implements every AgentSession member exercised by RpcRuntimeDispatcher and RPC commands.
@@ -24,12 +25,14 @@ let emittedExtensionError = false;
 let blockedPromptCalls = 0;
 let releaseBlockedPrompts!: () => void;
 const blockedPrompts = new Promise<void>((resolve) => { releaseBlockedPrompts = resolve; });
+const nativeSessionManager = SessionManager.inMemory(process.cwd(), { id: "rpc-fixture" });
 
 if (process.env.OHM_RPC_BLOCK_PROMPT === "1") {
   process.once("exit", () => { process.stderr.write(`prompt-calls:${blockedPromptCalls}\n`); });
 }
 
 const session = rpcSessionFixture({
+  nativeSessionManager,
   async bindPlugins(bindings?: PluginBindings) {
     assert.equal(bindings?.mode, "rpc");
     const extensionErrorSecret = process.env.OHM_RPC_EXTENSION_ERROR_SECRET;
@@ -133,7 +136,10 @@ const runtime = rpcRuntimeFixture({
     assert.equal(replacement, undefined);
     await options.withSession?.(session);
   },
-  async dispose() { releaseBlockedPrompts(); },
+  async dispose() {
+    releaseBlockedPrompts();
+    nativeSessionManager.closeV4Store();
+  },
 });
 
 await runRpcMode(runtime);

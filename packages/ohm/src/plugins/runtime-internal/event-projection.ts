@@ -20,8 +20,11 @@ import {
   extensionMessages,
   extensionSessionEntry,
   extensionToolResultBlock,
+  pluginSessionEntries,
+  pluginSessionEntryId,
+  type ReadonlyPluginSessionManager,
 } from "../session-contract.js";
-import type { RuntimePluginEvent } from "../runtime.js";
+import type { RuntimePluginEvent, RuntimePluginEventMap, RuntimeSessionBeforeCompactEvent, RuntimeSessionBeforeForkEvent, RuntimeSessionBeforeTreeEvent } from "../runtime.js";
 const DIRECT_EVENT_RECORD_VALUE = Type.Object({}, { additionalProperties: true });
 const STRING_VALUE = Type.String();
 const NUMBER_VALUE = Type.Number();
@@ -103,6 +106,8 @@ interface DirectEventRecord {
   readonly metadata?: unknown;
   readonly model?: unknown;
   readonly name?: unknown;
+  readonly newLeafId?: unknown;
+  readonly oldLeafId?: unknown;
   readonly outcome?: unknown;
   readonly part?: unknown;
   readonly parseError?: unknown;
@@ -134,6 +139,50 @@ interface DirectEventRecord {
   readonly visibility?: unknown;
   readonly type?: unknown;
   readonly willRetry?: unknown;
+}
+
+/** Project selection identities only at the plugin listener boundary. */
+export function projectSessionListenerEvent<K extends RuntimePluginEvent>(
+  event: K,
+  value: RuntimePluginEventMap[K],
+  manager: ReadonlyPluginSessionManager,
+) {
+  const publicId = (id: string | null | undefined) =>
+    id === null || id === undefined ? id : pluginSessionEntryId(manager, id);
+  if (event === "session_before_fork") {
+    // SAFETY: the event key selects the matching native runtime input.
+    const selected = value as RuntimeSessionBeforeForkEvent;
+    return { entryId: publicId(selected.sourceEventId), position: selected.position };
+  }
+  if (event === "session_before_tree") {
+    // SAFETY: the event key selects the matching native runtime input.
+    const selected = value as RuntimeSessionBeforeTreeEvent;
+    return {
+      preparation: {
+        ...structuredClone(selected.preparation),
+        targetId: publicId(selected.preparation.targetId),
+        oldLeafId: publicId(selected.preparation.oldLeafId),
+        commonAncestorId: publicId(selected.preparation.commonAncestorId),
+        entriesToSummarize: pluginSessionEntries(manager, selected.preparation.entriesToSummarize),
+      },
+      signal: selected.signal,
+    };
+  }
+  if (event === "session_before_compact") {
+    // SAFETY: the event key selects the matching native runtime input.
+    const selected = value as RuntimeSessionBeforeCompactEvent;
+    return {
+      ...selected,
+      preparation: {
+        ...structuredClone(selected.preparation),
+        firstKeptEntryId: publicId(selected.preparation.firstKeptEntryId),
+        messagesToSummarize: extensionCanonicalMessages(selected.preparation.messagesToSummarize),
+        turnPrefixMessages: extensionCanonicalMessages(selected.preparation.turnPrefixMessages),
+      },
+      branchEntries: pluginSessionEntries(manager, selected.branchEntries),
+    };
+  }
+  return value;
 }
 
 const RUN_SCOPED_EVENTS: ReadonlySet<RuntimePluginEvent> = new Set([
@@ -469,19 +518,30 @@ const EVENT_PROJECTORS = {
     const images = selected.images as ImageBlock[];
     return [{ ...selected, images: extensionContent(images) }];
   },
-  session_tree(selected) {
-    if (directEventRecord(selected.summaryEntry) === undefined) return [selected];
+  session_tree(selected, manager?: ReadonlyPluginSessionManager) {
+    const projected = manager === undefined ? selected : {
+      ...selected,
+      ...optionalProperties(selected.newLeafId === undefined ? undefined : {
+        newLeafId: Value.Check(STRING_VALUE, selected.newLeafId) ? pluginSessionEntryId(manager, selected.newLeafId) : selected.newLeafId,
+      }),
+      ...optionalProperties(selected.oldLeafId === undefined ? undefined : {
+        oldLeafId: Value.Check(STRING_VALUE, selected.oldLeafId) ? pluginSessionEntryId(manager, selected.oldLeafId) : selected.oldLeafId,
+      }),
+    };
+    if (directEventRecord(selected.summaryEntry) === undefined) return [projected];
     // SAFETY: session_tree owns the cloned summary entry supplied by the session manager.
     const summaryEntry = selected.summaryEntry as SessionEntry;
-    return [{ ...selected, summaryEntry: extensionSessionEntry(summaryEntry) }];
+    return [{ ...projected, summaryEntry: manager === undefined
+      ? extensionSessionEntry(summaryEntry) : pluginSessionEntries(manager, [summaryEntry])[0] }];
   },
-  session_compact(selected) {
+  session_compact(selected, manager?: ReadonlyPluginSessionManager) {
     const projected = projectedCompactionEntry(selected);
     if (projected !== undefined) return [{ ...selected, compactionEntry: projected }];
     if (directEventRecord(selected.compactionEntry) === undefined) return [selected];
     // SAFETY: session_compact owns the cloned compaction entry supplied by the session manager.
     const compactionEntry = selected.compactionEntry as SessionEntry;
-    return [{ ...selected, compactionEntry: extensionSessionEntry(compactionEntry) }];
+    return [{ ...selected, compactionEntry: manager === undefined
+      ? extensionSessionEntry(compactionEntry) : pluginSessionEntries(manager, [compactionEntry])[0] }];
   },
   session_compact_failed(selected) {
     const projected: DirectEventRecord = {
@@ -496,7 +556,7 @@ const EVENT_PROJECTORS = {
   },
 } satisfies Partial<Record<RuntimePluginEvent, DirectEventProjector>>;
 
-export function directDispatchEvents<T>(event: RuntimePluginEvent, value: T): unknown[] {
+export function directDispatchEvents<T>(event: RuntimePluginEvent, value: T, manager?: ReadonlyPluginSessionManager): unknown[] {
   const selected = directEventRecord(value);
   if (selected === undefined) return [value];
   switch (event) {
@@ -509,8 +569,8 @@ export function directDispatchEvents<T>(event: RuntimePluginEvent, value: T): un
     case "tool_execution_update": return EVENT_PROJECTORS.tool_execution_update(selected);
     case "tool_execution_end": return EVENT_PROJECTORS.tool_execution_end(selected);
     case "before_agent_start": return EVENT_PROJECTORS.before_agent_start(selected);
-    case "session_tree": return EVENT_PROJECTORS.session_tree(selected);
-    case "session_compact": return EVENT_PROJECTORS.session_compact(selected);
+    case "session_tree": return EVENT_PROJECTORS.session_tree(selected, manager);
+    case "session_compact": return EVENT_PROJECTORS.session_compact(selected, manager);
     case "session_compact_failed": return EVENT_PROJECTORS.session_compact_failed(selected);
     default: return [value];
   }

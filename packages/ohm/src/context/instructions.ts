@@ -48,12 +48,28 @@ function boundedBuffer(
   maxBytes: number,
 ): BoundedInstructionText {
   let end = Math.min(encoded.byteLength, maxBytes);
-  while (end > 0) {
-    try {
-      new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(0, end));
-      break;
-    } catch {
-      end -= 1;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(0, end));
+  } catch {
+    const limit = end;
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    end = 0;
+    for (let offset = 0; offset < limit; offset += 64) {
+      const next = Math.min(limit, offset + 64);
+      try {
+        end += Buffer.byteLength(decoder.decode(encoded.subarray(offset, next), { stream: true }), "utf8");
+      } catch {
+        // Retry only the failed block and at most three pending UTF-8 bytes.
+        let candidate = next;
+        while (candidate > end) {
+          try {
+            new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(end, candidate));
+            break;
+          } catch { candidate -= 1; }
+        }
+        end = candidate;
+        break;
+      }
     }
   }
   const selected = encoded.subarray(0, end);

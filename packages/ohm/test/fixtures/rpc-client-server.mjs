@@ -46,6 +46,16 @@ process.once("disconnect", () => { if (!done) process.kill(process.pid, "SIGKILL
         })}\n`);
         continue;
       }
+      if (mode === "negative-void" && (command.type === "prompt" || command.type === "set_thinking_level")) {
+        writeFileSync(1, `${JSON.stringify({
+          id: command.id,
+          type: "response",
+          command: command.type,
+          success: false,
+          error: `fixture denied ${command.type}`,
+        })}\n`);
+        continue;
+      }
       if (command.type === "bash") {
         writeFileSync(1, `${JSON.stringify({
           type: "bash_execution_update",

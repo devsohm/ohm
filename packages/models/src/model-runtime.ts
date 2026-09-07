@@ -29,7 +29,7 @@ import type {
   StreamFn,
 } from "./contracts.js";
 import { createAssistantMessageEventStream, errorAssistantMessage, lazyStream } from "./streaming.js";
-import { resolveProviderAuth } from "./provider-auth.js";
+import { resolveProviderAuth, type ProviderAuthRequest } from "./provider-auth.js";
 
 function completionOf(stream: AssistantMessageEventStream): Promise<AssistantMessage> {
   return stream.result();
@@ -139,8 +139,9 @@ class ModelCollection implements MutableModels {
 
   setProvider(provider: Provider): void {
     if (!provider.id.trim()) throw new TypeError("Provider id must not be empty");
+    const catalog = validateCatalog(provider, provider.getModels());
     this.#providers.set(provider.id, provider);
-    this.#catalogs.set(provider.id, validateCatalog(provider, provider.getModels()));
+    this.#catalogs.set(provider.id, catalog);
     this.#catalogStores.set(provider.id, new MemoryCatalogStore());
     this.#available = [];
   }
@@ -194,20 +195,29 @@ class ModelCollection implements MutableModels {
     const providers = providerId === undefined
       ? this.getProviders()
       : [this.#providers.get(providerId)].filter((entry): entry is Provider => entry !== undefined);
+    const generations = new Map(this.#catalogStores);
+    const isCurrent = (provider: Provider): boolean =>
+      this.#providers.get(provider.id) === provider &&
+      this.#catalogStores.get(provider.id) === generations.get(provider.id);
     const current: Model[] = [];
     for (const provider of providers) {
+      if (!isCurrent(provider)) continue;
       const credential = await this.#credentials.read(provider.id);
+      if (!isCurrent(provider)) continue;
       const needsAuth = provider.auth.apiKey !== undefined || provider.auth.oauth !== undefined;
       const resolved = needsAuth ? await this.#resolveAuth(provider) : undefined;
+      if (!isCurrent(provider)) continue;
       if (needsAuth && !resolved && provider.id !== "ollama") continue;
       const full = cloneModels(this.#catalogs.get(provider.id) ?? []);
       current.push(...(provider.filterModels
         ? validateCatalog(provider, provider.filterModels(full, credential))
         : full));
     }
-    const outside = providerId === undefined ? [] : this.#available.filter((model) => model.provider !== providerId);
-    this.#available = cloneModels([...outside, ...current]);
-    return cloneModels(current);
+    const activeIds = new Set(providers.filter(isCurrent).map((provider) => provider.id));
+    const available = current.filter((model) => activeIds.has(model.provider));
+    const outside = this.#available.filter((model) => !activeIds.has(model.provider));
+    this.#available = cloneModels([...outside, ...available]);
+    return cloneModels(available);
   }
 
   getAvailableSnapshot(): readonly Model[] {
@@ -222,7 +232,7 @@ class ModelCollection implements MutableModels {
     return lazyStream(async () => {
       const provider = this.#providers.get(model.provider);
       if (!provider) return failedStream(model, "Unknown provider: " + model.provider);
-      const auth = await this.#resolveAuth(provider);
+      const auth = await this.#resolveAuth(provider, options);
       if ((provider.auth.apiKey || provider.auth.oauth) && !auth && !options.apiKey && provider.id !== "ollama") {
         return failedStream(model, "No credentials configured for " + provider.name);
       }
@@ -251,7 +261,7 @@ class ModelCollection implements MutableModels {
     return lazyStream(async () => {
       const provider = this.#providers.get(model.provider);
       if (!provider) return failedStream(model, "Unknown provider: " + model.provider);
-      const auth = await this.#resolveAuth(provider);
+      const auth = await this.#resolveAuth(provider, options);
       if ((provider.auth.apiKey || provider.auth.oauth) && !auth && !options.apiKey && provider.id !== "ollama") {
         return failedStream(model, "No credentials configured for " + provider.name);
       }
@@ -304,12 +314,18 @@ class ModelCollection implements MutableModels {
     const providers = options.provider === undefined
       ? this.getProviders()
       : [this.#providers.get(options.provider)].filter((entry): entry is Provider => entry !== undefined);
+    const generations = new Map(this.#catalogStores);
     for (const provider of providers) {
       if (!provider.refreshModels) continue;
+      const store = generations.get(provider.id);
+      const isCurrent = (): boolean => this.#providers.get(provider.id) === provider &&
+        this.#catalogStores.get(provider.id) === store;
+      if (store === undefined || !isCurrent()) continue;
       try {
         const credential = await this.#credentials.read(provider.id);
+        if (!isCurrent()) continue;
         const context: RefreshModelsContext = {
-          store: this.#catalogStores.get(provider.id) ?? new MemoryCatalogStore(),
+          store,
           allowNetwork: options.allowNetwork ?? true,
         };
         if (credential !== undefined) context.credential = credential;
@@ -317,9 +333,10 @@ class ModelCollection implements MutableModels {
         if (options.signal !== undefined) context.signal = options.signal;
         if (this.#authContext.fetch !== undefined) context.fetch = this.#authContext.fetch;
         await provider.refreshModels(context);
+        if (!isCurrent()) continue;
         this.#catalogs.set(provider.id, validateCatalog(provider, provider.getModels()));
       } catch (cause) {
-        errors.set(provider.id, cause instanceof Error ? cause : new Error(String(cause)));
+        if (isCurrent()) errors.set(provider.id, cause instanceof Error ? cause : new Error(String(cause)));
       }
     }
     this.#available = [];
@@ -336,8 +353,8 @@ class ModelCollection implements MutableModels {
     return { ...this.#authContext, provider };
   }
 
-  async #resolveAuth(provider: Provider): Promise<AuthResult | undefined> {
-    return resolveProviderAuth(provider, this.#authContext, this.#credentials);
+  async #resolveAuth(provider: Provider, request?: ProviderAuthRequest): Promise<AuthResult | undefined> {
+    return resolveProviderAuth(provider, this.#authContext, this.#credentials, request);
   }
 }
 

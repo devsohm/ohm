@@ -2,6 +2,7 @@ import { optionalProperties } from "../../core/optional-properties.js";
 import { realpath } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { Type, type Static } from "typebox";
+import { escape as escapeGlob } from "minimatch";
 
 import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { NUMBER_VALUE } from "../../core/value-schemas.js";
@@ -132,14 +133,20 @@ export class FindTool implements HarnessTool {
       ? undefined
       : await ensureFd({ silent: true });
     if (executable === undefined) {
+      const canonicalSearchRoot = await realpath(searchRoot);
+      const localRoot = portable(relative(context.workspace.root, canonicalSearchRoot));
+      const normalizedPattern = pattern.replaceAll("\\", "/");
+      const walkPattern = localRoot !== "" && normalizedPattern.includes("/") && !normalizedPattern.startsWith("/")
+        ? `${escapeGlob(localRoot, { windowsPathsNoEscape: true, magicalBraces: true })}/${normalizedPattern}`
+        : normalizedPattern;
       const walked = await walkWorkspace(context.workspace.root, {
         path: requested,
-        pattern,
+        pattern: walkPattern,
         includeHidden: true,
         limit,
         signal: context.signal,
       });
-      const matches = walked.entries.map((entry) => entry.path);
+      const matches = walked.entries.map((entry) => portable(relative(canonicalSearchRoot, entry.absolutePath)));
       if (matches.length === 0) return { content: "No paths matched the file glob", isError: false };
       const resultLimitReached = walked.truncated || matches.length >= limit;
       const truncation = truncateToolHead(matches.join("\n"), { maxLines: Number.MAX_SAFE_INTEGER });

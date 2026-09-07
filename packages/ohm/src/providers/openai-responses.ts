@@ -1155,7 +1155,9 @@ export function buildResponsesBody(
     });
     body.tools = useDeferredTools ? [...tools, { type: "tool_search" }] : tools;
   }
-  if (request.toolChoice !== undefined) body.tool_choice = openAIToolChoice(request.toolChoice);
+  if (request.toolChoice !== undefined) {
+    body.tool_choice = openAIToolChoice(request.toolChoice, request.tools, compatibility?.supportsOpenAIGrammarTools === true);
+  }
   if (request.metadata !== undefined) body.metadata = request.metadata;
   if (promptCacheEnabled && request.sessionId !== undefined && request.sessionId !== "") {
     body.prompt_cache_key = openAIPromptCacheKey(request.sessionId);
@@ -1213,8 +1215,16 @@ function openAIReasoningEffort(request: ProviderRequest): string | null | undefi
   return effort;
 }
 
-function openAIToolChoice(toolChoice: NonNullable<ProviderRequest["toolChoice"]>): ResponsesToolChoice {
-  if (!Value.Check(STRING_VALUE, toolChoice)) return { type: "function", name: toolChoice.function.name };
+function openAIToolChoice(
+  toolChoice: NonNullable<ProviderRequest["toolChoice"]>,
+  tools: ProviderRequest["tools"],
+  supportsGrammar: boolean,
+): ResponsesToolChoice {
+  if (!Value.Check(STRING_VALUE, toolChoice)) {
+    const name = toolChoice.function.name;
+    const tool = tools.find((candidate) => candidate.name === name);
+    return { type: tool && providerGrammarTool(tool, supportsGrammar) ? "custom" : "function", name };
+  }
   return toolChoice;
 }
 
@@ -1699,7 +1709,7 @@ function parseJson(text: string, label: string): JsonValue {
   }
 }
 
-type ResponsesToolChoice = string | { type: "function"; name: string };
+type ResponsesToolChoice = string | { type: "function" | "custom"; name: string };
 
 type MarkedResponsesInput = {
   input: JsonValue[];

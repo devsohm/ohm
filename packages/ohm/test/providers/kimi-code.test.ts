@@ -10,8 +10,35 @@ import {
 import { BUILTIN_PROVIDER_CONFIGS } from "../../src/cli/runtime.js";
 import { BUILTIN_PROVIDER_DESCRIPTORS } from "../../src/providers/builtins.js";
 import { configuredModelsWithMaintainedCatalog } from "../../src/providers/maintained-model-catalog.js";
+import { OpenAICompatibleAdapter } from "../../src/providers/openai-compatible.js";
 import { createProviderAdapter } from "../../src/service/provider-factory.js";
-import { collect, parseJsonObject, readJsonObject, request } from "./helpers.js";
+import { collect, fakeFetch, parseJsonObject, readJsonObject, request } from "./helpers.js";
+
+test("Kimi Code cache retention none omits session affinity from headers and body", async () => {
+  for (const disabled of [false, true]) {
+    const bodies: JsonObject[] = [];
+    const headers: Headers[] = [];
+    const adapter = new OpenAICompatibleAdapter({
+      id: "kimi-code", profile: "kimi-coding", baseUrl: "https://api.kimi.com/coding/v1", apiKey: "offline",
+      fetch: fakeFetch(async (incoming) => {
+        bodies.push(await readJsonObject(incoming));
+        headers.push(incoming.headers);
+        return new Response('data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    const input = request("kimi-code");
+    input.sessionId = "session-retention";
+    input.modelSettings = { compatibility: { sendSessionAffinityHeaders: true } };
+    if (disabled) input.cacheRetention = "none";
+    const events = await collect(adapter.stream(input, new AbortController().signal));
+    assert.equal(events.at(-1)?.type, "response_end");
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0]?.prompt_cache_key, disabled ? undefined : input.sessionId);
+    assert.equal(headers[0]?.get("session_id"), disabled ? null : input.sessionId);
+  }
+});
 
 test("Kimi Code has one isolated membership-key identity and current catalog", async () => {
   const descriptor = BUILTIN_PROVIDER_DESCRIPTORS.find((entry) => entry.id === "kimi-code");

@@ -1,4 +1,6 @@
 import { optionalProperties } from "./optional-properties.js";
+import { boundedRedactedMessage } from "./bounded-diagnostic.js";
+import { errorMessage } from "./errors.js";
 import {
 	existsSync,
 	opendirSync,
@@ -57,6 +59,7 @@ import {
 } from "../plugins/project-packages.js";
 import { resolvePath } from "../utils/paths.js";
 import { findNestedGitWorktree } from "../context/git-worktree.js";
+import { resolvePluginDataRoot } from "../config/plugin-data-root.js";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.js";
 
@@ -260,16 +263,16 @@ interface Generation extends ResourceViews, PromptViews {
 	projectPackages: { packages: InstalledProjectPackage[]; catalog: ProjectPackageCatalogEntry[] };
 }
 
-function emptyPluginResult(cwd: string, agentDir: string): ResourcePluginsResult {
+function emptyPluginResult(cwd: string, dataRoot: string): ResourcePluginsResult {
 	return projectLoadedPluginHost(new RuntimePluginHost(cwd, {
-		dataRoot: join(agentDir, "state", "extension-data"),
+		dataRoot,
 		projectTrusted: false,
 	}));
 }
 
-function emptyGeneration(cwd: string, agentDir: string): Generation {
+function emptyGeneration(cwd: string, dataRoot: string): Generation {
 	return {
-		plugins: emptyPluginResult(cwd, agentDir),
+		plugins: emptyPluginResult(cwd, dataRoot),
 		skills: { skills: [], diagnostics: [] },
 		prompts: { prompts: [], diagnostics: [] },
 		themes: { themes: [], diagnostics: [] },
@@ -632,6 +635,7 @@ interface MergedNamedResources<T> {
 export class DefaultResourceLoader implements ResourceLoader {
 	readonly supportsTransactionalRefresh = true as const;
 	readonly #options: DefaultResourceLoaderOptions;
+	readonly #dataRoot: string;
 	readonly #maximum: number;
 	#settings: SettingsManager;
 	#generation: Generation;
@@ -642,9 +646,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// SAFETY: only the private CLI-to-loader bridge adds this optional symbol property.
 		const internal = options as DefaultResourceLoaderOptions & InternalResourceLoaderOptions;
 		this.#options = { ...options, cwd: resolve(options.cwd), agentDir: resolve(options.agentDir) };
+		this.#dataRoot = options.preparedPlugins?.dataRoot ?? resolvePluginDataRoot(this.#options.agentDir);
 		this.#maximum = trustedResourceFileLimit(options.trustedResourceMaxBytes ?? DEFAULT_TRUSTED_RESOURCE_FILE_BYTES);
 		this.#settings = options.settingsManager ?? SettingsManager.create(this.#options.cwd, this.#options.agentDir);
-		this.#generation = emptyGeneration(this.#options.cwd, this.#options.agentDir);
+		this.#generation = emptyGeneration(this.#options.cwd, this.#dataRoot);
 		this.#preparedPackageDiscovery = internal[PREPARED_PACKAGE_DISCOVERY];
 		this.#preparedHost = options.preparedPlugins;
 	}
@@ -676,47 +681,52 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 		let host = this.#preparedHost;
 		this.#preparedHost = undefined;
-		const preparedPaths = new Set(host?.plugins().map((entry) => entry.sourcePath) ?? []);
-		const userPaths = enabled.filter((entry) => entry.metadata.scope !== "project" && !preparedPaths.has(resolve(entry.path)));
-		const projectPaths = enabled.filter((entry) => entry.metadata.scope === "project" && !preparedPaths.has(resolve(entry.path)));
-		if (host === undefined) {
-			host = await loadDirectPlugins(
-				options.resolveProjectTrust === undefined ? enabled.map((entry) => entry.path) : userPaths.map((entry) => entry.path),
-				{
+		try {
+			const preparedPaths = new Set(host?.plugins().map((entry) => entry.sourcePath) ?? []);
+			const userPaths = enabled.filter((entry) => entry.metadata.scope !== "project" && !preparedPaths.has(resolve(entry.path)));
+			const projectPaths = enabled.filter((entry) => entry.metadata.scope === "project" && !preparedPaths.has(resolve(entry.path)));
+			if (host === undefined) {
+				host = await loadDirectPlugins(
+					options.resolveProjectTrust === undefined ? enabled.map((entry) => entry.path) : userPaths.map((entry) => entry.path),
+					{
+						workspace: this.#options.cwd,
+						dataRoot: this.#dataRoot,
+						projectTrusted: trusted,
+						inlinePlugins: this.#options.pluginFactories ?? [],
+						directPathMetadata: metadata,
+						...optionalProperties(this.#options.eventBus === undefined ? undefined : { eventBus: this.#options.eventBus }),
+						...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
+					},
+				);
+			} else if (userPaths.length > 0) {
+				await appendDirectPlugins(host, userPaths.map((entry) => entry.path), {
 					workspace: this.#options.cwd,
-					dataRoot: join(this.#options.agentDir, "state", "extension-data"),
 					projectTrusted: trusted,
-					inlinePlugins: this.#options.pluginFactories ?? [],
-					directPathMetadata: metadata,
-					...optionalProperties(this.#options.eventBus === undefined ? undefined : { eventBus: this.#options.eventBus }),
-					...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
-				},
-			);
-		} else if (userPaths.length > 0) {
-			await appendDirectPlugins(host, userPaths.map((entry) => entry.path), {
-				workspace: this.#options.cwd,
-				projectTrusted: trusted,
-				directPathMetadata: metadata,
-				...optionalProperties(this.#options.eventBus === undefined ? undefined : { eventBus: this.#options.eventBus }),
-				...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
-			});
-		}
-		let result = projectedPlugins(host, enabled);
-		if (options.resolveProjectTrust !== undefined) {
-			const accepted = await options.resolveProjectTrust({ pluginsResult: result });
-			if (accepted && projectPaths.length > 0) {
-				await appendDirectPlugins(host, projectPaths.map((entry) => entry.path), {
-					workspace: this.#options.cwd,
-					projectTrusted: true,
 					directPathMetadata: metadata,
 					...optionalProperties(this.#options.eventBus === undefined ? undefined : { eventBus: this.#options.eventBus }),
 					...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
 				});
-				host.reorderCommittedPlugins(enabled.map((entry) => entry.path));
-				result = projectedPlugins(host, enabled);
 			}
+			let result = projectedPlugins(host, enabled);
+			if (options.resolveProjectTrust !== undefined) {
+				const accepted = await options.resolveProjectTrust({ pluginsResult: result });
+				if (accepted && projectPaths.length > 0) {
+					await appendDirectPlugins(host, projectPaths.map((entry) => entry.path), {
+						workspace: this.#options.cwd,
+						projectTrusted: true,
+						directPathMetadata: metadata,
+						...optionalProperties(this.#options.eventBus === undefined ? undefined : { eventBus: this.#options.eventBus }),
+						...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
+					});
+					host.reorderCommittedPlugins(enabled.map((entry) => entry.path));
+					result = projectedPlugins(host, enabled);
+				}
+			}
+			return result;
+		} catch (error) {
+			await host?.close().catch(() => undefined);
+			throw error;
 		}
-		return result;
 	}
 
 	async loadProjectTrustPlugins(): Promise<ResourcePluginsResult> {
@@ -922,6 +932,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		let candidateHost: RuntimePluginHost | undefined;
 		let selectedResult: ResourcePluginsResult | undefined;
 		let rollback: (() => void) | undefined;
+		let retiredHosts: RuntimePluginHost[] = [];
 		try {
 			const loaded = await this.#loadPlugins(
 				pluginPaths,
@@ -932,7 +943,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			candidateHost = getPluginRuntimeHost(loaded.runtime);
 			const extensionErrors = additionalPaths(this.#options.additionalPluginPaths)
 				.filter((entry) => !existsSync(entry.path))
-				.map((entry) => ({ path: entry.path, error: "Configured extension path was not found" }));
+				.map((entry) => ({ path: entry.path, error: "Configured plugin path was not found" }));
 			const withErrors = { ...loaded, errors: [...loaded.errors, ...extensionErrors] };
 			selectedResult = this.#options.pluginsOverride?.(withErrors) ?? withErrors;
 			rollback = options.preparePlugins?.(selectedResult) || undefined;
@@ -988,15 +999,24 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.#settings = settings;
 			const previousHost = getPluginRuntimeHost(previous.plugins.runtime);
 			const selectedHost = getPluginRuntimeHost(selectedResult.runtime);
-			const closePrevious = previousHost !== undefined && previousHost !== selectedHost ? previousHost.close() : Promise.resolve();
-			const closeCandidate = candidateHost !== undefined && candidateHost !== selectedHost ? candidateHost.close() : Promise.resolve();
-			await Promise.all([closePrevious, closeCandidate]);
+			retiredHosts = [...new Set([previousHost, candidateHost].filter(
+				(host): host is RuntimePluginHost => host !== undefined && host !== selectedHost,
+			))];
 		} catch (error) {
 			rollback?.();
 			const selectedHost = selectedResult === undefined ? undefined : getPluginRuntimeHost(selectedResult.runtime);
 			if (candidateHost !== undefined && candidateHost !== getPluginRuntimeHost(this.#generation.plugins.runtime)) await candidateHost.close().catch(() => undefined);
 			if (selectedHost !== undefined && selectedHost !== candidateHost && selectedHost !== getPluginRuntimeHost(this.#generation.plugins.runtime)) await selectedHost.close().catch(() => undefined);
 			throw error;
+		}
+		// Publication is irreversible: retirement failures must not roll back the new generation.
+		const retired = await Promise.allSettled(retiredHosts.map((host) => host.close()));
+		for (const result of retired) {
+			if (result.status !== "rejected") continue;
+			this.#generation.plugins.errors.push({
+				path: "<retired-plugin-host>",
+				error: boundedRedactedMessage(errorMessage(result.reason)),
+			});
 		}
 	}
 }

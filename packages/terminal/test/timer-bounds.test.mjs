@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
-import { Loader, ProcessTerminal, ScrollView, StdinBuffer, TUI } from "../dist/index.js";
+import { CancellableLoader, Loader, ProcessTerminal, ScrollView, StdinBuffer, TUI } from "../dist/index.js";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const LONG_DELAY_MS = MAX_TIMER_DELAY_MS + 5;
@@ -86,6 +86,32 @@ function installFakeTimers() {
 }
 
 describe("public timer bounds", () => {
+  it("stops a cancellable loader timer even when onAbort throws", () => {
+    const clock = installFakeTimers();
+    let loader;
+    try {
+      let renders = 0;
+      let aborts = 0;
+      const failure = new Error("abort observer failed");
+      loader = new CancellableLoader({ requestRender() { renders += 1; } }, (text) => text, (text) => text);
+      const timer = clock.activeSince(0)[0];
+      assert.equal(timer?.kind, "interval");
+      assert.equal(renders, 1);
+      loader.onAbort = () => { aborts += 1; throw failure; };
+      assert.throws(() => loader.handleInput("\x1b"), (error) => error === failure);
+      assert.equal(loader.aborted, true);
+      assert.equal(timer.active, false);
+      loader.handleInput("\x1b");
+      loader.dispose();
+      assert.equal(aborts, 1);
+      assert.deepEqual(clock.activeSince(0), []);
+      assert.equal(renders, 1);
+    } finally {
+      loader?.dispose();
+      clock.restore();
+    }
+  });
+
   it("rejects invalid delays at each public boundary", async () => {
     const invalid = [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "1", null];
     for (const value of invalid) {

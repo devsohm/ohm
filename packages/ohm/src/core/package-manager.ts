@@ -1534,19 +1534,30 @@ export class DefaultPackageManager implements PackageManager {
 		await mkdir(scopeBase, { recursive: true });
 		const stageRoot = await mkdtemp(join(scopeBase, ".ohm-package-stage-"));
 		const stage = join(stageRoot, "package");
+		let preserveStage = false;
 		try {
 			this.#emit({ type: "start", action: "clone", source });
-			const advertisedOutput = await run(
+			const pinned = parsed.ref !== undefined && /^[a-f0-9]{40}$/u.test(parsed.ref);
+			const advertisedOutput = pinned ? "" : await run(
 				this.#git,
-				["ls-remote", parsed.repository, parsed.ref ?? "HEAD"],
+				["ls-remote", parsed.repository, ...(parsed.ref === undefined
+					? ["HEAD"]
+					: [`refs/heads/${parsed.ref}`, `refs/tags/${parsed.ref}`, `refs/tags/${parsed.ref}^{}`])],
 				options.signal === undefined ? {} : { signal: options.signal },
 			).catch(() => "");
-			const advertised = advertisedOutput.trim().split(/\s/u)[0];
+			const advertisedRefs = new Map(advertisedOutput.trim().split(/\r?\n/u).flatMap((line) => {
+				const [revision, ref] = line.split(/\s+/u);
+				return revision !== undefined && ref !== undefined ? [[ref, revision] as const] : [];
+			}));
+			const selectedRef = parsed.ref === undefined ? "HEAD" : pinned ? parsed.ref
+				: advertisedRefs.has(`refs/heads/${parsed.ref}`) || !advertisedRefs.has(`refs/tags/${parsed.ref}`)
+					? `refs/heads/${parsed.ref}` : `refs/tags/${parsed.ref}`;
+			const advertised = pinned ? parsed.ref : advertisedRefs.get(`${selectedRef}^{}`) ?? advertisedRefs.get(selectedRef);
 			await run(this.#git, ["clone", "--no-checkout", "--", parsed.repository, stage], options.signal === undefined ? {} : { signal: options.signal });
 			if (parsed.ref !== undefined) {
-				await run(this.#git, ["-C", stage, "fetch", "--depth=1", "--no-tags", "--filter=blob:none", "--recurse-submodules=no", "--", "origin", `refs/heads/${parsed.ref}`], options.signal === undefined ? {} : { signal: options.signal });
-				await run(this.#git, ["-C", stage, "checkout", "--no-recurse-submodules", "--detach", "FETCH_HEAD"], options.signal === undefined ? {} : { signal: options.signal });
+				await run(this.#git, ["-C", stage, "fetch", "--depth=1", "--no-tags", "--filter=blob:none", "--recurse-submodules=no", "--", "origin", selectedRef], options.signal === undefined ? {} : { signal: options.signal });
 			}
+			await run(this.#git, ["-C", stage, "checkout", "--no-recurse-submodules", "--detach", parsed.ref === undefined ? "HEAD" : "FETCH_HEAD"], options.signal === undefined ? {} : { signal: options.signal });
 			if (advertised !== undefined && /^[a-f0-9]{40}$/u.test(advertised)) {
 				const checkedOut = (await run(this.#git, ["-C", stage, "rev-parse", "--verify", "HEAD^{commit}"], options.signal === undefined ? {} : { signal: options.signal })).trim();
 				if (checkedOut !== advertised) throw new Error("Git ref changed while it was being installed");
@@ -1561,11 +1572,25 @@ export class DefaultPackageManager implements PackageManager {
 			await this.#activation(source, scope, stage, options.signal);
 			const destination = join(scopeBase, "git", "repositories", sha(sourceIdentity(source, scopeBase).slice(4)));
 			await mkdir(dirname(destination), { recursive: true });
-			await rm(destination, { recursive: true, force: true });
-			await rename(stage, destination);
+			options.signal?.throwIfAborted();
+			const previous = join(stageRoot, "previous");
+			const replacing = pathEntryExists(destination);
+			if (replacing) await rename(destination, previous);
+			try {
+				await rename(stage, destination);
+			} catch (error) {
+				if (replacing) {
+					try { await rename(previous, destination); }
+					catch (restoreError) {
+						preserveStage = true;
+						throw new AggregateError([error, restoreError], `Git publication rollback failed; prior checkout retained at ${previous}`);
+					}
+				}
+				throw error;
+			}
 			this.#emit({ type: "complete", action: "clone", source });
 		} finally {
-			await rm(stageRoot, { recursive: true, force: true });
+			if (!preserveStage) await rm(stageRoot, { recursive: true, force: true });
 		}
 	}
 

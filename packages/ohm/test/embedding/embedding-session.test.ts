@@ -564,7 +564,7 @@ test("configured public runtime creation rejects a startup extension shutdown wi
     skills: false,
     promptTemplates: false,
     themes: false,
-  }), /shut down during extension startup/u);
+  }), /shut down during plugin startup/u);
   assert.deepEqual(
     globalThis.__ohmEmbeddingStartupShutdown,
     ["activate", "start", "shutdown:quit", "dispose"],

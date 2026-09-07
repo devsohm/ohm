@@ -44,6 +44,75 @@ function store(initial: ProviderModelsStoreEntry | undefined) {
   };
 }
 
+for (const mode of ["success", "HTTP error", "declared overflow", "streamed overflow", "abort"] as const) {
+  test(`remote catalog releases response ownership on ${mode}`, async (t) => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let resolveAcquired!: () => void;
+    const acquired = new Promise<void>((resolve) => { resolveAcquired = resolve; });
+    let resolveCancellation!: () => void;
+    const cancellationSettled = new Promise<void>((resolve) => { resolveCancellation = resolve; });
+    const abort = new AbortController();
+    const cancellation = new Error("catalog reader cancelled");
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelled = false;
+    let closed = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(value) { controller = value; },
+      pull(value) {
+        resolveAcquired();
+        if (mode === "success") {
+          value.enqueue(Buffer.from(JSON.stringify({ models: [baseline] })));
+          value.close();
+          closed = true;
+        } else if (mode === "streamed overflow") {
+          value.enqueue(new Uint8Array(8 * 1024 * 1024 + 1));
+        }
+      },
+      cancel() {
+        cancelled = true;
+        return cancellationSettled;
+      },
+    }, { highWaterMark: 0 });
+    const headers = new Headers();
+    if (mode === "declared overflow") headers.set("content-length", String(8 * 1024 * 1024 + 1));
+    globalThis.fetch = async () => new Response(body, { status: mode === "HTTP error" ? 503 : 200, headers });
+    const wrapped = withRemoteCatalog(provider(), "https://catalog.example.test");
+    const refreshing = wrapped.refreshModels!({
+      allowNetwork: true,
+      force: true,
+      signal: abort.signal,
+      store: store({ models: [cached], checkedAt: 0 }),
+    });
+    const observed = refreshing.then(() => "fulfilled", (error) => error);
+    try {
+      if (mode === "abort") {
+        await acquired;
+        abort.abort(cancellation);
+      }
+      const outcome = await Promise.race([
+        observed,
+        new Promise<"pending">((resolve) => setImmediate(resolve, "pending")),
+      ]);
+      if (mode === "success") assert.equal(outcome, "fulfilled");
+      else if (mode === "abort") assert.equal(outcome, cancellation);
+      else {
+        assert.ok(outcome instanceof Error, "catalog operation must settle without awaiting body cancellation");
+        assert.match(outcome.message, mode === "HTTP error" ? /503/u : /exceeds/u);
+      }
+      assert.equal(body.locked, false);
+      assert.equal(cancelled, mode !== "success");
+      if (mode !== "success") {
+        assert.deepEqual(wrapped.getModels().map((model) => model.id), ["baseline", "cached"]);
+      }
+    } finally {
+      resolveCancellation();
+      if (!cancelled && !closed) controller.close();
+      await observed;
+    }
+  });
+}
+
 test("remote catalogs use a timeout signal, reject oversized bodies, and retain the last good overlay", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });

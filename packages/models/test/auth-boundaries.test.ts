@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
 import { getBuiltinProvider, MemoryCredentialStore } from "../src/index.ts";
 import {
@@ -6,6 +8,7 @@ import {
   createPkcePair,
   deviceOAuthMethod,
   modifyCredential,
+  oauthTokenRequest,
 } from "../src/oauth.ts";
 import { xaiProvider } from "../src/providers/xai.ts";
 
@@ -148,3 +151,91 @@ test("audited product providers do not install a product OAuth registration by d
     assert.equal(getBuiltinProvider(id)?.auth.oauth, undefined, id);
   }
 });
+
+test("OAuth token bodies release their reader on success and read failure", async () => {
+  for (const failed of [false, true]) {
+    const marker = new Error("synthetic body failure");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (failed) controller.error(marker);
+        else {
+          controller.enqueue(new TextEncoder().encode('{"access_token":"dummy"}'));
+          controller.close();
+        }
+      },
+    });
+    const request = oauthTokenRequest("https://auth.example/token", {}, { fetch: async () => new Response(body) });
+    if (failed) await assert.rejects(request, (error) => error === marker);
+    else assert.equal((await request).access_token, "dummy");
+    assert.equal(body.locked, false, failed ? "failed reader" : "completed reader");
+  }
+});
+
+test("OAuth oversized bodies reject without awaiting custom cancellation", async () => {
+  let release!: () => void;
+  const cancelled = new Promise<void>((resolve) => { release = resolve; });
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(64 * 1024 + 1)); },
+    cancel() { cancellations += 1; return cancelled; },
+  });
+  const request = oauthTokenRequest("https://auth.example/token", {}, { fetch: async () => new Response(body) });
+  let rejected = false;
+  const observed = request.then(() => {}, () => { rejected = true; });
+  try {
+    await nextTurn();
+    assert.equal(rejected, true, "overflow must settle independently of cancellation");
+    await assert.rejects(request, /exceeded 64 KiB/u);
+    assert.equal(cancellations, 1);
+    assert.equal(body.locked, false);
+  } finally { release(); await observed; }
+});
+
+test("OAuth body cancellation does not depend on an injected fetch implementation", async () => {
+  const controller = new AbortController();
+  const marker = new Error("cancelled OAuth body");
+  let close!: () => void;
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(source) { close = () => { if (cancellations === 0) source.close(); }; },
+    cancel() { cancellations += 1; },
+  });
+  const request = oauthTokenRequest("https://auth.example/token", {}, {
+    signal: controller.signal, fetch: async () => new Response(body),
+  });
+  let rejected = false;
+  const observed = request.then(() => {}, () => { rejected = true; });
+  try {
+    await nextTurn();
+    assert.equal(body.locked, true);
+    controller.abort(marker);
+    await nextTurn();
+    assert.equal(rejected, true, "cancelled body must settle without transport cooperation");
+    await assert.rejects(request, (error) => error === marker);
+    assert.equal(cancellations, 1);
+    assert.equal(body.locked, false);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  } finally { close(); await observed; }
+});
+
+for (const failed of [false, true]) {
+  test(`device OAuth ${failed ? "rejects non-success token responses" : "removes completed polling listeners"}`, async () => {
+    const controller = new AbortController();
+    let requests = 0;
+    const method = deviceOAuthMethod({
+      name: "Synthetic device flow", clientId: "dummy", scopes: [],
+      deviceUrl: "https://auth.example/device", tokenUrl: "https://auth.example/token",
+      fetch: async () => {
+        requests += 1;
+        return requests === 1
+          ? Response.json({ device_code: "dummy", user_code: "CODE", verification_uri: "https://auth.example/verify", expires_in: 60, interval: 1 })
+          : Response.json({ access_token: "dummy", expires_in: 60 }, { status: failed ? 400 : 200 });
+      },
+    });
+    const login = method.login({ signal: controller.signal, notify() {}, async prompt() { return ""; } });
+    if (failed) await assert.rejects(login, /OAuth device flow failed/u);
+    else assert.equal((await login).access, "dummy");
+    assert.equal(requests, 2);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  });
+}

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { zstdDecompressSync } from "node:zlib";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -3047,6 +3048,78 @@ test("Codex WebSocket preflights Blob payload size at the 16 MiB boundary", asyn
     assert.equal(terminalCount(events), 1);
   });
 });
+
+for (const boundary of ["message count", "bytes", "disposed owner"] as const) {
+  test(`Codex WebSocket pending Blob decoding respects ${boundary}`, async () => {
+    const socket = new FakeWebSocket();
+    const controller = new AbortController();
+    const blocked = new Blob([JSON.stringify({ type: "response.in_progress", response: { id: "pending", output: [] } })]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const descriptor = Object.getOwnPropertyDescriptor(Blob.prototype, "arrayBuffer");
+    assert.ok(descriptor);
+    const original = Blob.prototype.arrayBuffer;
+    let reads = 0;
+    Object.defineProperty(Blob.prototype, "arrayBuffer", {
+      ...descriptor,
+      async value(this: Blob) {
+        reads += 1;
+        const bytes = await original.call(this);
+        if (this === blocked) { enter(); await gate; }
+        return bytes;
+      },
+    });
+    socket.onSend = () => queueMicrotask(() => socket.rawMessage(blocked));
+    const adapter = new OpenAICodexResponsesAdapter({
+      credential: async () => ({ accessToken: "subscription-access", accountId: "chatgpt-account" }),
+      transport: "websocket",
+      webSocket: socketFactory(() => socket),
+    });
+    let settled = false;
+    const pending = collect(adapter.stream(request("openai-codex"), controller.signal))
+      .then((events) => { settled = true; return events; });
+    try {
+      await entered;
+      assert.equal(reads, 1, "the first native Blob read must reach its gate");
+      if (boundary === "disposed owner") {
+        socket.rawMessage(new Blob(["late payload"]));
+        controller.abort();
+        const events = await pending;
+        assert.equal(events.at(-1)?.type, "error");
+        assert.equal(socket.closeCalls, 1);
+        release();
+        await nextTurn();
+        assert.equal(reads, 1, "queued Blob decoding must not start after its stream owner exits");
+      } else {
+        if (boundary === "message count") {
+          for (let index = 0; index < 1_024; index += 1) socket.rawMessage("{}");
+        } else {
+          const maximumFrame = new Blob([new Uint8Array(WEBSOCKET_MAX_MESSAGE_BYTES)]);
+          socket.rawMessage(maximumFrame);
+          socket.rawMessage(maximumFrame);
+        }
+        await nextTurn();
+        assert.equal(settled, true, "pending raw frames must count toward the receive queue budget before decoding finishes");
+        const events = await pending;
+        const terminal = events.at(-1);
+        assert.equal(terminal?.type, "error");
+        assert.match(terminal?.type === "error" ? terminal.error.message : "", /receive queue exceeded its safety limit/u);
+        assert.equal(terminalCount(events), 1);
+        assert.equal(reads, 1, "overflow must not decode the queued payloads");
+        assert.equal(socket.closeCalls, 1);
+      }
+    } finally {
+      controller.abort();
+      release();
+      await pending;
+      await nextTurn();
+      adapter.dispose();
+      Object.defineProperty(Blob.prototype, "arrayBuffer", descriptor);
+    }
+  });
+}
 
 test("Codex WebSocket cancellation does not inspect hostile abort reasons", async (t) => {
   await t.test("before acquisition", async (t) => {

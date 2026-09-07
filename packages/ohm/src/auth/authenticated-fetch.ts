@@ -1,4 +1,3 @@
-import { optionalProperties } from "../core/optional-properties.js";
 import type { ProviderAuthenticatedRequestPolicy } from "./provider-descriptor.js";
 import {
   bufferRequestBody,
@@ -16,12 +15,6 @@ const FORBIDDEN_CALLER_HEADERS = new Set([
 ]);
 
 export type ProviderRequestAuthorizer = (request: Request) => Request | Promise<Request>;
-
-function abortSignal(primary: AbortSignal | null, secondary?: AbortSignal): AbortSignal | undefined {
-  const signals = [primary, secondary].filter((value): value is AbortSignal => value !== null && value !== undefined);
-  if (signals.length === 0) return undefined;
-  return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-}
 
 function authorizedHeaderNames(policy: ProviderAuthenticatedRequestPolicy): Set<string> {
   const names = new Set(FORBIDDEN_CALLER_HEADERS);
@@ -77,7 +70,7 @@ function boundedResponse(response: Response): Response {
 
 /**
  * Make one exact-origin provider request. Credential material remains inside
- * the host-owned authorizer and is never returned to extension code.
+ * the host-owned authorizer and is never returned to plugin code.
  */
 export async function authenticatedProviderFetch(
   policy: ProviderAuthenticatedRequestPolicy,
@@ -88,13 +81,14 @@ export async function authenticatedProviderFetch(
   signal?: AbortSignal,
 ): Promise<Response> {
   signal?.throwIfAborted();
-  const requestSignal = abortSignal(input instanceof Request ? input.signal : null, signal);
   let request = new Request(input, {
     ...init,
     redirect: "error",
     credentials: "omit",
-    ...optionalProperties(requestSignal === undefined ? undefined : { signal: requestSignal }),
   });
+  const requestSignal = signal === undefined ? request.signal : AbortSignal.any([request.signal, signal]);
+  requestSignal.throwIfAborted();
+  if (signal !== undefined) request = new Request(request, { signal: requestSignal });
   validateTarget(request, policy);
   const forbidden = authorizedHeaderNames(policy);
   for (const name of request.headers.keys()) {
@@ -103,17 +97,19 @@ export async function authenticatedProviderFetch(
     }
   }
   request = (await validateRequestBody(request)).request;
-  signal?.throwIfAborted();
+  requestSignal.throwIfAborted();
   const authorizedRequest = await authorize(request);
   if (!(authorizedRequest instanceof Request)) throw new Error("Provider request authorizer returned an invalid request");
   if (authorizedRequest.url !== request.url || authorizedRequest.method !== request.method) {
     throw new Error("Provider request authorizer changed the request target or method");
   }
   validateTarget(authorizedRequest, policy);
-  const validated = await validateRequestBody(authorizedRequest);
+  // An authorizer may construct a fresh Request; it cannot detach caller cancellation.
+  const authorizedSignal = AbortSignal.any([authorizedRequest.signal, requestSignal]);
+  authorizedSignal.throwIfAborted();
+  const validated = await validateRequestBody(new Request(authorizedRequest, { signal: authorizedSignal }));
   const authorized = validated.request;
-  signal?.throwIfAborted();
-  const authorizedSignal = abortSignal(authorized.signal, signal);
+  authorizedSignal.throwIfAborted();
   const body = authorized.body === null || authorized.method === "GET" || authorized.method === "HEAD"
     ? undefined
     : validated.body;
@@ -122,7 +118,7 @@ export async function authenticatedProviderFetch(
     headers: authorized.headers,
     redirect: "error",
     credentials: "omit",
-    ...optionalProperties(authorizedSignal === undefined ? undefined : { signal: authorizedSignal }),
+    signal: authorizedSignal,
   };
   if (body !== undefined) {
     outgoing.body = body;

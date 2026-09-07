@@ -944,13 +944,18 @@ test("terminal assistant content and response metadata survive runtime history a
   assert.equal(JSON.stringify(assistant?.diagnostics).includes("sk-proj-this-must-never-persist"), false);
 
   const root = await mkdtemp(join(tmpdir(), "ohm-response-metadata-"));
-  context.after(async () => await rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "response-metadata" });
+  let manager: SessionManager | undefined;
+  let reopened: SessionManager | undefined;
+  context.after(async () => {
+    reopened?.closeV4Store();
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, join(root, "sessions"), { id: "response-metadata" });
   manager.appendMessage(assistant!);
   const sessionFile = manager.getSessionFile()!;
   manager.closeV4Store();
-  const reopened = SessionManager.open(sessionFile);
-  context.after(() => reopened.closeV4Store());
+  reopened = SessionManager.open(sessionFile);
   const durable = reopened.getEntries()[0];
   assert.equal(durable?.type, "message");
   assert.deepEqual(durable?.type === "message" ? durable.message : undefined, assistant);
@@ -7818,6 +7823,22 @@ test("compaction bounds and accounts for provider reasoning output", async (t) =
 
     assert.match((await running).finalText, /^Compacted /u);
   });
+
+  for (const kind of ["text", "reasoning"] as const) {
+    await t.test(`compaction bounds aggregate retained ${kind} signatures independently of token estimates`, async () => {
+      const signature = "s".repeat(3 * 1024 * 1024);
+      const { harness, running } = await startCompaction(`compaction-${kind}-signature-retention`, () => events([
+        { type: "response_start", model: "m" },
+        ...[0, 1, 2].map((part): AdapterEvent => kind === "text"
+          ? { type: "text_end", part, text: "checkpoint", textSignature: signature }
+          : { type: "reasoning_end", part, text: "", visibility: "summary", thinkingSignature: signature }),
+        ...(kind === "reasoning" ? [{ type: "text_end", part: 3, text: "checkpoint" } satisfies AdapterEvent] : []),
+        { type: "response_end", reason: "stop", state },
+      ]));
+      await assert.rejects(running, /(?:content|signature|retained).*(?:limit|exceed|maximum)|(?:limit|exceed|maximum).*(?:content|signature|retained)/iu);
+      assert.equal(harness.runtimes[0]?.events.some((entry) => entry.event.type === "compaction_completed"), false);
+    });
+  }
 
   await t.test("terminal signatures are excluded from the no-usage output estimate", async () => {
     const { running } = await startCompaction("compaction-terminal-signatures", (request) => {

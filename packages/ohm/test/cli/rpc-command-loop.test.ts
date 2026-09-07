@@ -11,6 +11,7 @@ import {
 } from "../../src/cli/rpc.js";
 import { parseArgs } from "../../src/cli/args.js";
 import { RpcRuntimeDispatcher, type RpcSessionRuntime } from "../../src/interfaces/rpc-runtime.js";
+import { RpcPluginUiBridge } from "../../src/interfaces/rpc-plugin-ui.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
 import { isJsonObject, type JsonObject } from "../../src/core/json.js";
 import type { RpcCommand, RpcPluginUiResponse } from "../../src/interfaces/rpc-protocol.js";
@@ -86,7 +87,7 @@ test("the installed RPC loop correlates and bounds huge dispatcher failures", as
         sent.push(value);
       },
     },
-    bridge: { handle() { return false; } },
+    bridge: { handle() { return false; }, endInput() {} },
     dispatcher: {
       async dispatch() { throw new Error(`${secret}-${"x".repeat(17 * 1024 * 1024)}`); },
     },
@@ -116,6 +117,7 @@ test("the installed RPC loop lets UI responses bypass saturated commands", async
     ]),
     writer: { async send() {} },
     bridge: {
+      endInput() {},
       handle(_response: RpcPluginUiResponse) {
         uiResponses += 1;
         gate.resolve();
@@ -150,7 +152,7 @@ test("the installed RPC loop lets abort commands bypass saturated ordinary comma
       { id: "cancel", type: "abort" },
     ]),
     writer: { async send() {} },
-    bridge: { handle() { return true; } },
+    bridge: { handle() { return true; }, endInput() {} },
     dispatcher: {
       async dispatch(command: RpcCommand) {
         if (command.type === "abort") {
@@ -175,7 +177,7 @@ test("the installed RPC loop waits for admitted work after clean EOF", async () 
   const operation = runRpcCommandLoop({
     lines: records([{ id: "state", type: "get_state" }]),
     writer: { async send() {} },
-    bridge: { handle() { return true; } },
+    bridge: { handle() { return true; }, endInput() {} },
     dispatcher: {
       async dispatch() {
         await gate.promise;
@@ -191,6 +193,43 @@ test("the installed RPC loop waits for admitted work after clean EOF", async () 
   await operation;
   assert.equal(completed, true);
 });
+
+for (const timing of ["pending", "after EOF"] as const) {
+  test(`the installed RPC loop cancels ${timing} dialogs without dropping responses`, { timeout: 2_000 }, async () => {
+    const ended = deferred();
+    const requests: string[] = [];
+    const replies: JsonObject[] = [];
+    const bridge = new RpcPluginUiBridge({ emit(request) { requests.push(request.method); } });
+    const ui = bridge.context("fixture", "fixture", new AbortController().signal);
+    try {
+      await runRpcCommandLoop({
+        lines: records([{ id: "dialog", type: "prompt" }]),
+        writer: { async send(value) {
+          if (!isJsonObject(value)) throw new Error("RPC test writer received a non-object value");
+          replies.push(value);
+        } },
+        bridge: {
+          handle: (response) => bridge.handle(response),
+          endInput() { bridge.endInput(); ended.resolve(); },
+        },
+        dispatcher: {
+          async dispatch() {
+            if (timing === "after EOF") await ended.promise;
+            assert.equal(await ui.input("No remaining peer"), undefined);
+            assert.equal(await ui.confirm("Later", "Still no peer"), false);
+            ui.notify("Accepted work finished");
+            return { id: "dialog", type: "response", command: "prompt", success: true };
+          },
+        },
+      });
+      assert.equal(bridge.pendingCount, 0);
+      assert.deepEqual(requests, timing === "pending" ? ["input", "notify"] : ["notify"]);
+      assert.deepEqual(replies, [{ id: "dialog", type: "response", command: "prompt", success: true }]);
+    } finally {
+      bridge.close();
+    }
+  });
+}
 
 test("the installed RPC loop rejects an excessive ordinary-command backlog", async () => {
   const gate = deferred();
@@ -208,7 +247,7 @@ test("the installed RPC loop rejects an excessive ordinary-command backlog", asy
   await assert.rejects(runRpcCommandLoop({
     lines: overloaded(),
     writer: { async send() {} },
-    bridge: { handle() { return true; } },
+    bridge: { handle() { return true; }, endInput() {} },
     dispatcher: {
       async dispatch() {
         dispatched += 1;
@@ -271,7 +310,7 @@ test("the installed RPC loop bounds prompts before session admission", async (co
   await assert.rejects(runRpcCommandLoop({
     lines: overloadedPrompts(),
     writer: { async send() {} },
-    bridge: { handle() { return true; } },
+    bridge: { handle() { return true; }, endInput() {} },
     dispatcher,
   }), /RPC command backlog exceeded 1024/u);
 

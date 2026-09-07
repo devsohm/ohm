@@ -122,6 +122,7 @@ test("durable jobs enforce ownership, idempotence, cancellation, and explicit re
   context.after(async () => await supervisor.close());
   const jobs = supervisor.jobs(first.owner);
   let invocations = 0;
+  let metadataUpdate: ReturnType<PluginJobContext["replaceMetadata"]> | undefined;
 
   const started = await jobs.start({
     kind: "fixture.work",
@@ -129,7 +130,8 @@ test("durable jobs enforce ownership, idempotence, cancellation, and explicit re
     metadata: { phase: "initial" },
   }, async (job) => {
     invocations += 1;
-    await job.replaceMetadata({ phase: "running", attempt: job.attempt });
+    metadataUpdate = job.replaceMetadata({ phase: "running", attempt: job.attempt });
+    await metadataUpdate;
     return await untilAborted(job);
   });
   assert.equal(started.state, "running");
@@ -145,6 +147,8 @@ test("durable jobs enforce ownership, idempotence, cancellation, and explicit re
   });
   assert.equal(duplicate.id, started.id);
   assert.equal(invocations, 1);
+  assert.ok(metadataUpdate);
+  await metadataUpdate;
   assert.deepEqual((await jobs.inspect(started.id)).metadata, { phase: "running", attempt: 1 });
 
   const otherJobs = supervisor.jobs({ ...first.owner, key: {}, id: "other-extension" });
@@ -186,6 +190,42 @@ test("durable owner identities are stable and bounded independently of host labe
     supervisor.jobs({ ...fixture.owner, key: {}, id: `${fixture.owner.id}-different` }).inspect(started.id),
     /Unknown durable job/u,
   );
+});
+
+test("a pending durable waiter observes cancellation before an uncooperative operation drains", async (context) => {
+  const fixture = await temporaryOwner(context);
+  const supervisor = new DurableJobSupervisor();
+  context.after(async () => await supervisor.close());
+  const jobs = supervisor.jobs(fixture.owner);
+  let finishOperation: () => void = () => {};
+  const operation = new Promise<void>((resolveValue) => { finishOperation = resolveValue; });
+  const started = await jobs.start({ kind: "fixture.uncooperative-wait" }, async () => {
+    await operation;
+    return { late: true };
+  });
+  const waiter = new AbortController();
+  const waiting = jobs.wait(started.id, { signal: waiter.signal }).then(
+    (status) => ({ state: status.state }),
+    (error) => ({ error }),
+  );
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await eventually(async () => getEventListeners(waiter.signal, "abort").length, (count) => count === 1);
+    assert.equal((await jobs.cancel(started.id)).state, "cancelled");
+    assert.equal((await jobs.inspect(started.id)).state, "cancelled");
+    const outcome = await Promise.race([
+      waiting,
+      new Promise<{ state: string }>((resolveValue) => {
+        deadline = setTimeout(() => resolveValue({ state: "waiter still pending after cancellation" }), 2_000);
+      }),
+    ]);
+    assert.deepEqual(outcome, { state: "cancelled" });
+  } finally {
+    if (deadline !== undefined) clearTimeout(deadline);
+    waiter.abort();
+    finishOperation();
+    await waiting;
+  }
 });
 
 test("durable JSON snapshots reject active objects without invoking extension code", async (context) => {

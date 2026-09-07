@@ -1137,7 +1137,9 @@ export class RpcClient {
       this.#signalDisconnect(failure);
       throw failure;
     }
-    return await ticket.promise;
+    const response = await ticket.promise;
+    if (!response.success) throw new Error(boundedRpcErrorMessage(response.error));
+    return response;
   }
 
   async #writeLine(input: NonNullable<ChildProcess["stdin"]>, line: string): Promise<void> {
@@ -1170,7 +1172,6 @@ export class RpcClient {
   }
 
   #data<T>(response: RpcResponse): T {
-    if (!response.success) throw new Error(boundedRpcErrorMessage(response.error));
     if (!("data" in response)) throw new Error(`RPC ${response.command} response omitted its data payload`);
     // SAFETY: Each public client method fixes T to the data shape paired with
     // the command sent through #send; the broker rejects command mismatches.

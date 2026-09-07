@@ -1,5 +1,6 @@
 import { optionalProperties } from "../core/optional-properties.js";
-import { lstat, readdir, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, opendir, stat } from "node:fs/promises";
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import ignore from "ignore";
 import { Check } from "typebox/value";
@@ -13,6 +14,9 @@ const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1_024;
 const MAX_COMPATIBILITY_LENGTH = 500;
 const MAX_IGNORE_FILE_BYTES = 1024 * 1024;
+const MAX_DISCOVERY_DEPTH = 64;
+const MAX_DISCOVERY_ENTRIES = 10_000;
+const MAX_DISCOVERY_PATH_BYTES = 4 * 1024 * 1024;
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"] as const;
 const KNOWN_FIELDS = new Set([
   "name",
@@ -483,6 +487,20 @@ export async function discoverSkillsDetailed(
   const byName = new Map<string, SkillMetadata>();
   const diagnostics: SkillDiagnostic[] = [];
   const seenManifests = new Set<string>();
+  let entriesScanned = 0;
+  let pathBytes = 0;
+  const countEntry = (): void => {
+    entriesScanned += 1;
+    if (entriesScanned > MAX_DISCOVERY_ENTRIES) {
+      throw new HarnessError("CONTEXT_SKILL_LIMIT", `Skill discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
+    }
+  };
+  const retainPath = (path: string): void => {
+    pathBytes += Buffer.byteLength(path, "utf8");
+    if (pathBytes > MAX_DISCOVERY_PATH_BYTES) {
+      throw new HarnessError("CONTEXT_SKILL_LIMIT", `Skill discovery exceeds ${MAX_DISCOVERY_PATH_BYTES} retained path bytes`);
+    }
+  };
 
   const registerSkill = (discovered: SkillMetadata): void => {
     const previous = byName.get(discovered.name);
@@ -504,10 +522,12 @@ export async function discoverSkillsDetailed(
   };
 
   for (const root of roots) {
+    countEntry();
     try {
       const requested = resolve(root.path);
       const information = await stat(requested);
       if (information.isFile()) {
+        retainPath(requested);
         const directory = dirname(requested);
         const discovered = await readSkillMetadata(
           { ...root, path: directory },
@@ -540,6 +560,7 @@ export async function discoverSkillsDetailed(
 
     const addManifest = async (directory: string, expectedName: string, manifestPath: string): Promise<void> => {
       if (seenManifests.has(manifestPath)) return;
+      retainPath(manifestPath);
       seenManifests.add(manifestPath);
       const discovered = await readSkillMetadata(
         root,
@@ -559,15 +580,25 @@ export async function discoverSkillsDetailed(
       expectedName: string,
       inheritedScopes: readonly IgnoreScope[],
       localDirectory: string,
+      depth: number,
     ): Promise<void> => {
       if (visitedDirectories.has(directory)) return;
+      if (depth > MAX_DISCOVERY_DEPTH) {
+        throw new HarnessError("CONTEXT_SKILL_LIMIT", `Skill discovery exceeds maximum depth ${MAX_DISCOVERY_DEPTH}`);
+      }
+      retainPath(directory);
       visitedDirectories.add(directory);
       const scopes = [...inheritedScopes, ...await loadIgnoreScopes(directory, localDirectory)];
-      let entries;
+      const entries: Dirent[] = [];
       try {
-        entries = (await readdir(directory, { withFileTypes: true }))
-          .sort((left, right) => compareText(left.name, right.name));
+        const handle = await opendir(directory);
+        for await (const entry of handle) {
+          countEntry();
+          entries.push(entry);
+        }
+        entries.sort((left, right) => compareText(left.name, right.name));
       } catch (error) {
+        if (error instanceof HarnessError) throw error;
         diagnostics.push({
           severity: "error",
           code: "SKILL_DIRECTORY_UNREADABLE",
@@ -635,11 +666,11 @@ export async function discoverSkillsDetailed(
           });
         }
         if (ignoredBy(scopes, local, true)) continue;
-        await scan(child, entry.name, scopes, local);
+        await scan(child, entry.name, scopes, local, depth + 1);
       }
     };
 
-    await scan(realRoot, basename(resolve(root.path)), [], "");
+    await scan(realRoot, basename(resolve(root.path)), [], "", 0);
   }
 
   return {

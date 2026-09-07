@@ -15,6 +15,7 @@ import type {
 } from "./contracts.js";
 import { fetchEventStream, normalizedHeaders, type HttpStreamRequest } from "./http-engine.js";
 import { promptCacheKey } from "./api/openai-prompt-cache.js";
+import { appendGrammarInputDelta, grammarInput, grammarToolProperties, type GrammarInputBuffer } from "./sampling.js";
 import { createAssistantMessageEventStream, emptyUsage } from "./streaming.js";
 import { calculateCost, contentText, errorMessage } from "./utilities.js";
 
@@ -96,6 +97,7 @@ class CanonicalWriter {
   readonly #argumentBytes = new Map<number, number>();
   readonly #fieldBytes = new Map<number, number>();
   readonly #signatureBytes = new Map<number, number>();
+  readonly #providerItems = new Map<string, { item: RecordValue; bytes: number }>();
   readonly #open = new Set<number>();
   #contentBytes = 0;
 
@@ -144,20 +146,21 @@ class CanonicalWriter {
     delete this.#message.responseModel;
   }
 
-  text(delta: string, thinking = false): void {
-    if (!delta) return;
+  text(delta: string, thinking = false, forceNew = false): number | undefined {
+    if (!delta && !forceNew) return;
     const kind = thinking ? "thinking" : "text";
     let index = this.#message.content.length - 1;
     let block = this.#message.content[index];
     const deltaBytes = byteLength(delta);
-    const fieldBytes = block?.type === kind && this.#open.has(index) ? this.#fieldBytes.get(index) ?? 0 : 0;
+    const append = !forceNew && block?.type === kind && this.#open.has(index) && !this.#signatureBytes.has(index);
+    const fieldBytes = append ? this.#fieldBytes.get(index) ?? 0 : 0;
     if (deltaBytes > MAX_ASSISTANT_FIELD_BYTES - fieldBytes) {
       throw new RangeError(`Assistant ${kind} content exceeded 4 MiB`);
     }
     if (deltaBytes > MAX_ASSISTANT_CONTENT_BYTES - this.#contentBytes) {
       throw new RangeError("Assistant content exceeded 8 MiB");
     }
-    if (block?.type !== kind || !this.#open.has(index)) {
+    if (block?.type !== kind || !append) {
       if (this.#message.content.length >= MAX_ASSISTANT_BLOCKS) {
         throw new RangeError(`Assistant content exceeded ${MAX_ASSISTANT_BLOCKS} blocks`);
       }
@@ -176,6 +179,7 @@ class CanonicalWriter {
     this.stream.push(thinking
       ? { type: "thinking_delta", contentIndex: index, delta, partial: this.snapshot() }
       : { type: "text_delta", contentIndex: index, delta, partial: this.snapshot() });
+    return index;
   }
 
   startTool(id: string, name: string, index?: number): number {
@@ -238,12 +242,18 @@ class CanonicalWriter {
   }
 
   thinkingSignature(delta: string): void {
-    if (!delta) return;
     const index = this.#message.content.length - 1;
     const block = this.#message.content[index];
     if (block?.type !== "thinking" || !this.#open.has(index)) {
       throw new TypeError("Thinking signatures require active thinking content");
     }
+    this.signature(delta, index);
+  }
+
+  signature(delta: string, index = this.#message.content.length - 1): void {
+    if (!delta) return;
+    const block = this.#message.content[index];
+    if (block === undefined || !this.#open.has(index)) throw new TypeError("Signature requires active content");
     const deltaBytes = byteLength(delta);
     const signatureBytes = this.#signatureBytes.get(index) ?? 0;
     if (deltaBytes > MAX_ASSISTANT_FIELD_BYTES - signatureBytes) {
@@ -252,9 +262,38 @@ class CanonicalWriter {
     if (deltaBytes > MAX_ASSISTANT_CONTENT_BYTES - this.#contentBytes) {
       throw new RangeError("Assistant content exceeded 8 MiB");
     }
-    block.thinkingSignature = (block.thinkingSignature ?? "") + delta;
+    if (block.type === "thinking") block.thinkingSignature = (block.thinkingSignature ?? "") + delta;
+    else if (block.type === "toolCall") block.thoughtSignature = (block.thoughtSignature ?? "") + delta;
+    else block.textSignature = (block.textSignature ?? "") + delta;
     this.#signatureBytes.set(index, signatureBytes + deltaBytes);
     this.#contentBytes += deltaBytes;
+  }
+
+  redactedThinking(data: string): void {
+    const index = this.text("", true, true)!;
+    const block = this.#message.content[index];
+    if (block?.type === "thinking") block.redacted = true;
+    this.signature(data, index);
+  }
+
+  reasoningItem(item: RecordValue): void {
+    if (item.type !== "reasoning" || string(item.encrypted_content) === undefined) return;
+    const id = requiredToolIdentity(string(item.id) ?? "", "reasoning item ID", MAX_RESPONSE_ID_BYTES);
+    const serialized = JSON.stringify(item);
+    const bytes = byteLength(serialized);
+    const retained = this.#contentBytes - (this.#providerItems.get(id)?.bytes ?? 0);
+    if (bytes > MAX_ASSISTANT_FIELD_BYTES || bytes > MAX_ASSISTANT_CONTENT_BYTES - retained) {
+      throw new RangeError("Opaque reasoning state exceeded the assistant byte limit");
+    }
+    if (!this.#providerItems.has(id) && this.#providerItems.size >= MAX_ASSISTANT_BLOCKS) {
+      throw new RangeError("Opaque reasoning state exceeded the assistant item limit");
+    }
+    this.#providerItems.set(id, { item: structuredClone(item), bytes });
+    this.#contentBytes = retained + bytes;
+    this.#message.providerState = {
+      source: { api: this.#model.api, provider: this.#model.provider, model: this.#model.id },
+      value: Array.from(this.#providerItems.values(), (entry) => entry.item),
+    };
   }
 
   finishTool(index: number, finalArguments?: JsonValue): void {
@@ -540,18 +579,25 @@ function messageMatchesModel(message: AssistantMessage, model: Model | undefined
 
 function openAiResponsesInput(context: Context, model?: Model): JsonValue[] {
   const input: JsonValue[] = [];
+  const grammar = responseGrammarProperties(context, model);
   for (const message of context.messages) {
     if (message.role === "user") input.push({ role: "user", content: userContent(message.content, "responses") });
     else if (message.role === "toolResult") input.push({
-      type: "function_call_output",
+      type: grammar.has(message.toolName) ? "custom_tool_call_output" : "function_call_output",
       call_id: message.toolCallId,
       output: contentText(message.content),
     });
     else {
+      const messageStart = input.length;
       const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
       if (text) input.push({ role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
       for (const part of message.content) {
-        if (part.type === "toolCall") input.push({ type: "function_call", call_id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) });
+        if (part.type === "toolCall") {
+          const property = grammar.get(part.name);
+          input.push(property === undefined
+            ? { type: "function_call", call_id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) }
+            : { type: "custom_tool_call", call_id: part.id, name: part.name, input: grammarInput(part.name, part.arguments, property) });
+        }
       }
       const state = message.providerState;
       if (
@@ -565,7 +611,8 @@ function openAiResponsesInput(context: Context, model?: Model): JsonValue[] {
         const serialized = JSON.stringify(state.value);
         if (serialized !== undefined) {
           const providerState: JsonValue = JSON.parse(serialized);
-          if (isRecord(providerState)) input.push(providerState);
+          const items = Array.isArray(providerState) ? providerState.filter(isRecord) : isRecord(providerState) ? [providerState] : [];
+          input.splice(messageStart, 0, ...items);
         }
       }
     }
@@ -680,7 +727,12 @@ function openAiResponseBody(
   };
   if (context.systemPrompt) body.instructions = context.systemPrompt;
   if (tools) body.tools = tools;
-  if (options.toolChoice) body.tool_choice = openAiToolChoice(options.toolChoice);
+  if (options.toolChoice) body.tool_choice = options.toolChoice === "auto" || options.toolChoice === "none" || options.toolChoice === "required"
+    ? options.toolChoice
+    : {
+        type: responseGrammarProperties(context, model).has(options.toolChoice.function.name) ? "custom" : "function",
+        name: options.toolChoice.function.name,
+      };
   if (options.maxTokens) body.max_output_tokens = options.maxTokens;
   if (model.reasoning && reasoning && reasoning !== "off" && mappedReasoning !== null) {
     body.reasoning = { effort: mappedReasoning ?? reasoning, summary: "auto" };
@@ -706,22 +758,24 @@ export function streamOpenAIResponses(
     const body = openAiResponseBody(model, context, selectedOptions);
     const transport = selectedOptions.transport ?? "sse";
     if (transport === "sse") {
-      await streamOpenAiResponseSse(writer, model, body, selectedOptions);
+      await streamOpenAiResponseSse(writer, model, context, body, selectedOptions);
       return;
     }
-    const state = openAiResponseState();
+    const state = openAiResponseState(context, model);
     try {
       await streamOpenAiResponseWebSocket(writer, model, context, body, selectedOptions, state);
     } catch (cause) {
       if (transport !== "auto" || state.substantive || selectedOptions.signal?.aborted) throw cause;
       writer.clearResponseIdentity();
-      await streamOpenAiResponseSse(writer, model, body, selectedOptions);
+      await streamOpenAiResponseSse(writer, model, context, body, selectedOptions);
     }
   }, options);
 }
 
 interface OpenAiResponseState {
   tools: Map<string, number>;
+  grammarProperties: ReadonlyMap<string, string>;
+  grammarInputs: Map<number, { property: string; buffer: GrammarInputBuffer }>;
   textParts: Map<string, string>;
   reasoningParts: Map<string, string>;
   substantive: boolean;
@@ -827,9 +881,16 @@ async function* safeOpenAiResponseEvents(events: AsyncIterable<{ event: string; 
   }
 }
 
-function openAiResponseState(): OpenAiResponseState {
+function responseGrammarProperties(context: Context, model?: Model): ReadonlyMap<string, string> {
+  return grammarToolProperties(context.tools ?? [],
+    model?.compat?.supportsOpenAIGrammarTools === true || model?.compat?.supportsGrammarTools === true);
+}
+
+function openAiResponseState(context: Context, model: Model): OpenAiResponseState {
   return {
     tools: new Map(),
+    grammarProperties: responseGrammarProperties(context, model),
+    grammarInputs: new Map(),
     textParts: new Map(),
     reasoningParts: new Map(),
     substantive: false,
@@ -939,6 +1000,7 @@ function openAiResponseObjectHasSemanticOutput(value: JsonValue): boolean {
 async function streamOpenAiResponseSse(
   writer: CanonicalWriter,
   model: Model,
+  context: Context,
   body: RecordValue,
   options: SimpleStreamOptions,
   request?: Pick<HttpStreamRequest, "url" | "model" | "authorization">,
@@ -953,7 +1015,7 @@ async function streamOpenAiResponseSse(
       options,
       authorization: request?.authorization ?? { value: apiKey(options) },
     });
-    const state = openAiResponseState();
+    const state = openAiResponseState(context, model);
     try {
       for await (const event of safeOpenAiResponseEvents(response.events)) {
         if (event.data === "[DONE]") break;
@@ -1134,12 +1196,16 @@ function applyOpenAiResponseEvent(
     if (item?.type === "function_call" || item?.type === "custom_tool_call") {
       const key = string(item.id) ?? string(item.call_id) ?? String(value.output_index ?? state.tools.size);
       if (type === "response.output_item.added") {
-        const index = writer.startTool(string(item.call_id) ?? key, string(item.name) ?? "tool");
+        const name = string(item.name) ?? "tool";
+        const index = writer.startTool(string(item.call_id) ?? key, name);
         state.tools.set(key, index);
+        if (item.type === "custom_tool_call") state.grammarInputs.set(index, {
+          property: state.grammarProperties.get(name) ?? "input", buffer: { value: "" },
+        });
       } else {
         const index = state.tools.get(key);
         if (index !== undefined) {
-          if (item.type === "custom_tool_call") writer.finishTool(index, { input: string(item.input) ?? "" });
+          if (item.type === "custom_tool_call") finishOpenAiGrammar(writer, state, index, string(item.input));
           else {
             const finalArguments = string(item.arguments);
             writer.finishTool(index, finalArguments === undefined ? undefined : parseArguments(finalArguments));
@@ -1167,6 +1233,7 @@ function applyOpenAiResponseEvent(
         }
       }
     } else if (item?.type === "reasoning") {
+      if (type === "response.output_item.done") writer.reasoningItem(item);
       const outputIndex = number(value.output_index);
       const itemId = string(item.id);
       const reasoning = [
@@ -1197,12 +1264,28 @@ function applyOpenAiResponseEvent(
     state.substantive = true;
     const key = string(value.item_id) ?? String(value.output_index ?? "");
     const index = state.tools.get(key) ?? writer.startTool(string(value.call_id) ?? key, string(value.name) ?? "tool");
-    writer.toolDelta(index, string(value.delta) ?? "");
+    state.tools.set(key, index);
+    const delta = string(value.delta) ?? "";
+    if (type === "response.custom_tool_call_input.delta") {
+      let input = state.grammarInputs.get(index);
+      if (input === undefined) {
+        input = { property: state.grammarProperties.get(string(value.name) ?? "tool") ?? "input", buffer: { value: "" } };
+        state.grammarInputs.set(index, input);
+      }
+      writer.toolDelta(index, appendGrammarInputDelta(input.buffer, input.property, input.buffer.value + delta, false));
+    } else writer.toolDelta(index, delta);
   } else if (type === "response.function_call_arguments.done" || type === "response.custom_tool_call_input.done") {
     state.substantive = true;
+    if (type === "response.custom_tool_call_input.done") {
+      const index = state.tools.get(string(value.item_id) ?? String(value.output_index ?? ""));
+      if (index !== undefined) finishOpenAiGrammar(writer, state, index, string(value.input));
+    }
   } else if (type === "response.completed" || type === "response.incomplete") {
     const response = isRecord(value.response) ? value.response : {};
     applyOpenAiUsage(writer, response.usage);
+    for (const item of Array.isArray(response.output) ? response.output : []) {
+      if (isRecord(item)) writer.reasoningItem(item);
+    }
     state.responseId = writer.setResponseIdentity(response.id, response.model) ?? state.responseId;
     writer.done(type === "response.incomplete" ? "length" : state.tools.size ? "toolUse" : "stop");
     return true;
@@ -1213,6 +1296,14 @@ function applyOpenAiResponseEvent(
     state.substantive = true;
   }
   return false;
+}
+
+function finishOpenAiGrammar(writer: CanonicalWriter, state: OpenAiResponseState, index: number, value?: string): void {
+  const input = state.grammarInputs.get(index);
+  if (input === undefined || input.buffer.closed) return;
+  const text = value ?? input.buffer.value;
+  writer.toolDelta(index, appendGrammarInputDelta(input.buffer, input.property, text, true));
+  writer.finishTool(index, { [input.property]: text });
 }
 
 async function streamOpenAiResponseWebSocket(
@@ -1483,7 +1574,12 @@ async function openWebSocket(
       unrefTimer(timer);
     }
   });
-  await options.onResponse?.({ url, status: 101, headers: {}, attempt }, model);
+  try {
+    await options.onResponse?.({ url, status: 101, headers: {}, attempt }, model);
+  } catch (cause) {
+    socket.close(1011, "response hook failed");
+    throw cause;
+  }
   return socket;
 }
 
@@ -1814,7 +1910,9 @@ function anthropicMessages(context: Context, model?: Model): JsonValue[] {
     return [{ role: "assistant", content: message.content.flatMap((part) => {
       if (part.type === "text") return { type: "text", text: part.text };
       if (part.type === "thinking") {
-        if (sameModel) return { type: "thinking", thinking: part.thinking, signature: part.thinkingSignature ?? "" };
+        if (sameModel) return part.redacted
+          ? { type: "redacted_thinking", data: part.thinkingSignature ?? "" }
+          : { type: "thinking", thinking: part.thinking, signature: part.thinkingSignature ?? "" };
         return !part.redacted && part.thinking.trim() !== "" ? { type: "text", text: part.thinking } : [];
       }
       return { type: "tool_use", id: part.id, name: part.name, input: part.arguments };
@@ -1871,6 +1969,8 @@ export function streamAnthropicMessages(
         const wireIndex = number(value.index) ?? blocks.size;
         const block = isRecord(value.content_block) ? value.content_block : {};
         if (block.type === "tool_use") blocks.set(wireIndex, writer.startTool(string(block.id) ?? `tool_${wireIndex}`, string(block.name) ?? "tool"));
+        else if (block.type === "redacted_thinking") writer.redactedThinking(string(block.data) ?? "");
+        else if (block.type === "thinking") writer.text(string(block.thinking) ?? "", true, true);
       } else if (type === "content_block_delta") {
         const wireIndex = number(value.index) ?? 0;
         const delta = isRecord(value.delta) ? value.delta : {};
@@ -1943,7 +2043,8 @@ function googleContents(context: Context, model?: Model): JsonValue[] {
     } }] };
     const sameModel = messageMatchesModel(message, model);
     return { role: "model", parts: message.content.flatMap((part) => {
-      if (part.type === "text") return { text: part.text };
+      if (part.type === "text") return sameModel && part.textSignature !== undefined
+        ? { text: part.text, thoughtSignature: part.textSignature } : { text: part.text };
       if (part.type === "thinking") {
         if (sameModel) {
           const thinking: RecordValue = {
@@ -1955,7 +2056,9 @@ function googleContents(context: Context, model?: Model): JsonValue[] {
         }
         return !part.redacted && part.thinking.trim() !== "" ? { text: part.thinking } : [];
       }
-      return { functionCall: { id: part.id, name: part.name, args: part.arguments } };
+      const call: RecordValue = { functionCall: { id: part.id, name: part.name, args: part.arguments } };
+      if (sameModel && part.thoughtSignature !== undefined) call.thoughtSignature = part.thoughtSignature;
+      return call;
     }) };
   });
 }
@@ -2025,10 +2128,15 @@ function googleStream(model: Model, context: Context, options: SimpleStreamOptio
         for (const part of Array.isArray(content.parts) ? content.parts : []) {
           if (!isRecord(part)) continue;
           const text = string(part.text);
-          if (text !== undefined) writer.text(text, part.thought === true);
+          const signature = string(part.thoughtSignature);
+          if (text !== undefined) {
+            const index = writer.text(text, part.thought === true, signature !== undefined);
+            if (index !== undefined && signature !== undefined) writer.signature(signature, index);
+          }
           if (isRecord(part.functionCall)) {
             const fn = part.functionCall;
             const index = writer.startTool(string(fn.id) ?? `google_tool_${toolNumber++}`, string(fn.name) ?? "tool");
+            if (signature !== undefined) writer.signature(signature, index);
             writer.finishTool(index, fn.args);
             reason = "toolUse";
           }
@@ -2082,8 +2190,8 @@ export function streamAzureOpenAIResponses(
   const separator = base.includes("?") ? "&" : "?";
   const adapted: Model<"openai-responses"> = { ...model, api: "openai-responses", baseUrl: base.includes("/responses") ? base : `${base}/responses${separator}api-version=${encodeURIComponent(apiVersion)}` };
   return run(model, async (writer, selectedOptions) => {
-    const body = openAiResponseBody(adapted, context, selectedOptions, false);
-    await streamOpenAiResponseSse(writer, adapted, body, selectedOptions, {
+    const body = openAiResponseBody(model, context, selectedOptions, false);
+    await streamOpenAiResponseSse(writer, adapted, context, body, selectedOptions, {
       url: adapted.baseUrl,
       model,
       authorization: { header: "api-key", scheme: "raw", value: apiKey(selectedOptions) },
@@ -2102,7 +2210,6 @@ export function streamOpenAICodexResponses(
     }, options);
   }
   const base = model.baseUrl || "https://chatgpt.com/backend-api/codex";
-  const adapted: Model<"openai-responses"> = { ...model, api: "openai-responses", baseUrl: base };
   const headers = Object.fromEntries([["openai-beta", "responses=experimental"]]);
   if (options.accountId !== undefined) headers["chatgpt-account-id"] = options.accountId;
   for (const [name, value] of Object.entries(options.headers ?? {})) {
@@ -2112,7 +2219,12 @@ export function streamOpenAICodexResponses(
   delete subscriptionOptions.cacheRetention;
   if (options.cacheRetention === "none") delete subscriptionOptions.sessionId;
   delete subscriptionOptions.metadata;
-  return streamOpenAIResponses(adapted, context, subscriptionOptions);
+  return run(model, async (writer, selectedOptions) => {
+    const body = openAiResponseBody(model, context, selectedOptions);
+    await streamOpenAiResponseSse(writer, model, context, body, selectedOptions, {
+      url: endpoint(base, "responses"), model,
+    });
+  }, subscriptionOptions);
 }
 
 function parseRecord(data: string): RecordValue {

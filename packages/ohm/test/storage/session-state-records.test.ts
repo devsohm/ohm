@@ -14,7 +14,7 @@ const HEADER: SessionV4Header = {
   record: "session", version: 4, sessionId: "payload-test", createdAt: TIME, workspace: "/workspace", cwd: "/workspace",
 };
 
-function node(id: string, content = "payload"): SessionV4ConversationNode {
+function node(id: string, content = "payload"): Extract<SessionV4ConversationNode, { nodeType: "message" }> {
   return { id, parentId: null, createdAt: TIME, nodeType: "message", role: "assistant", content };
 }
 
@@ -88,8 +88,44 @@ test("private records bound cached payload weight/count and preserve UTF-16 and 
     db.prepare("DELETE FROM temp.ohm_session_state_records WHERE kind = 'nodes' AND id = ?").run(JSON.stringify(first.id));
     assert.throws(() => nodes.get(first.id), /Validated session record is missing/u);
     assert.throws(() => nodes.get(oversized.id), /faulted/u);
+    assert.throws(() => records.getEntryProjectionMetadataPage(0, 1), /faulted/u);
     records.close();
     assert.throws(() => nodes.get(first.id), /closed/u);
+    assert.throws(() => records.getEntryProjectionMetadataPage(0, 1), /closed/u);
+  } finally { records.close(); db.close(); }
+});
+
+test("private projection metadata preserves nested roles and tool batches without loading payloads", (t) => {
+  const db = new DatabaseSync(":memory:");
+  const records = new SqliteSessionStateRecords(db);
+  const results = [
+    { type: "tool_result", callId: "first", name: "one", content: "one", isError: false },
+    { type: "tool_result", callId: "second", name: "two", content: "two", isError: false },
+  ];
+  const values: SessionV4ConversationNode[] = [
+    { ...node("nested-tool"), content: { id: "nested-tool", role: "tool", createdAt: TIME, content: results } },
+    { ...node("nested-user"), role: "tool", content: { id: "nested-user", role: "user", createdAt: TIME, content: results } },
+    { ...node("array-tool"), role: "tool", content: results },
+    { ...node("empty-tool"), role: "tool", content: [] },
+    { id: "custom-tool", parentId: "nested-tool", nodeType: "extension_context", createdAt: TIME,
+      extensionId: "ohm.session.message-custom", context: { id: "custom-tool", role: "tool", createdAt: TIME, content: results } },
+    { id: "other-context", parentId: "custom-tool", nodeType: "extension_context", createdAt: TIME,
+      extensionId: "other", context: { id: "other-context", role: "tool", createdAt: TIME, content: results } },
+  ];
+  try {
+    for (const value of values) records.collections.nodes.set(value.id, value);
+    for (let index = 0; index < 40; index += 1) records.collections.nodes.set(`padding-${index}`, node(`padding-${index}`));
+    const hydrate = t.mock.method(records.collections.nodes, "get");
+    const expected = values.map((value, index) => ({
+      id: value.id, parentId: value.parentId, projectedEntryCount: [2, 1, 2, 1, 2, 1][index],
+    }));
+    assert.deepEqual(records.getEntryProjectionMetadataPage(0, values.length), expected);
+    assert.deepEqual(records.getEntryProjectionMetadataPage(1, 3), expected.slice(1, 4));
+    const detached = records.getEntryProjectionMetadataPage(0, 1);
+    detached[0]!.id = "mutated";
+    detached[0]!.projectedEntryCount = 99;
+    assert.deepEqual(records.getEntryProjectionMetadataPage(0, 1), expected.slice(0, 1));
+    assert.equal(hydrate.mock.callCount(), 0);
   } finally { records.close(); db.close(); }
 });
 
@@ -99,6 +135,7 @@ test("validation rollback removes tentative TEMP records and leaves ordinary rej
     const input = { commitId: "accepted", committedAt: TIME, changes: [{ type: "conversation_node", node: node("accepted") }] } satisfies Parameters<SessionStorageJournal["append"]>[0];
     journal.append(input);
     const before = journal.inspectState(cloneSessionV4State);
+    const projectionBefore = journal.getEntryProjectionMetadataPage(0, 100);
     assert.throws(() => journal.append({
       commitId: "invalid", committedAt: TIME, changes: [
         { type: "conversation_node", node: node("tentative") },
@@ -107,6 +144,7 @@ test("validation rollback removes tentative TEMP records and leaves ordinary rej
     }), /unknown node/u);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM temp.ohm_session_state_records WHERE id = ?").get(JSON.stringify("tentative"))?.count, 0);
     assert.deepEqual(journal.inspectState(cloneSessionV4State), before);
+    assert.deepEqual(journal.getEntryProjectionMetadataPage(0, 100), projectionBefore);
     const iterator = records.collections.commits.values();
     assert.deepEqual(iterator.next().value, durable[0]);
     for (let index = 0; index < 35; index += 1) journal.append({
@@ -123,6 +161,7 @@ test("validation rollback removes tentative TEMP records and leaves ordinary rej
     assert.ok(snapshot.commits instanceof Map);
     snapshot.nodes.clear();
     assert.equal(records.collections.nodes.size, 36);
+    assert.equal(journal.getEntryProjectionMetadataPage(0, 100)?.length, 36);
   } finally { journal.close(); }
 });
 

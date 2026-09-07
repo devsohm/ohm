@@ -64,7 +64,7 @@ export interface PluginConfigStore {
 }
 
 export interface PluginConfigStoreOptions {
-  /** Existing canonical, private directories owned by exactly one extension. */
+  /** Existing canonical, private directories owned by exactly one plugin. */
   readonly roots: PluginConfigDataRoots;
   /** Rechecked inside the file lock so staged or stale generations cannot mutate through this store. */
   readonly writable: () => boolean;
@@ -361,7 +361,7 @@ function assertRevision(
 }
 
 /**
- * Creates a bounded CAS store inside two pre-created, host-owned extension data roots.
+ * Creates a bounded CAS store inside two pre-created, host-owned plugin data roots.
  * The store never logs or interprets configuration values.
  */
 export function createPluginConfigStore(options: PluginConfigStoreOptions): PluginConfigStore {

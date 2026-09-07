@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { PluginCommandContextActions } from "../plugins/direct.js";
 import type { RuntimeInlinePlugin } from "../plugins/runtime.js";
+import { canonicalSessionEntryId } from "../plugins/session-contract.js";
 import {
   withGracefulTermination,
   type GracefulTerminationContext,
@@ -89,7 +90,11 @@ function servePluginBindings(
     async navigateTree(targetId, options, signal) {
       signal?.throwIfAborted();
       if (!runtime.session.isIdle) return { cancelled: true };
-      const result = await runtime.session.navigateTree(targetId, options);
+      const canonicalId = canonicalSessionEntryId(runtime.session.nativeSessionManager, targetId) ?? targetId;
+      const result = await runtime.session.navigateTree(canonicalId, {
+        ...options,
+        ...optionalProperties(signal === undefined ? undefined : { signal }),
+      });
       signal?.throwIfAborted();
       return { cancelled: result.cancelled };
     },

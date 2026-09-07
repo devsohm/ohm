@@ -1,5 +1,5 @@
 /**
- * Public direct-extension facade.
+ * Public direct-plugin facade.
  *
  * Contracts are organized by capability so hosts can reason about tools,
  * commands, session control, lifecycle events, and provider/UI services

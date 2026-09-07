@@ -136,27 +136,59 @@ test("real and symbolic-link paths share one writer lease", async () => {
 	}
 });
 
-test("hard-link paths share one writer lease", async () => {
+test("hard-linked sessions reject reads and writes across profiles without losing history", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-hardlink-"));
 	const path = join(root, "session.sqlite");
 	const alias = join(root, "session-hardlink.sqlite");
 	const manager = SessionManager.create(root, root, { id: "session" });
 	try {
+		appendMarker(manager, "before-hardlink");
+		const before = manager.getEntries();
 		linkSync(path, alias);
-		assert.throws(() => SessionManager.open(alias), /active writer/u);
+		assert.throws(() => SessionManager.open(alias), /multiple hard links/u);
+		assert.throws(() => SessionManager.openSnapshot(alias), /multiple hard links/u);
 		assert.equal(existsSync(`${alias}.writer-lock`), false);
-		assertChildBlocked(alias);
-		appendMarker(manager, "hardlink-owner-commit");
+		const blocked = openInChild(alias, true, { OHM_HOME: join(root, "different-profile") });
+		assert.equal(blocked.status, 2, String(blocked.stderr));
+		assert.match(String(blocked.stderr), /multiple hard links/u);
+		assert.throws(() => appendMarker(manager, "after-hardlink"), /multiple hard links/u);
+		assert.deepEqual(manager.getEntries(), before);
 	} finally {
 		manager.closeV4Store();
 	}
 
 	try {
-		const aliasOwner = SessionManager.open(alias);
-		assert.throws(() => SessionManager.open(path), /active writer/u);
-		assertMarker(aliasOwner, "hardlink-owner-commit");
-		aliasOwner.closeV4Store();
+		assert.throws(() => acquireSessionWriterLeaseSync(alias), /multiple hard links/u);
+		assert.equal(existsSync(`${alias}.writer-lock`), false);
+		rmSync(alias);
+		const reopened = SessionManager.open(path);
+		try { assertMarker(reopened, "before-hardlink"); }
+		finally { reopened.closeV4Store(); }
 	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("direct writer leases canonicalize symbolic links across profiles", async () => {
+	const root = await mkdtemp(join(tmpdir(), "ohm-writer-profile-alias-"));
+	const path = join(root, "session.jsonl");
+	const alias = join(root, "alias.jsonl");
+	const previous = process.env.OHM_HOME;
+	let first: ReturnType<typeof acquireSessionWriterLeaseSync> | undefined;
+	let second: ReturnType<typeof acquireSessionWriterLeaseSync> | undefined;
+	try {
+		writeFileSync(path, "{}\n");
+		symlinkSync(path, alias, "file");
+		process.env.OHM_HOME = join(root, "profile-a");
+		first = acquireSessionWriterLeaseSync(path);
+		process.env.OHM_HOME = join(root, "profile-b");
+		assert.throws(() => { second = acquireSessionWriterLeaseSync(alias); }, /active writer/u);
+		assert.equal(existsSync(`${alias}.writer-lock`), false);
+	} finally {
+		second?.release();
+		first?.release();
+		if (previous === undefined) delete process.env.OHM_HOME;
+		else process.env.OHM_HOME = previous;
 		await rm(root, { recursive: true, force: true });
 	}
 });

@@ -1,5 +1,6 @@
 import { isStringValue } from "./value-guards.js";
 import { StringDecoder } from "node:string_decoder";
+import { terminalPattern } from "./terminal-pattern.js";
 import { splitGraphemes } from "./unicode.js";
 
 export type TerminalInputToken =
@@ -15,6 +16,12 @@ const C1_CSI = "\u009b";
 const C1_ST = "\u009c";
 const MAX_PENDING_PASTE_BYTES = 4 * 1024 * 1024;
 const MAX_PENDING_SEQUENCE_BYTES = 4 * 1024;
+const textBoundary = terminalPattern("[\\u0000-\\u001f\\u007f\\u0090\\u0098\\u009b\\u009d-\\u009f]", "u");
+
+function textRun(value: string): string {
+  const boundary = value.search(textBoundary);
+  return boundary < 0 ? value : value.slice(0, boundary);
+}
 
 function suffixPrefixLength(value: string, marker: string): number {
   const maximum = Math.min(value.length, marker.length - 1);
@@ -210,7 +217,9 @@ export class TerminalInputBuffer {
           if (flush) tokens.push(this.#sequence(this.#buffer.length, false));
           break;
         }
-        const grapheme = splitGraphemes(this.#buffer.slice(1))[0];
+        const rest = this.#buffer.slice(1);
+        // Keep control-prefixed Alt input on its existing sequence path.
+        const grapheme = splitGraphemes(textRun(rest) || rest)[0];
         if (grapheme === undefined) break;
         tokens.push(this.#sequence(1 + grapheme.length));
         continue;
@@ -223,10 +232,9 @@ export class TerminalInputBuffer {
         tokens.push({ type: "text", value });
         continue;
       }
-      const grapheme = splitGraphemes(this.#buffer)[0];
-      if (grapheme === undefined) break;
-      this.#buffer = this.#buffer.slice(grapheme.length);
-      tokens.push({ type: "text", value: grapheme });
+      const text = textRun(this.#buffer);
+      this.#buffer = this.#buffer.slice(text.length);
+      for (const grapheme of splitGraphemes(text)) tokens.push({ type: "text", value: grapheme });
     }
     return tokens;
   }

@@ -75,8 +75,11 @@ function clientOptions(input: GoogleSdkStreamInput): GoogleGenAIOptions {
     headers: requestHeaders(input.headers),
   };
   if (input.kind === "google") {
-    if (apiKey === undefined) throw new InvalidProviderRequestError("No API key for provider: google");
-    return { apiKey, httpOptions };
+    if (apiKey === undefined && accessToken === undefined) {
+      throw new InvalidProviderRequestError("No API key or access token for provider: google");
+    }
+    // The SDK requires a key; googleFetch removes this placeholder before host hooks and transport.
+    return { apiKey: apiKey ?? "not-required", httpOptions };
   }
   if (apiKey !== undefined) return { vertexai: true, apiKey, httpOptions };
   if (accessToken === undefined) {

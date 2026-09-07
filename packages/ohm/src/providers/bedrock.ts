@@ -494,12 +494,17 @@ export class BedrockAdapter implements ProviderAdapter {
       await inspectRequest(parsed.body);
     }
     const response = await this.#fetch(new Request(signed, { redirect: "error" }));
-    await operation?.observe({
-      url: response.url || signed.url,
-      status: response.status,
-      statusText: response.statusText,
-      headers: Object.fromEntries(response.headers),
-    }, signal);
+    try {
+      await operation?.observe({
+        url: response.url || signed.url,
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers),
+      }, signal);
+    } catch (error) {
+      void response.body?.cancel(error).catch(() => undefined);
+      throw error;
+    }
     return response;
   }
 
@@ -779,7 +784,7 @@ export async function* decodeAwsEventStream(
     }
     if (preludeOffset !== 0 || frame !== undefined) throw new ProtocolError("Truncated AWS event-stream frame");
   } finally {
-    if (!finished) await reader.cancel().catch(() => undefined);
+    if (!finished) void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

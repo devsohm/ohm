@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import type {
   ConverseStreamCommandInput,
   ConverseStreamCommandOutput,
@@ -25,9 +26,155 @@ import { streamGoogleVertex } from "../src/api/google-vertex.ts";
 import { streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
 import { streamOpenAICompletions } from "../src/api/openai-completions.ts";
 import { streamOpenAIResponses } from "../src/api/openai-responses.ts";
+import { parseEventStream } from "../src/http-engine.ts";
+import { streamByApi } from "../src/protocol-transports.ts";
 import { captureFetch, collect, eventSse, model, sse, userContext } from "./black-box-helpers.ts";
 
 const ASSISTANT_FIELD_BYTES = 4 * 1024 * 1024;
+
+for (const api of ["openai-responses", "azure-openai-responses", "openai-codex-responses"] as const) {
+test(`${api} preserves multiple encrypted reasoning items for exact-model replay`, async () => {
+  const selected = model(api);
+  const items = ["one", "two"].map((id) => ({ type: "reasoning", id, summary: [], encrypted_content: `opaque-${id}` }));
+  const mock = captureFetch(() => sse([
+    ...items.map((item, output_index) => ({ type: "response.output_item.done", item, output_index })),
+    { type: "response.output_text.delta", delta: "visible" },
+    { type: "response.completed", response: { output: items } },
+  ]));
+  const { terminal } = await collect(streamByApi(selected, userContext(), { apiKey: "dummy", fetch: mock.fetch }));
+  assert.equal(terminal.stopReason, "stop");
+  assert.equal(terminal.api, api);
+  assert.deepEqual(terminal.providerState, {
+    source: { api: selected.api, provider: selected.provider, model: selected.id }, value: items,
+  });
+  assert.deepEqual(terminal.content, [{ type: "text", text: "visible" }]);
+  for (const sameModel of [true, false]) {
+    const replay = captureFetch(() => sse([{ type: "response.completed", response: {} }]));
+    await collect(streamByApi(sameModel ? selected : { ...selected, id: "different-model" }, {
+      messages: [terminal],
+    }, { apiKey: "dummy", fetch: replay.fetch }));
+    const input = jsonArray(replay.requests[0]?.body.input);
+    assert.deepEqual(input.filter((item) => jsonObject(item).type === "reasoning"), sameModel ? items : []);
+  }
+});
+}
+
+for (const kind of ["text", "thinking", "toolCall"] as const) {
+  test(`Google preserves opaque ${kind} signatures for exact-model replay`, async () => {
+    const selected = model("google-generative-ai");
+    const part: JsonObject = kind === "toolCall"
+      ? { functionCall: { id: "call", name: "lookup", args: {} }, thoughtSignature: "opaque-tool" }
+      : { text: "visible", thoughtSignature: "opaque-text" };
+    if (kind === "thinking") part.thought = true;
+    const mock = captureFetch(() => sse([{ candidates: [{ content: { parts: [part] }, finishReason: "STOP" }] }]));
+    const { terminal } = await collect(streamGoogleGenerativeAI(selected, userContext(), { apiKey: "dummy", fetch: mock.fetch }));
+    const expected = kind === "toolCall"
+      ? { type: kind, id: "call", name: "lookup", arguments: {}, thoughtSignature: "opaque-tool" }
+      : kind === "thinking"
+        ? { type: kind, thinking: "visible", thinkingSignature: "opaque-text" }
+        : { type: kind, text: "visible", textSignature: "opaque-text" };
+    assert.deepEqual(terminal.content, [expected]);
+    for (const sameModel of [true, false]) {
+      const replay = captureFetch(() => sse([{ candidates: [{ finishReason: "STOP" }] }]));
+      await collect(streamGoogleGenerativeAI(sameModel ? selected : { ...selected, id: "other-model" }, {
+        messages: [terminal],
+      }, { apiKey: "dummy", fetch: replay.fetch }));
+      const parts = jsonArray(jsonObject(jsonArray(replay.requests[0]?.body.contents)[0]).parts);
+      assert.equal(jsonObject(parts[0]).thoughtSignature, sameModel ? part.thoughtSignature : undefined);
+    }
+  });
+}
+
+test("Google keeps signed and unsigned text parts separate", async () => {
+  const parts = [{ text: "first" }, { text: "second", thoughtSignature: "opaque-second" }];
+  const mock = captureFetch(() => sse([{ candidates: [{ content: { parts }, finishReason: "STOP" }] }]));
+  const { terminal } = await collect(streamGoogleGenerativeAI(model("google-generative-ai"), userContext(), { apiKey: "dummy", fetch: mock.fetch }));
+  assert.deepEqual(terminal.content, [
+    { type: "text", text: "first" }, { type: "text", text: "second", textSignature: "opaque-second" },
+  ]);
+});
+
+test("Anthropic preserves redacted thinking without exposing it as visible text", async () => {
+  const selected = model("anthropic-messages");
+  const block = { type: "redacted_thinking", data: "opaque-redacted" };
+  const mock = captureFetch(() => sse([
+    { type: "content_block_start", index: 0, content_block: block },
+    { type: "content_block_stop", index: 0 },
+    { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "visible" } },
+    { type: "message_stop" },
+  ]));
+  const { terminal, events } = await collect(streamAnthropicMessages(selected, userContext(), { apiKey: "dummy", fetch: mock.fetch }));
+  assert.deepEqual(terminal.content, [
+    { type: "thinking", thinking: "", thinkingSignature: block.data, redacted: true },
+    { type: "text", text: "visible" },
+  ]);
+  assert.equal(events.some((event) => event.type === "thinking_delta" && event.delta.includes(block.data)), false);
+  for (const sameModel of [true, false]) {
+    const replay = captureFetch(() => sse([{ type: "message_stop" }]));
+    await collect(streamAnthropicMessages(sameModel ? selected : { ...selected, id: "other-model" }, {
+      messages: [terminal],
+    }, { apiKey: "dummy", fetch: replay.fetch }));
+    const parts = jsonArray(jsonObject(jsonArray(replay.requests[0]?.body.messages)[0]).content);
+    assert.deepEqual(parts.filter((item) => jsonObject(item).type === "redacted_thinking"), sameModel ? [block] : []);
+  }
+});
+
+for (const api of ["openai-responses", "google-generative-ai", "anthropic-messages"] as const) {
+  test(`${api} bounds newly preserved opaque state`, async () => {
+    const opaque = "x".repeat(ASSISTANT_FIELD_BYTES + 1);
+    const records = api === "openai-responses" ? [
+      { type: "response.output_item.done", item: { type: "reasoning", id: "reasoning", summary: [], encrypted_content: opaque } },
+      { type: "response.completed", response: {} },
+    ] : api === "google-generative-ai" ? [
+      { candidates: [{ content: { parts: [{ functionCall: { id: "call", name: "lookup", args: {} }, thoughtSignature: opaque }] }, finishReason: "STOP" }] },
+    ] : [
+      { type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: opaque } },
+      { type: "message_stop" },
+    ];
+    const mock = captureFetch(() => sse<JsonValue>(records));
+    const { terminal } = await collect(streamByApi(model(api), userContext(), { apiKey: "dummy", fetch: mock.fetch }));
+    assert.equal(terminal.stopReason, "error");
+    assert.match(terminal.errorMessage ?? "", /exceeded/u);
+    assert.equal(terminal.providerState, undefined);
+    assert.equal(terminal.content.some((part) => part.type === "thinking" && part.thinking.includes(opaque)), false);
+  });
+}
+
+test("standalone SSE return releases its reader without awaiting source cancellation", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode("data: first\n\n")); },
+    cancel() { cancellations += 1; return gate; },
+  });
+  const iterator = parseEventStream(body);
+  assert.equal((await iterator.next()).value?.data, "first");
+  let settled = false;
+  const returning = iterator.return(undefined).then(() => { settled = true; });
+  try {
+    await nextTurn();
+    assert.equal(settled, true, "reader cleanup must not await custom cancellation");
+    assert.equal(cancellations, 1);
+    assert.equal(body.locked, false);
+  } finally { release(); await returning; }
+});
+
+test("Responses WebSocket closes its acquired socket when the response hook fails", async (t) => {
+  const sockets = installWebSocket(t, () => {});
+  const marker = new Error("synthetic response hook failure");
+  const result = await collect(streamOpenAIResponses(model("openai-responses"), userContext(), {
+    apiKey: "dummy", transport: "websocket", maxRetries: 0,
+    onResponse() { throw marker; },
+  }));
+  try {
+    assert.equal(result.terminal.stopReason, "error");
+    assert.equal(result.terminal.errorMessage, marker.message);
+    assert.equal(sockets.length, 1);
+    assert.equal(sockets[0]?.readyState, 3);
+  } finally { for (const socket of sockets) socket.close(); }
+});
 
 interface FakeSocket extends EventTarget {
   readonly url: string;

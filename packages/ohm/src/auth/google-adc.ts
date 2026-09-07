@@ -386,6 +386,10 @@ async function externalSubjectToken(
   source: GoogleCredentialRecord,
   ctx: GoogleContext,
 ): Promise<string> {
+  if (source.environment_id !== undefined) {
+    validateAwsExternalSource(source);
+    return officialExternalSubjectToken(credential, ctx);
+  }
   const format = sourceFormat(source);
   const file = optionalString(source, "file", "Google external-account credential_source");
   const urlValue = optionalString(source, "url", "Google external-account credential_source");
@@ -435,10 +439,6 @@ async function externalSubjectToken(
     const token = parseSubjectToken(response.text, format);
     ctx.redactor.register(token);
     return token;
-  }
-  if (source.environment_id !== undefined) {
-    validateAwsExternalSource(source);
-    return officialExternalSubjectToken(credential, ctx);
   }
   if (source.executable !== undefined) {
     validateExecutableExternalSource(source.executable, ctx);

@@ -338,9 +338,10 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       ...optionalProperties(targetSessionFile === undefined ? undefined : { targetSessionFile }),
     };
     const result = await waitForCallback(
-      async () => this.#lifecycle.beforeSwitch === undefined
-        ? await this.#session.pluginRunner?.emit(event)
-        : await this.#lifecycle.beforeSwitch(event, signal),
+      async () => {
+        if (this.#lifecycle.beforeSwitch !== undefined) return await this.#lifecycle.beforeSwitch(event, signal);
+        if (this.#session.hasPluginHandlers(event.type)) return await this.#session.pluginRunner.emit(event);
+      },
       signal,
     );
     const guard = result ?? {};
@@ -357,9 +358,10 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
   ): Promise<SessionGuardResult> {
     const event: SessionBeforeForkEvent = { type: "session_before_fork", entryId, position };
     const result = await waitForCallback(
-      async () => this.#lifecycle.beforeFork === undefined
-        ? await this.#session.pluginRunner?.emit(event)
-        : await this.#lifecycle.beforeFork(event, signal),
+      async () => {
+        if (this.#lifecycle.beforeFork !== undefined) return await this.#lifecycle.beforeFork(event, signal);
+        if (this.#session.hasPluginHandlers(event.type)) return await this.#session.pluginRunner.emit(event);
+      },
       signal,
     );
     const guard = result ?? {};
@@ -383,8 +385,8 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     const failures: unknown[] = [];
     try {
       const shutdown = async (): Promise<void> => {
-        if (this.#lifecycle.shutdown === undefined) await this.#session.pluginRunner?.emit(event);
-        else await this.#lifecycle.shutdown(event);
+        if (this.#lifecycle.shutdown !== undefined) await this.#lifecycle.shutdown(event);
+        else if (this.#session.hasPluginHandlers(event.type)) await this.#session.pluginRunner.emit(event);
       };
       await shutdown();
     } catch (error) {
@@ -531,7 +533,8 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     targetSessionFile: string | undefined,
     create: (signal: AbortSignal) => Promise<CreateAgentSessionRuntimeResult<S>>,
     signal: AbortSignal,
-  ): Promise<AgentSessionReplacedContext> {
+    prepareContext = false,
+  ): Promise<AgentSessionReplacedContext | undefined> {
     const previous = this.#snapshot();
     let candidate: CreateAgentSessionRuntimeResult<S> | undefined;
     let applied = false;
@@ -548,8 +551,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       applied = true;
       await waitForCallback(async () => await this.#rebindSession?.(candidate!.session), signal);
       signal.throwIfAborted();
-      const context = candidate.session.createReplacedSessionContext();
-      return context;
+      return prepareContext ? candidate.session.createReplacedSessionContext() : undefined;
     } catch (error) {
       const failures: unknown[] = [error];
       if (candidate !== undefined) {
@@ -653,9 +655,8 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       let cleanup = manager?.captureCreatedSessionCleanup();
       let replaced = false;
       const agentDir = this.#services.agentDir;
-      const cwd = manager?.getCwd()
-        ?? (options.cwdOverride === undefined ? nativeSessionManager(this.#session).getCwd() : resolve(options.cwdOverride));
-      let context: AgentSessionReplacedContext;
+      const cwd = snapshot.getCwd();
+      let context: AgentSessionReplacedContext | undefined;
       try {
         assertWorkspace(
           cwd,
@@ -685,7 +686,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
               signal: replacementSignal,
             }));
           return candidate;
-        }, signal);
+        }, signal, options.withSession !== undefined);
         replaced = true;
       } finally {
         snapshot.closeV4Store();
@@ -695,7 +696,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
         }
       }
       if (options.withSession !== undefined) {
-        await waitForCallback(async () => await options.withSession!(context), signal);
+        await waitForCallback(async () => await options.withSession!(context!), signal);
       }
       return { cancelled: false as const, context };
     }, expectedSession);
@@ -731,7 +732,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
             options.parentSession === undefined ? undefined : { parentSession: options.parentSession },
           );
       const createdCleanup = manager.captureCreatedSessionCleanup();
-      let context: AgentSessionReplacedContext;
+      let context: AgentSessionReplacedContext | undefined;
       try {
         if (options.setup !== undefined) {
           await waitForCallback(async () => await options.setup!(manager), signal);
@@ -752,12 +753,12 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
               signal: replacementSignal,
             }));
           return candidate;
-        }, signal);
+        }, signal, options.withSession !== undefined);
       } catch (error) {
         rollbackCreatedSession(manager, createdCleanup, error);
       }
       if (options.withSession !== undefined) {
-        await waitForCallback(async () => await options.withSession!(context), signal);
+        await waitForCallback(async () => await options.withSession!(context!), signal);
       }
       return { cancelled: false as const, context };
     }, expectedSession);
@@ -807,7 +808,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       const sessionDirectory = currentManager.getSessionDir();
       let candidateManager: SessionManager | undefined;
       let createdCleanup: (() => void) | undefined;
-      let context: AgentSessionReplacedContext;
+      let context: AgentSessionReplacedContext | undefined;
       try {
         context = await this.#replace("fork", undefined, async (replacementSignal) => {
           const managedStorage = persisted;
@@ -843,13 +844,13 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
               signal: replacementSignal,
             });
           });
-        }, signal);
+        }, signal, options.withSession !== undefined);
       } catch (error) {
         if (candidateManager !== undefined) rollbackCreatedSession(candidateManager, createdCleanup, error);
         throw error;
       }
       if (options.withSession !== undefined) {
-        await waitForCallback(async () => await options.withSession!(context), signal);
+        await waitForCallback(async () => await options.withSession!(context!), signal);
       }
       return {
         cancelled: false as const,

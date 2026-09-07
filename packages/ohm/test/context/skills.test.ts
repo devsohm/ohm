@@ -31,6 +31,14 @@ function manifest(name: string, description: string): string {
   return `---\nname: ${name}\ndescription: ${description}\n---\n\n# Instructions\n`;
 }
 
+test("skill discovery bounds empty directory depth independently of accepted skill count", async () => {
+  const root = directory("harness-skill-depth-");
+  const nested = join(...Array.from({ length: 65 }, () => "d"));
+  skill(root, nested, manifest("d", "One deeply nested skill"));
+
+  await assert.rejects(discoverSkillsDetailed([{ path: root, scope: "user", trusted: true }]), /(?:depth.*64|64.*depth)/iu);
+});
+
 test("skill metadata uses YAML block scalars and preserves invocation controls", async () => {
   const root = directory("harness-skill-yaml-");
   skill(root, "manual-review", [

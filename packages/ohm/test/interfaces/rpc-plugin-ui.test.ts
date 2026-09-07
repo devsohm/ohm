@@ -243,6 +243,23 @@ test("RPC extension dialogs resolve to their cancellation defaults on abort and 
   assert.equal(bridge.pendingCount, 0);
 });
 
+test("RPC input termination cancels dialogs but retains presentation output until close", async () => {
+  const { bridge, requests } = capture();
+  const ui = bridge.context("fixture.extension", "extension", new AbortController().signal);
+  const input = ui.input("Pending input");
+  const confirm = ui.confirm("Pending confirm", "Continue?");
+  bridge.endInput();
+  bridge.endInput();
+  assert.deepEqual(await Promise.all([input, confirm]), [undefined, false]);
+  assert.equal(bridge.pendingCount, 0);
+  assert.equal(await ui.editor("Too late"), undefined);
+  assert.equal(await ui.input("Too late"), undefined);
+  ui.notify("Final notification");
+  assert.deepEqual(requests.map((request) => request.method), ["input", "confirm", "notify"]);
+  bridge.close();
+  assert.equal(await ui.confirm("Closed", "Continue?"), false);
+});
+
 test("RPC extension dialogs cap unanswered requests and recover capacity after response and abort", async () => {
   let releaseFirst!: () => void;
   const requests: RpcPluginUiRequest[] = [];

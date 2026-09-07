@@ -7,12 +7,15 @@ import type { RuntimeEvent } from "../../src/core/events.js";
 import { isJsonObject, type JsonObject } from "../../src/core/json.js";
 import { FUNCTION_VALUE } from "../../src/core/value-schemas.js";
 import { runPrintMode } from "../../src/modes/print-mode.js";
+import { createPrintOutput } from "../../src/modes/print-output.js";
+import { MAX_RPC_LINE_BYTES } from "../../src/interfaces/rpc.js";
 import type {
   AgentSession,
   AgentSessionRecoveryOptions,
   PluginBindings,
 } from "../../src/service/agent-session.js";
 import type { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
+import { SessionManager } from "../../src/storage/session-manager.js";
 import type { SessionContextMessage } from "../../src/storage/types.js";
 import type { ImageContent } from "@ohm/models";
 import { Check } from "typebox/value";
@@ -30,6 +33,7 @@ interface PrintPromptOptions {
 }
 
 interface PrintSessionFixture {
+  readonly nativeSessionManager: SessionManager;
   readonly sessionManager: {
     getEntries(): PrintSessionEntryFixture[];
     getHeader(): {
@@ -124,7 +128,9 @@ function fixture(
   let rebind: ((session: AgentSession) => Promise<void>) | undefined;
   let beforeInvalidate: (() => void) | undefined;
   const calls: string[] = [];
+  const nativeSessionManager = SessionManager.inMemory("/tmp", { id: "s" });
   const session = printSessionFixture({
+    nativeSessionManager,
     sessionManager: {
       getHeader: () => ({ type: "session", version: 4, id: "s", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" }),
       getEntries: () => messages.map((message, index) => ({
@@ -213,7 +219,10 @@ function fixture(
       assert.equal(replacement, undefined);
       await options.withSession?.(session);
     },
-    async dispose() { disposed += 1; },
+    async dispose() {
+      disposed += 1;
+      nativeSessionManager.closeV4Store();
+    },
     async triggerRebind(replacement = session) {
       beforeInvalidate?.();
       await rebind?.(replacement);
@@ -362,6 +371,35 @@ test("JSON print mode emits its session header before an owner-identified startu
   });
 });
 
+test("JSON mode preserves plugin error order while its session header is backpressured", { timeout: 5_000 }, async () => {
+  const entered = deferred();
+  const release = deferred();
+  const records: JsonObject[] = [];
+  const value = fixture(undefined, {
+    onBind(binding) {
+      binding?.onError?.({ extensionPath: "/startup.mjs", event: "session_start", error: "first" });
+    },
+  });
+  const running = runPrintMode(value.runtime, {
+    mode: "json",
+    async write(text) {
+      const entries = parseJsonLines(text);
+      records.push(...entries);
+      if (entries[0]?.type !== "session") return;
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  try {
+    await entered.promise;
+    value.binding()?.onError?.({ extensionPath: "/later.mjs", event: "input", error: "second" });
+  } finally {
+    release.resolve();
+  }
+  assert.equal(await running, 0);
+  assert.deepEqual(records.map((record) => record.type === "session" ? "session" : record.error), ["session", "first", "second"]);
+});
+
 test("print mode ignores historical failed assistants when the current prompt has no assistant output", async () => {
   for (const stopReason of ["error", "aborted"] as const) {
     const value = fixture(undefined, {
@@ -499,6 +537,7 @@ test("JSON mode ignores a stale startup bind and writes the replacement session 
   const createSession = (id: string, waitForRelease: boolean): AgentSession => {
     const messages: SessionContextMessage[] = [];
     return printSessionFixture({
+      nativeSessionManager: SessionManager.inMemory("/tmp", { id }),
       sessionManager: {
         getHeader: () => ({ type: "session", version: 4, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" }),
         getEntries: () => messages.map((message, index) => ({
@@ -546,7 +585,10 @@ test("JSON mode ignores a stale startup bind and writes the replacement session 
     get session() { return current; },
     setBeforeSessionInvalidate(callback?: () => void) { beforeInvalidate = callback; },
     setRebindSession(callback: (session: AgentSession) => Promise<void>) { rebind = callback; },
-    async dispose() {},
+    async dispose() {
+      startup.nativeSessionManager.closeV4Store();
+      replacement.nativeSessionManager.closeV4Store();
+    },
   });
 
   const running = captureStdout(async () => await runPrintMode(runtime, {
@@ -701,6 +743,50 @@ test("JSON mode reports async writer failures and still disposes", async () => {
   }
   assert.equal(value.disposeCount(), 1);
   assert.deepEqual(errors, ["output disconnected"]);
+});
+
+for (const limit of ["records", "bytes"] as const) {
+  test(`one-shot output bounds queued ${limit} while its writer is stalled`, { timeout: 5_000 }, async () => {
+    const entered = deferred();
+    const release = deferred();
+    let writes = 0;
+    const output = createPrintOutput("json", async () => {
+      writes += 1;
+      entered.resolve();
+      await release.promise;
+    });
+    const accepted = [output.write(limit === "bytes" ? "x".repeat(MAX_RPC_LINE_BYTES) : "x")];
+    try {
+      await entered.promise;
+      if (limit === "records") {
+        for (let index = 1; index < 1_024; index += 1) accepted.push(output.write("x"));
+      }
+      await assert.rejects(output.write("x"), /Print output backlog exceeded/u);
+      assert.equal(output.signal.aborted, true);
+      assert.equal(writes, 1);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(accepted);
+      await assert.rejects(output.close(), /Print output backlog exceeded/u);
+    }
+    assert.equal(writes, 1);
+  });
+}
+
+test("JSON mode drains shutdown plugin errors and ignores callbacks after output closes", async () => {
+  const value = fixture();
+  const originalDispose = value.runtime.dispose.bind(value.runtime);
+  value.runtime.dispose = async () => {
+    value.binding()?.onError?.({ extensionPath: "/shutdown.mjs", event: "session_shutdown", error: "during disposal" });
+    await originalDispose();
+  };
+  const records: JsonObject[] = [];
+  assert.equal(await runPrintMode(value.runtime, { mode: "json", write(text) { records.push(...parseJsonLines(text)); } }), 0);
+  value.binding()?.onError?.({ extensionPath: "/late.mjs", event: "late", error: "after disposal" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(records.map((record) => record.type), ["session", "extension_error"]);
+  assert.equal(records[1]?.error, "during disposal");
+  assert.equal(value.disposeCount(), 1);
 });
 
 test("JSON writer failure cancels pending recovery with the startup signal and disposes", { timeout: 5_000 }, async () => {

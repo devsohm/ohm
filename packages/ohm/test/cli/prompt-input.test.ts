@@ -111,6 +111,12 @@ test("prompt references ignore ordinary missing handles and block sensitive file
   await assert.rejects(expandPromptReferences("review @.env.local", root), /Sensitive files cannot be attached/u);
   await assert.rejects(expandPromptReferences('review @".SSH/config"', root), /Sensitive files cannot be attached/u);
   await assert.rejects(expandPromptReferences("review @ID_RSA", root), /Sensitive files cannot be attached/u);
-  await assert.rejects(expandPromptReferences('review @"notes.txt"', root), /Sensitive files cannot be attached/u);
+  for (const reference of ['@"notes.txt"', "@notes.txt"]) {
+    await assert.rejects(
+      expandPromptReferences(`review ${reference}`, root),
+      /Sensitive files cannot be attached/u,
+      `Sensitive alias ${reference} must not expose the synthetic marker`,
+    );
+  }
   await assert.rejects(expandPromptReferences('review @"missing file.txt"', root), /ENOENT/u);
 });

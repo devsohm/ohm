@@ -1,6 +1,6 @@
 import { closeSync, constants, openSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { toJsonValue, type JsonValue } from "../runtime/core/json.js";
+import type { JsonValue } from "../runtime/core/json.js";
 import {
 	readSessionV4DescriptorSnapshot,
 	readSessionV4DescriptorSnapshotSync,
@@ -39,7 +39,7 @@ function parseLine(line: string, lineNumber: number): JsonValue {
 	if (line.length === 0) invalid(`line ${lineNumber} must not be empty`);
 	if (line.endsWith("\r")) invalid(`line ${lineNumber} must use an LF terminator`);
 	try {
-		return toJsonValue(JSON.parse(line));
+		return JSON.parse(line);
 	} catch (error) {
 		return invalid(`line ${lineNumber} is not valid JSON`, error);
 	}

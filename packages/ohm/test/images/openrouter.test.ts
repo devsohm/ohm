@@ -460,3 +460,35 @@ test("OpenRouter image SDK fetch rejects oversized response bodies", async () =>
   assert.equal(output.stopReason, "error");
   assert.match(output.errorMessage ?? "", /exceeded 2 bytes/u);
 });
+
+test("declared oversized image responses settle before custom cancellation", async () => {
+  let releaseCleanup = (): void => {};
+  const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  let markCancelled = (): void => {};
+  const cancelled = new Promise<void>((resolve) => { markCancelled = resolve; });
+  const body = new ReadableStream<Uint8Array>({ cancel() { markCancelled(); return cleanup; } });
+  const state: FakeState = {
+    payloads: [], requestOptions: [],
+    async run(_payload, _options, client) {
+      await client.fetch("https://openrouter.ai/api/v1/chat/completions");
+      return successfulResponse();
+    },
+  };
+  const generate = createOpenRouterImagesGenerator({
+    loadSdk: async () => fakeSdk(state),
+    fetch: async () => new Response(body, { headers: { "content-length": "3" } }),
+  });
+  let settled = false;
+  const pending = generate(model(), context, { apiKey: "synthetic", maxResponseBytes: 2 })
+    .then((result) => { settled = true; return result; });
+  try {
+    await cancelled;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, true, "response rejection must not join uncooperative cleanup");
+    assert.equal(body.locked, false);
+    assert.match((await pending).errorMessage ?? "", /exceeded 2 bytes/u);
+  } finally {
+    releaseCleanup();
+    await pending;
+  }
+});

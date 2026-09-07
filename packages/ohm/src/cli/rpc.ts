@@ -162,7 +162,7 @@ async function settleBounded(promises: readonly Promise<unknown>[], timeoutMs: n
 interface RpcCommandLoopOptions {
   lines: AsyncIterable<string>;
   writer: Pick<RpcWriter, "send">;
-  bridge: Pick<RpcPluginUiBridge, "handle">;
+  bridge: Pick<RpcPluginUiBridge, "handle" | "endInput">;
   dispatcher: Pick<RpcRuntimeDispatcher, "dispatch">;
 }
 
@@ -279,6 +279,7 @@ export async function runRpcCommandLoop(options: RpcCommandLoopOptions): Promise
       drain();
     }
 
+    options.bridge.endInput();
     drain();
     while (hasPending() || handlers.size > 0) {
       if (handlers.size === 0) {
@@ -290,6 +291,7 @@ export async function runRpcCommandLoop(options: RpcCommandLoopOptions): Promise
     if (priorityPending > 0) await priorityTail;
   } catch (error) {
     stopped = true;
+    options.bridge.endInput();
     pending.length = 0;
     pendingOffset = 0;
     await settleBounded([
@@ -585,12 +587,14 @@ async function runRpcServerOperation(
   };
   const uninstallTermination = termination.onTerminate(() => closeInput());
   let started = false;
+  let processing: Promise<void> | undefined;
   let cleanupFlight: Promise<void> | undefined;
   const cleanup = (): Promise<void> => {
     cleanupFlight ??= (async () => {
       closeInput();
       try {
         bridge.close();
+        if (processing !== undefined) await settleBounded([processing], 5_000);
         await dispatcher.close();
       } finally {
         await owner.dispose();
@@ -600,17 +604,25 @@ async function runRpcServerOperation(
   };
   try {
     termination.throwIfTerminated();
-    await dispatcher.start();
-    started = true;
-    termination.throwIfTerminated();
-    await runRpcCommandLoop({
+    const startup = dispatcher.start().then(() => {
+      started = true;
+      termination.throwIfTerminated();
+    });
+    processing = runRpcCommandLoop({
       lines: decodeRpcLines(input.stream),
       writer,
       bridge,
-      dispatcher: commandDispatcher,
+      dispatcher: {
+        async dispatch(command) {
+          await startup;
+          return await commandDispatcher.dispatch(command);
+        },
+      },
     });
+    await Promise.all([startup, processing]);
     const failure = await input.failure();
     if (failure !== undefined) throw failure;
+    if (!closing) await settleBounded([bridge.drain()], 5_000);
   } catch (error) {
     if (!started) throw error;
     if (!closing) {

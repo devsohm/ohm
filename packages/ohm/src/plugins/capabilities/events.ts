@@ -123,7 +123,7 @@ export type {
   ResourcesDiscoverResult,
 } from "./internal/events/trust-resources.js";
 
-/** Public direct-extension events composed from independent event domains. */
+/** Public direct-plugin events composed from independent event domains. */
 export interface PluginEventMap extends
   TrustResourceEventMap,
   SessionEventMap,

@@ -23,6 +23,10 @@
       "minimum": { "lines": 97, "branches": 88, "functions": 97 }
     },
     {
+      "file": "src/storage/session-entry-projection.ts",
+      "minimum": { "lines": 97, "branches": 88, "functions": 97 }
+    },
+    {
       "file": "src/serve/server.ts",
       "minimum": { "lines": 99, "branches": 84, "functions": 98 }
     }
@@ -48,7 +52,7 @@
     },
     {
       "id": "session-storage",
-      "targets": ["src/storage/session-manager.ts"],
+      "targets": ["src/storage/session-manager.ts", "src/storage/session-entry-projection.ts"],
       "testPrefixes": ["test/storage/", "test/service/"],
       "testExcludes": []
     },

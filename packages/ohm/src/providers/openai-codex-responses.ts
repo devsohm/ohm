@@ -772,6 +772,7 @@ async function* webSocketMessages(
   idleTimeoutMs: number,
 ): AsyncGenerator<string> {
   const queue: Array<{ text: string; bytes: number }> = [];
+  let queuedMessages = 0;
   let queuedBytes = 0;
   let wake: (() => void) | undefined;
   let failure: Error | undefined;
@@ -785,30 +786,56 @@ async function* webSocketMessages(
     pending?.();
   };
   const fail = (error: Error): void => {
-    failure ??= error;
+    if (closed) return;
+    failure = error;
     closed = true;
     notify();
   };
+  const failDecoding = <ErrorValue>(error: ErrorValue): void => {
+    if (closed) return;
+    fail(isErrorObject(error) ? error : new CodexWebSocketFrameProtocolError(
+      "OpenAI Codex WebSocket message decoding failed",
+    ));
+    closeSocket(socket, "protocol_error");
+  };
   const onMessage = (event: Event): void => {
+    if (closed) return;
     const data = socketEventField(event, "data", messageEventDataGetters);
+    let reservedBytes: number;
+    try {
+      const text = asString(data);
+      reservedBytes = text !== undefined
+        ? Buffer.byteLength(text, "utf8")
+        : data instanceof ArrayBuffer || ArrayBuffer.isView(data)
+          ? data.byteLength
+          : isVerifiedBlobMessage(data) ? data.size : 0;
+      assertWebSocketMessageSize(reservedBytes);
+      // Pending native Blob reads own payloads before they reach the decoded queue.
+      if (queuedMessages >= MAX_QUEUED_WEBSOCKET_MESSAGES || queuedBytes + reservedBytes > MAX_QUEUED_WEBSOCKET_BYTES) {
+        throw new CodexWebSocketFrameProtocolError("OpenAI Codex WebSocket receive queue exceeded its safety limit");
+      }
+    } catch (error) {
+      failDecoding(error);
+      return;
+    }
+    queuedMessages += 1;
+    queuedBytes += reservedBytes;
     decodeTail = decodeTail.then(async () => {
+      if (closed) return;
       const text = await decodeWebSocketMessage(data);
+      if (closed) return;
       const bytes = Buffer.byteLength(text, "utf8");
       assertWebSocketMessageSize(bytes);
-      if (queue.length >= MAX_QUEUED_WEBSOCKET_MESSAGES || queuedBytes + bytes > MAX_QUEUED_WEBSOCKET_BYTES) {
+      if (queuedBytes - reservedBytes + bytes > MAX_QUEUED_WEBSOCKET_BYTES) {
         throw new CodexWebSocketFrameProtocolError("OpenAI Codex WebSocket receive queue exceeded its safety limit");
       }
       queue.push({ text, bytes });
-      queuedBytes += bytes;
+      queuedBytes += bytes - reservedBytes;
       notify();
-    }).catch((error) => {
-      closeSocket(socket, "protocol_error");
-      fail(isErrorObject(error) ? error : new CodexWebSocketFrameProtocolError(
-        "OpenAI Codex WebSocket message decoding failed",
-      ));
-    });
+    }).catch(failDecoding);
   };
   const onError = (event: Event): void => {
+    if (closed) return;
     pendingError = socketError(
       event,
       "OpenAI Codex WebSocket failed",
@@ -822,17 +849,21 @@ async function* webSocketMessages(
     });
   };
   const onClose = (event: Event): void => {
+    if (closed) return;
     if (pendingErrorImmediate !== undefined) {
       clearImmediate(pendingErrorImmediate);
       pendingErrorImmediate = undefined;
     }
-    decodeTail = decodeTail.then(() => fail(socketError(
-      event,
-      "OpenAI Codex WebSocket closed before a terminal event",
-      "close",
-      pendingError,
-      consumeWebSocketNativeErrorCode(socket),
-    )));
+    decodeTail = decodeTail.then(() => {
+      if (closed) return;
+      fail(socketError(
+        event,
+        "OpenAI Codex WebSocket closed before a terminal event",
+        "close",
+        pendingError,
+        consumeWebSocketNativeErrorCode(socket),
+      ));
+    });
   };
   const onAbort = (): void => {
     fail(webSocketAbortError(signal));
@@ -847,6 +878,7 @@ async function* webSocketMessages(
     while (true) {
       if (queue.length > 0) {
         const next = queue.shift()!;
+        queuedMessages -= 1;
         queuedBytes -= next.bytes;
         yield next.text;
         continue;
@@ -872,6 +904,8 @@ async function* webSocketMessages(
       });
     }
   } finally {
+    closed = true;
+    queue.length = 0;
     if (pendingErrorImmediate !== undefined) clearImmediate(pendingErrorImmediate);
     socket.removeEventListener("close", onClose);
     socket.removeEventListener("error", onError);

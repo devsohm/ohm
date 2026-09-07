@@ -128,8 +128,8 @@ const PROJECTION_INDEX_MANAGER_VALUE = Type.Intersect([
     ),
   }, { additionalProperties: true }),
 ]);
-const PAGED_SESSION_MANAGER_VALUE = Type.Object({
-  getEntriesPage: Type.Function([Type.Number(), Type.Number()], Type.Array(Type.Unknown())),
+const ENTRY_LOOKUP_SESSION_MANAGER_VALUE = Type.Object({
+  getEntry: Type.Function([Type.String()], Type.Unknown()),
 }, { additionalProperties: true });
 
 type CanonicalMessageWithProviderState = CanonicalMessage & { providerState?: ProviderState };
@@ -147,8 +147,8 @@ function supportsProjectionIndex<T>(value: T): boolean {
   return Value.Check(PROJECTION_INDEX_MANAGER_VALUE, value);
 }
 
-function supportsPagedEntries<T>(value: T): boolean {
-  return Value.Check(PAGED_SESSION_MANAGER_VALUE, value);
+function supportsEntryLookup<T>(value: T): boolean {
+  return Value.Check(ENTRY_LOOKUP_SESSION_MANAGER_VALUE, value);
 }
 
 export interface SessionEntryBase {
@@ -710,10 +710,10 @@ function canonicalProviderState(
   previous: CanonicalMessageWithProviderState | undefined,
 ): ProviderState | undefined {
   if (value.providerState === undefined) return undefined;
-  if (previous === undefined) throw new TypeError("Provider continuation state cannot be introduced by an extension");
+  if (previous === undefined) throw new TypeError("Provider continuation state cannot be introduced by a plugin");
   const exposed = extensionProviderState(previous);
   if (exposed === undefined || !isDeepStrictEqual(exposed, value.providerState)) {
-    throw new TypeError("Provider continuation state is host-owned and cannot be changed by an extension");
+    throw new TypeError("Provider continuation state is host-owned and cannot be changed by a plugin");
   }
   return previous.providerState;
 }
@@ -724,22 +724,22 @@ function canonicalResponseMetadata(
 ): Pick<CanonicalMessage, "responseModel" | "responseId" | "diagnostics"> {
   if (previous === undefined) {
     if (value.responseModel !== undefined || value.responseId !== undefined || value.diagnostics !== undefined) {
-      throw new TypeError("Provider response metadata cannot be introduced by an extension");
+      throw new TypeError("Provider response metadata cannot be introduced by a plugin");
     }
     return {};
   }
 
   const diagnostics = canonicalAssistantDiagnostics(previous.diagnostics);
   if (value.responseModel !== undefined && value.responseModel !== previous.responseModel) {
-    throw new TypeError("Provider response metadata is host-owned and cannot be changed by an extension");
+    throw new TypeError("Provider response metadata is host-owned and cannot be changed by a plugin");
   }
   if (value.responseId !== undefined && value.responseId !== previous.responseId) {
-    throw new TypeError("Provider response metadata is host-owned and cannot be changed by an extension");
+    throw new TypeError("Provider response metadata is host-owned and cannot be changed by a plugin");
   }
   if (value.diagnostics !== undefined) {
     const selected = canonicalAssistantDiagnostics(value.diagnostics);
     if (!isDeepStrictEqual(selected, diagnostics)) {
-      throw new TypeError("Provider response metadata is host-owned and cannot be changed by an extension");
+      throw new TypeError("Provider response metadata is host-owned and cannot be changed by a plugin");
     }
   }
   return {
@@ -910,7 +910,7 @@ export function canonicalAgentMessages(
       if (providerState !== undefined) {
         if (message.api !== extensionApi(previous) || message.provider !== (previous.provider ?? "ohm")
           || message.model !== (previous.model ?? "unknown")) {
-          throw new TypeError("Provider continuation source is host-owned and cannot be changed by an extension");
+          throw new TypeError("Provider continuation source is host-owned and cannot be changed by a plugin");
         }
         selected = { ...message, providerState };
       }
@@ -948,7 +948,7 @@ interface IndexedProjectedEntry {
 interface SessionProjectionIndex {
   entries: IndexedProjectedEntry[];
   canonicalIdByPublicId: Map<string, string>;
-  tailByCanonicalId: Map<string, string>;
+  entryByCanonicalId: Map<string, IndexedProjectedEntry>;
   used: Set<string>;
   totalEntries: number;
 }
@@ -968,7 +968,7 @@ function emptySessionProjectionIndex(): SessionProjectionIndex {
   return {
     entries: [],
     canonicalIdByPublicId: new Map(),
-    tailByCanonicalId: new Map(),
+    entryByCanonicalId: new Map(),
     used: new Set(),
     totalEntries: 0,
   };
@@ -984,7 +984,7 @@ function appendSessionProjectionIndex(
     }
     const parentId = entry.parentId === null
       ? null
-      : index.tailByCanonicalId.get(entry.parentId) ?? entry.parentId;
+      : index.entryByCanonicalId.get(entry.parentId)?.publicIds.at(-1) ?? entry.parentId;
     const publicIds: string[] = [];
     for (let row = 0; row < entry.projectedEntryCount; row += 1) {
       const id = projectedId(entry.id, row, index.used);
@@ -992,14 +992,14 @@ function appendSessionProjectionIndex(
       index.canonicalIdByPublicId.set(id, entry.id);
       publicIds.push(id);
     }
-    const tail = publicIds.at(-1)!;
-    index.entries.push({
+    const indexed = {
       canonicalId: entry.id,
       parentId,
       publicIds,
       publicStart: index.totalEntries,
-    });
-    index.tailByCanonicalId.set(entry.id, tail);
+    };
+    index.entries.push(indexed);
+    index.entryByCanonicalId.set(entry.id, indexed);
     index.totalEntries += publicIds.length;
   }
 }
@@ -1016,11 +1016,11 @@ function projectionIndexFromSessionProjection(projection: SessionProjection): Se
         publicStart: index.totalEntries,
       };
       index.entries.push(entry);
+      index.entryByCanonicalId.set(item.canonicalId, entry);
     }
     entry.publicIds.push(item.publicEntry.id);
     index.used.add(item.publicEntry.id);
     index.canonicalIdByPublicId.set(item.publicEntry.id, item.canonicalId);
-    index.tailByCanonicalId.set(item.canonicalId, item.publicEntry.id);
     index.totalEntries += 1;
   }
   return index;
@@ -1112,6 +1112,15 @@ function projectEntry(
   return [{ ...entry, id, parentId }];
 }
 
+function projectEntryReferences(entry: SessionEntry, publicId: (canonicalId: string) => string): SessionEntry {
+  switch (entry.type) {
+    case "compaction": return { ...entry, firstKeptEntryId: publicId(entry.firstKeptEntryId) };
+    case "branch_summary": return { ...entry, fromId: publicId(entry.fromId) };
+    case "label": return { ...entry, targetId: publicId(entry.targetId) };
+    default: return entry;
+  }
+}
+
 function projectSession(entries: readonly CanonicalSessionEntry[]): SessionProjection {
   const projected: ProjectedEntry[] = [];
   const byId = new Map<string, ProjectedEntry>();
@@ -1121,14 +1130,15 @@ function projectSession(entries: readonly CanonicalSessionEntry[]): SessionProje
   for (const entry of entries) {
     const parentId = entry.parentId === null ? null : tailByCanonicalId.get(entry.parentId) ?? entry.parentId;
     const converted = projectEntry(entry, parentId, used);
-    for (const publicEntry of converted) {
+    const tail = converted.at(-1);
+    if (tail !== undefined) tailByCanonicalId.set(entry.id, tail.id);
+    for (const convertedEntry of converted) {
+      const publicEntry = projectEntryReferences(convertedEntry, (id) => tailByCanonicalId.get(id) ?? id);
       const item = { publicEntry, canonicalId: entry.id };
       projected.push(item);
       byId.set(publicEntry.id, item);
       canonicalIdByPublicId.set(publicEntry.id, entry.id);
     }
-    const tail = converted.at(-1);
-    if (tail !== undefined) tailByCanonicalId.set(entry.id, tail.id);
   }
   return { entries: projected, byId, canonicalIdByPublicId, tailByCanonicalId };
 }
@@ -1140,14 +1150,31 @@ export function extensionSessionEntries(entries: readonly CanonicalSessionEntry[
 export function extensionSessionEntry(entry: CanonicalSessionEntry): SessionEntry {
   const converted = extensionSessionEntries([entry]);
   if (converted.length !== 1) {
-    throw new TypeError("A batched tool entry has more than one extension-visible session entry");
+    throw new TypeError("A batched tool entry has more than one plugin-visible session entry");
   }
   return converted[0]!;
 }
 
-/** @internal Resolve an extension-visible entry id to its canonical journal entry. */
+/** @internal Resolve a plugin-visible entry id to its canonical journal entry. */
 export function canonicalSessionEntryId(manager: SessionManager, publicId: string): string | undefined {
-  return projectSession(manager.getEntries()).byId.get(publicId)?.canonicalId;
+  return extensionSessionManagerFacade(manager).canonicalEntryId(publicId);
+}
+
+/** @internal Resolve a canonical journal entry to its final plugin-visible row. */
+export function publicSessionEntryId(manager: SessionManager, canonicalId: string): string | undefined {
+  return extensionSessionManagerFacade(manager).publicEntryId(canonicalId);
+}
+
+/** @internal Custom hosts retain their own entry identity convention. */
+export function pluginSessionEntryId(manager: ReadonlyPluginSessionManager, canonicalId: string): string {
+  return manager instanceof PluginSessionManagerFacade ? manager.publicEntryId(canonicalId) ?? canonicalId : canonicalId;
+}
+
+/** @internal Project an owned session subset without renumbering its global IDs. */
+export function pluginSessionEntries(manager: ReadonlyPluginSessionManager, entries: readonly CanonicalSessionEntry[]): SessionEntry[] {
+  return manager instanceof PluginSessionManagerFacade
+    ? manager.projectCanonicalEntries(entries)
+    : extensionSessionEntries(entries);
 }
 
 function cloneEntry<T>(value: T): T {
@@ -1221,8 +1248,16 @@ class PluginSessionManagerFacade implements PluginSessionManager {
     return value;
   }
 
+  canonicalEntryId(publicId: string): string | undefined {
+    return this.#projectionIndex().canonicalIdByPublicId.get(publicId);
+  }
+
+  publicEntryId(canonicalId: string): string | undefined {
+    return this.#projectionIndex().entryByCanonicalId.get(canonicalId)?.publicIds.at(-1);
+  }
+
   #canonicalId(publicId: string): string {
-    return this.#projectionIndex().canonicalIdByPublicId.get(publicId) ?? publicId;
+    return this.canonicalEntryId(publicId) ?? publicId;
   }
 
   getCwd(): string { return this.#manager.getCwd(); }
@@ -1236,7 +1271,7 @@ class PluginSessionManagerFacade implements PluginSessionManager {
 
   getLeafId(): string | null {
     const id = this.#manager.getLeafId();
-    return id === null ? null : this.#projectionIndex().tailByCanonicalId.get(id) ?? id;
+    return id === null ? null : this.publicEntryId(id) ?? id;
   }
 
   getLeafEntry(): SessionEntry | undefined {
@@ -1284,8 +1319,7 @@ class PluginSessionManagerFacade implements PluginSessionManager {
   }
 
   buildContextEntries(): SessionEntry[] {
-    const projection = projectSession(this.#manager.buildContextEntries());
-    return projection.entries.map((entry) => cloneEntry(entry.publicEntry));
+    return this.projectCanonicalEntries(this.#manager.buildContextEntries());
   }
 
   buildSessionContext(): SessionContext {
@@ -1318,9 +1352,17 @@ class PluginSessionManagerFacade implements PluginSessionManager {
 
   /** @internal Projects one committed canonical entry without materializing the full session payload. */
   projectCanonicalEntry(entry: CanonicalSessionEntry): SessionEntry[] {
-    const projection = this.#projectionIndex();
-    const sequence = this.#manager.getEntrySequence(entry.id);
-    const indexed = sequence === undefined ? undefined : projection.entries[sequence];
+    return this.projectCanonicalEntries([entry]);
+  }
+
+  projectCanonicalEntries(entries: readonly CanonicalSessionEntry[]): SessionEntry[] {
+    const index = this.#projectionIndex();
+    return entries.flatMap((entry) => this.#projectIndexedEntry(entry, index)
+      .map((projected) => cloneEntry(projected)));
+  }
+
+  #projectIndexedEntry(entry: CanonicalSessionEntry, index: SessionProjectionIndex): SessionEntry[] {
+    const indexed = index.entryByCanonicalId.get(entry.id);
     if (indexed === undefined || indexed.canonicalId !== entry.id) {
       throw new Error(`Committed session entry ${entry.id} is missing from its projection index`);
     }
@@ -1328,11 +1370,11 @@ class PluginSessionManagerFacade implements PluginSessionManager {
     if (converted.length !== indexed.publicIds.length) {
       throw new Error(`Session entry ${entry.id} changed its projected entry count`);
     }
-    return converted.map((publicEntry, row) => cloneEntry({
+    return converted.map((publicEntry, row) => projectEntryReferences({
       ...publicEntry,
       id: indexed.publicIds[row]!,
       parentId: row === 0 ? indexed.parentId : indexed.publicIds[row - 1]!,
-    }));
+    }, (id) => index.entryByCanonicalId.get(id)?.publicIds.at(-1) ?? id));
   }
 
   /** @internal Bounded projection used by streaming interfaces. */
@@ -1346,8 +1388,8 @@ class PluginSessionManagerFacade implements PluginSessionManager {
     const firstCanonical = canonicalIndexAtPublicOffset(projection.entries, offset);
     const lastCanonical = canonicalIndexAtPublicOffset(projection.entries, end - 1);
     const metadata = projection.entries.slice(firstCanonical, lastCanonical + 1);
-    const canonical = supportsPagedEntries(this.#manager)
-      ? this.#manager.getEntriesPage(firstCanonical, metadata.length)
+    const canonical = supportsEntryLookup(this.#manager)
+      ? metadata.map((entry) => this.#manager.getEntry(entry.canonicalId))
       : this.#manager.getEntries().slice(firstCanonical, firstCanonical + metadata.length);
     if (canonical.length !== metadata.length) {
       throw new Error("Session entry page did not match its projection metadata");
@@ -1355,20 +1397,10 @@ class PluginSessionManagerFacade implements PluginSessionManager {
     const entries: SessionEntry[] = [];
     for (const [entryIndex, entry] of canonical.entries()) {
       const indexed = metadata[entryIndex]!;
-      if (entry.id !== indexed.canonicalId) {
+      if (entry === undefined || entry.id !== indexed.canonicalId) {
         throw new Error("Session entry page changed while it was being projected");
       }
-      const converted = projectEntry(entry, indexed.parentId, new Set());
-      if (converted.length !== indexed.publicIds.length) {
-        throw new Error(`Session entry ${entry.id} changed its projected entry count`);
-      }
-      for (const [row, publicEntry] of converted.entries()) {
-        entries.push({
-          ...publicEntry,
-          id: indexed.publicIds[row]!,
-          parentId: row === 0 ? indexed.parentId : indexed.publicIds[row - 1]!,
-        });
-      }
+      entries.push(...this.#projectIndexedEntry(entry, projection));
     }
     const pageStart = offset - metadata[0]!.publicStart;
     return {

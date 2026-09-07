@@ -158,6 +158,8 @@ interface ActiveJob {
   readonly attempt: number;
   readonly controller: AbortController;
   readonly completion: Promise<void>;
+  readonly settled: Promise<void>;
+  readonly settle: () => void;
   timeout?: NodeJS.Timeout;
 }
 
@@ -538,7 +540,7 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** @internal Host-owned durable lifecycle registry used by extension API facades. */
+/** @internal Host-owned durable lifecycle registry used by plugin API facades. */
 export class DurableJobSupervisor {
   readonly #active = new Map<string, ActiveJob>();
   readonly #launching = new Set<string>();
@@ -639,7 +641,7 @@ export class DurableJobSupervisor {
 
   #assertOwner(owner: DurableJobOwner, write = false): void {
     if (this.#closed) throw new Error("Durable job supervisor is closed");
-    if (!owner.isActive()) throw new Error("Runtime extension context is no longer active");
+    if (!owner.isActive()) throw new Error("Runtime plugin context is no longer active");
     if (write && !owner.isCommitted()) throw new Error("Durable jobs cannot start or mutate before activation commits");
   }
 
@@ -688,7 +690,7 @@ export class DurableJobSupervisor {
           }
         }
         if (activeCount(jobs.filter((job) => job.owner === ownerId)) >= MAX_ACTIVE_JOBS) {
-          throw new Error(`An extension cannot exceed ${MAX_ACTIVE_JOBS} active durable jobs`);
+          throw new Error(`A plugin cannot exceed ${MAX_ACTIVE_JOBS} active durable jobs`);
         }
         pruneForInsert(jobs);
         const now = this.#now();
@@ -743,7 +745,7 @@ export class DurableJobSupervisor {
         }
         if (job.state !== "interrupted") throw new Error(`Durable job ${id} is ${job.state}, not interrupted`);
         if (activeCount(jobs.filter((candidate) => candidate.owner === ownerId)) >= MAX_ACTIVE_JOBS) {
-          throw new Error(`An extension cannot exceed ${MAX_ACTIVE_JOBS} active durable jobs`);
+          throw new Error(`A plugin cannot exceed ${MAX_ACTIVE_JOBS} active durable jobs`);
         }
         job.state = "starting";
         job.updatedAt = this.#now();
@@ -775,7 +777,9 @@ export class DurableJobSupervisor {
     const controller = new AbortController();
     let resolveCompletion: () => void = () => undefined;
     const completion = new Promise<void>((resolveValue) => { resolveCompletion = resolveValue; });
-    const active: ActiveJob = { ownerKey: owner.key, attempt: job.attempt, controller, completion };
+    let settle: () => void = () => undefined;
+    const settled = new Promise<void>((resolveValue) => { settle = resolveValue; });
+    const active: ActiveJob = { ownerKey: owner.key, attempt: job.attempt, controller, completion, settled, settle };
     this.#active.set(job.id, active);
     try {
       await this.#store(owner).transaction((jobs) => {
@@ -790,6 +794,7 @@ export class DurableJobSupervisor {
     } catch (cause) {
       this.#active.delete(job.id);
       resolveCompletion();
+      settle();
       await this.#interruptUnlaunched(owner, job, cause);
     }
     active.timeout = setTimeout(() => {
@@ -799,7 +804,7 @@ export class DurableJobSupervisor {
     }, job.timeoutMs);
     void this.#runOperation(owner, job, active, operation)
       .catch((cause) => owner.diagnostic?.(`Durable job settlement failed: ${boundedError(cause)}`))
-      .finally(resolveCompletion);
+      .finally(() => { settle(); resolveCompletion(); });
     return await this.#inspect(owner, job.id);
   }
 
@@ -911,6 +916,7 @@ export class DurableJobSupervisor {
       active.controller.abort(new Error(message));
     }
     if (failure !== undefined) throw failure;
+    active.settle();
   }
 
   async #cancel(owner: DurableJobOwner, id: string): Promise<PluginJobStatus> {
@@ -976,8 +982,8 @@ export class DurableJobSupervisor {
       if (!ACTIVE_STATES.has(current.state)) return current;
       const active = this.#active.get(id);
       if (active !== undefined) {
-        if (options.signal === undefined) await active.completion;
-        else await withAbort(active.completion, options.signal);
+        if (options.signal === undefined) await active.settled;
+        else await withAbort(active.settled, options.signal);
       } else if (options.signal === undefined) {
         await new Promise<void>((resolveValue) => setTimeout(resolveValue, JOB_POLL_MS));
       } else {

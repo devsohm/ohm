@@ -274,6 +274,9 @@ test("standalone export client wires the bounded lazy presentation helpers", () 
   assert.match(SESSION_EXPORT_CLIENT, /block\.type === "thinking"/u);
   assert.match(SESSION_EXPORT_CLIENT, /entry\.type === "model_change"/u);
   assert.match(SESSION_EXPORT_CLIENT, /entry\.type === "thinking_level_change"/u);
+  assert.match(SESSION_EXPORT_CLIENT, /renderToolCall\(parent, block, JSON\.stringify\(\[entryId, index\]\)\)/u);
+  assert.match(SESSION_EXPORT_CLIENT, /renderToolResult\(parent, block, JSON\.stringify\(\[entryId, index\]\)\)/u);
+  assert.match(SESSION_EXPORT_CLIENT, /renderCanonicalContent\(body, message, entry\.id\)/u);
 });
 
 async function managerFixture(name = "exportable"): Promise<{ root: string; manager: SessionManager }> {
@@ -672,13 +675,13 @@ test("live metadata includes prompt, active tool schemas, skills, images and saf
     mediaType: "image/png",
     data: "iVBORw0KGgo=",
   }], "image"));
-  manager.appendMessage(message("assistant", [{
+  const callEntryId = manager.appendMessage(message("assistant", [{
     type: "tool_call",
     callId: "custom-call",
     name: "review",
     arguments: { scope: "all" },
   }], "assistant"));
-  manager.appendMessage(message("tool", [{
+  const resultEntryId = manager.appendMessage(message("tool", [{
     type: "tool_result",
     callId: "custom-call",
     name: "review",
@@ -715,9 +718,9 @@ test("live metadata includes prompt, active tool schemas, skills, images and saf
   assert.equal(data.systemPrompt, "System instructions");
   assert.deepEqual(data.tools, [{ name: "review", description: "Review code", inputSchema: { type: "object" }, active: true }]);
   assert.deepEqual(data.skills, [{ name: "audit", description: "Audit a workspace" }]);
-  assert.equal(data.renderedTools?.["custom-call"]?.call?.lines[0]?.spans[0]?.text, "<renderer call>");
-  assert.equal(data.renderedTools?.["custom-call"]?.resultCollapsed?.lines[0]?.spans[0]?.text, "collapsed");
-  assert.equal(data.renderedTools?.["custom-call"]?.resultExpanded?.lines[0]?.spans[0]?.text, "expanded");
+  assert.equal(data.renderedTools?.[JSON.stringify([callEntryId, 0])]?.call?.lines[0]?.spans[0]?.text, "<renderer call>");
+  assert.equal(data.renderedTools?.[JSON.stringify([resultEntryId, 0])]?.resultCollapsed?.lines[0]?.spans[0]?.text, "collapsed");
+  assert.equal(data.renderedTools?.[JSON.stringify([resultEntryId, 0])]?.resultExpanded?.lines[0]?.spans[0]?.text, "expanded");
   assert.equal(resultViews.length, 2);
   assert.deepEqual(resultViews[0]?.result?.contentBlocks, [
     { type: "text", text: "line one" },
@@ -735,7 +738,7 @@ test("live metadata includes prompt, active tool schemas, skills, images and saf
 
 test("custom renderer byte truncation preserves complete UTF-8 code points", async () => {
   const { manager } = await managerFixture("renderer-utf8-boundary");
-  manager.appendMessage(message("assistant", [{
+  const callEntryId = manager.appendMessage(message("assistant", [{
     type: "tool_call",
     callId: "utf8-call",
     name: "review",
@@ -753,7 +756,7 @@ test("custom renderer byte truncation preserves complete UTF-8 code points", asy
       renderResult: () => undefined,
     },
   });
-  const rendered = data.renderedTools?.["utf8-call"]?.call;
+  const rendered = data.renderedTools?.[JSON.stringify([callEntryId, 0])]?.call;
   assert.ok(rendered);
   const retained = rendered.lines[0]?.spans.map((span) => span.text).join("") ?? "";
   const allText = rendered.lines.flatMap((line) => line.spans.map((span) => span.text)).join("");
@@ -764,7 +767,7 @@ test("custom renderer byte truncation preserves complete UTF-8 code points", asy
 
 test("custom renderer reports byte truncation only when content is omitted", async () => {
   const { manager } = await managerFixture("renderer-exact-byte-boundary");
-  manager.appendMessage(message("assistant", [
+  const callEntryId = manager.appendMessage(message("assistant", [
     { type: "tool_call", callId: "exact", name: "review", arguments: {} },
     { type: "tool_call", callId: "over", name: "review", arguments: {} },
   ], "assistant"));
@@ -779,8 +782,8 @@ test("custom renderer reports byte truncation only when content is omitted", asy
     },
   });
 
-  const exact = data.renderedTools?.exact?.call;
-  const over = data.renderedTools?.over?.call;
+  const exact = data.renderedTools?.[JSON.stringify([callEntryId, 0])]?.call;
+  const over = data.renderedTools?.[JSON.stringify([callEntryId, 1])]?.call;
   assert.ok(exact);
   assert.ok(over);
   assert.equal(Buffer.byteLength(exact.lines[0]?.spans[0]?.text ?? "", "utf8"), maximumBytes);
@@ -822,6 +825,73 @@ test("persisted tool renderer calls report honest execution lifecycle state", as
     { callId: "unmatched", executionStarted: false, status: "pending" },
   ]);
 });
+
+for (const layout of ["turns", "sibling branches"] as const) {
+  test(`HTML export keeps repeated provider call IDs distinct across ${layout}`, (t) => {
+    const manager = SessionManager.inMemory("/tmp", { id: "repeated-export-call" });
+    t.after(() => manager.closeV4Store());
+    const root = manager.appendMessage(message("user", [{ type: "text", text: "review" }], "root"));
+    const occurrenceKeys: string[] = [];
+    const appendCall = (turn: string): string => {
+      const id = manager.appendMessage(message("assistant", [
+        { type: "tool_call", callId: "reused", name: "review", arguments: { turn } },
+      ], `assistant-${turn}`));
+      occurrenceKeys.push(JSON.stringify([id, 0]));
+      return id;
+    };
+    const appendResult = (turn: string, isError: boolean): void => {
+      const id = manager.appendMessage(message("tool", [
+        { type: "tool_result", callId: "reused", name: "review", content: `${turn} result`, isError },
+      ], `result-${turn}`));
+      occurrenceKeys.push(JSON.stringify([id, 0]));
+    };
+    const firstCall = appendCall("first");
+    if (layout === "turns") appendResult("first", true);
+    else manager.branch(root);
+    const secondCall = appendCall("second");
+    if (layout === "sibling branches") {
+      manager.branch(firstCall);
+      appendResult("first", true);
+      manager.branch(secondCall);
+    }
+    appendResult("second", false);
+    const before = manager.getV4State();
+    const entries = manager.getEntries();
+    const jsonl = [before.header, ...before.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n";
+    const callViews: Array<Parameters<RuntimeToolRendererBinding["renderCall"]>[1]> = [];
+    const resultViews: Array<Parameters<RuntimeToolRendererBinding["renderResult"]>[1]> = [];
+    const data = buildSessionExportData(manager, { toolRenderer: {
+      has: () => true,
+      renderCall: (_name, view) => {
+        callViews.push(view);
+        return { lines: [{ spans: [{ text: `${JSON.stringify(view.input)}:${view.status}` }] }] };
+      },
+      renderResult: (_name, view) => {
+        if (!view.expanded) resultViews.push(view);
+        return { lines: [{ spans: [{ text: `${view.result?.content}:${view.status}` }] }] };
+      },
+    } });
+    assert.deepEqual(manager.getV4State(), before, "rendering must not rewrite the canonical journal");
+    assert.deepEqual(data.entries, entries);
+    assert.equal(data.jsonl, jsonl, "the downloadable journal retains the original provider call IDs");
+    assert.deepEqual(callViews.map(({ callId, status }) => ({ callId, status })), [
+      { callId: "reused", status: "failed" },
+      { callId: "reused", status: "completed" },
+    ]);
+    assert.deepEqual(resultViews.map(({ input }) => input), [{ turn: "first" }, { turn: "second" }],
+      "each result resolves its own ancestor call, not a sibling invocation");
+    assert.deepEqual(Object.keys(data.renderedTools ?? {}).sort(), occurrenceKeys.sort());
+    const rendered = Object.values(data.renderedTools ?? {});
+    assert.deepEqual(rendered.flatMap((value) => value.call?.lines[0]?.spans.map((span) => span.text) ?? []).sort(), [
+      '{"turn":"first"}:failed', '{"turn":"second"}:completed',
+    ]);
+    for (const field of ["resultCollapsed", "resultExpanded"] as const) {
+      assert.deepEqual(rendered.flatMap((value) => value[field]?.lines[0]?.spans.map((span) => span.text) ?? []).sort(), [
+        "first result:failed", "second result:completed",
+      ]);
+    }
+  });
+}
 
 test("HTML export reports renderer failures once per slot through a bounded redacted channel", async () => {
   const { manager } = await managerFixture("renderer-diagnostics");

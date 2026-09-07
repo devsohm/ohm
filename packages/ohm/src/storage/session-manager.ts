@@ -95,6 +95,17 @@ import {
 import { loadIndexedSessionInfos } from "./session-catalog-index.js";
 import { Value } from "typebox/value";
 import { SessionStorageJournal } from "./session-storage.js";
+import {
+  MESSAGE_CUSTOM_PLUGIN,
+  isCanonicalContentBlock,
+  isCanonicalRole,
+  isStoredCanonicalMessage,
+  isStringArray,
+  isTextImageBlock,
+  projectedSessionEntryCount,
+  type SessionEntryProjectionMetadata,
+} from "./session-entry-projection.js";
+export type { SessionEntryProjectionMetadata } from "./session-entry-projection.js";
 import { isSqliteSessionFile, SqliteSessionStorageBackend } from "./sqlite-session-storage.js";
 import { acquireSessionWriterLeaseSync } from "./session-writer-lease.js";
 
@@ -103,7 +114,6 @@ const SESSION_READ_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const SESSION_DIRECTORY_SLUG_LENGTH = 80;
 const CUSTOM_ENTRY_PLUGIN = "ohm.session.custom";
 const CUSTOM_MESSAGE_PLUGIN = "ohm.session.custom-message";
-const MESSAGE_CUSTOM_PLUGIN = "ohm.session.message-custom";
 const BRANCH_SUMMARY_PLUGIN = "ohm.session.branch-summary";
 const TOOLS_CHANGE_CUSTOM_TYPE = "ohm.session.tools-change";
 const PRIVATE_SESSION_DIRECTORY_MODE = 0o700;
@@ -123,13 +133,6 @@ export interface ActiveBranchUsage {
   /** False only when the branch has no request or metered-summary observations. Missing request telemetry still counts. */
   hasUsageObservations?: boolean;
   latestAssistantUsage?: NormalizedUsage;
-}
-
-/** @internal Lightweight metadata for one-to-many extension session projection. */
-export interface SessionEntryProjectionMetadata {
-  id: string;
-  parentId: string | null;
-  projectedEntryCount: number;
 }
 
 export interface SessionHistoryPageOptions {
@@ -348,71 +351,6 @@ function messageRole(message: PersistedSessionMessage): string {
   return message.role;
 }
 
-function isTextImageBlock<Input>(value: Input): value is Input & (TextBlock | ImageBlock) {
-  if (!isJsonObject(value)) return false;
-  if (value.type === "text") {
-    return Value.Check(STRING_VALUE, value.text)
-      && (value.textSignature === undefined || Value.Check(STRING_VALUE, value.textSignature));
-  }
-  if (value.type !== "image") return false;
-  return Value.Check(STRING_VALUE, value.mediaType)
-    && (value.data === undefined || Value.Check(STRING_VALUE, value.data))
-    && (value.url === undefined || Value.Check(STRING_VALUE, value.url));
-}
-
-function isStringArray<Input>(value: Input): value is Input & string[] {
-  return Array.isArray(value) && value.every((entry) => Value.Check(STRING_VALUE, entry));
-}
-
-function isCanonicalContentBlock<Input>(
-  value: Input,
-): value is Input & CanonicalMessage["content"][number] {
-  if (!isJsonObject(value)) return false;
-  switch (value.type) {
-    case "text":
-      return Value.Check(STRING_VALUE, value.text)
-        && (value.textSignature === undefined || Value.Check(STRING_VALUE, value.textSignature));
-    case "thinking":
-      return Value.Check(STRING_VALUE, value.thinking)
-        && (value.thinkingSignature === undefined || Value.Check(STRING_VALUE, value.thinkingSignature))
-        && (value.redacted === undefined || Value.Check(BOOLEAN_VALUE, value.redacted))
-        && (value.visibility === undefined || value.visibility === "summary" || value.visibility === "provider_trace");
-    case "image":
-      return isTextImageBlock(value);
-    case "tool_call":
-      return Value.Check(STRING_VALUE, value.callId)
-        && Value.Check(STRING_VALUE, value.name)
-        && isJsonValue(value.arguments)
-        && (value.rawArguments === undefined || Value.Check(STRING_VALUE, value.rawArguments))
-        && (value.thoughtSignature === undefined || Value.Check(STRING_VALUE, value.thoughtSignature));
-    case "tool_result":
-      return Value.Check(STRING_VALUE, value.callId)
-        && Value.Check(STRING_VALUE, value.name)
-        && Value.Check(STRING_VALUE, value.content)
-        && Value.Check(BOOLEAN_VALUE, value.isError)
-        && (value.contentBlocks === undefined || (
-          Array.isArray(value.contentBlocks) && value.contentBlocks.every(isTextImageBlock)
-        ))
-        && (value.status === undefined || value.status === "success" || value.status === "warning" || value.status === "error")
-        && (value.summary === undefined || Value.Check(STRING_VALUE, value.summary))
-        && (value.nextActions === undefined || isStringArray(value.nextActions))
-        && (value.images === undefined || (
-          Array.isArray(value.images) && value.images.every((entry) => isTextImageBlock(entry) && entry.type === "image")
-        ))
-        && (value.artifactIds === undefined || isStringArray(value.artifactIds))
-        && (value.metadata === undefined || isJsonValue(value.metadata))
-        && (value.usage === undefined || isNormalizedUsage(value.usage))
-        && (value.addedToolNames === undefined || isStringArray(value.addedToolNames));
-    case "provider_opaque":
-      return Value.Check(STRING_VALUE, value.provider)
-        && Value.Check(STRING_VALUE, value.mediaType)
-        && isJsonValue(value.value)
-        && (value.serialized === undefined || Value.Check(STRING_VALUE, value.serialized));
-    default:
-      return false;
-  }
-}
-
 function isBashExecutionMessage<Input>(value: Input): value is Input & BashExecutionMessage {
   if (!isJsonObject(value) || value.role !== "bashExecution") return false;
   return Value.Check(STRING_VALUE, value.command)
@@ -440,16 +378,6 @@ function isCustomMessage<Input>(value: Input): value is Input & CustomMessage {
     && (value.provenance === undefined || extensionSessionProvenance(value.provenance) !== undefined);
 }
 
-function isStoredCanonicalMessage<Input>(value: Input): value is Input & CanonicalMessage {
-  if (!isJsonObject(value)) return false;
-  return Value.Check(STRING_VALUE, value.id)
-    && Value.Check(STRING_VALUE, value.createdAt)
-    && Value.Check(STRING_VALUE, value.role)
-    && isCanonicalRole(value.role)
-    && Array.isArray(value.content)
-    && value.content.every(isCanonicalContentBlock);
-}
-
 function persistedSessionMessage<Input>(value: Input): PersistedSessionMessage | undefined {
   if (isBashExecutionMessage(value) || isCustomMessage(value) || isStoredCanonicalMessage(value)) {
     return structuredClone(value);
@@ -463,27 +391,6 @@ function customMessageContent(
   if (Value.Check(STRING_VALUE, value)) return value;
   if (Array.isArray(value) && value.every(isTextImageBlock)) return structuredClone(value);
   return "";
-}
-
-function projectedMessageEntryCount(value: SessionV4Json, fallbackRole?: string): number {
-  const stored = asRecord(value);
-  const role = stringField(stored?.role) ?? fallbackRole;
-  const content = stored?.content ?? (Array.isArray(value) ? value : undefined);
-  if (role !== "tool" || !Array.isArray(content)) return 1;
-  const count = content.filter((block) => stringField(asRecord(block)?.type) === "tool_result").length;
-  return Math.max(1, count);
-}
-
-function projectedSessionEntryCount(node: SessionV4ConversationNode): number {
-  if (node.nodeType === "message") return projectedMessageEntryCount(node.content, node.role);
-  if (node.nodeType === "extension_context" && node.extensionId === MESSAGE_CUSTOM_PLUGIN) {
-    return projectedMessageEntryCount(node.context);
-  }
-  return 1;
-}
-
-function isCanonicalRole(role: string): role is CanonicalMessage["role"] {
-  return role === "system" || role === "user" || role === "assistant" || role === "tool";
 }
 
 export function sessionEntryToV4Node(
@@ -2301,6 +2208,9 @@ export class SessionManager {
   /** @internal Returns page-index metadata without materializing stored entry payloads. */
   getEntryProjectionMetadataPage(offset: number, limit: number): SessionEntryProjectionMetadata[] {
     if (offset < 0 || limit < 1) return [];
+    const range = entryPageRange(offset, limit, this.getEntryCount());
+    const stored = this.writer?.getEntryProjectionMetadataPage(range.offset, range.limit);
+    if (stored !== undefined) return stored;
     return this.inspectState((state) => this.entryIdsPage(state, offset, limit)
       .map((id) => {
         const node = state.nodes.get(id)!;

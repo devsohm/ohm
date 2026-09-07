@@ -271,12 +271,17 @@ export class ProviderWireInterceptorRegistry implements ProviderWireTransportHos
           })
         : request;
       const response = await fetchImplementation(outgoing);
-      await operation.observe({
-        url: response.url || outgoing.url,
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers),
-      }, request.signal);
+      try {
+        await operation.observe({
+          url: response.url || outgoing.url,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers),
+        }, request.signal);
+      } catch (error) {
+        void response.body?.cancel(error).catch(() => undefined);
+        throw error;
+      }
       return response;
     };
   }

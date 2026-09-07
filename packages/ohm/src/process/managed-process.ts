@@ -253,7 +253,7 @@ function terminal(state: PluginProcessState): state is PluginProcessResult["stat
 }
 
 async function withAbort<T>(operation: Promise<T>, signals: readonly (AbortSignal | undefined)[]): Promise<T> {
-  const selected = signals.filter((signal): signal is AbortSignal => signal !== undefined);
+  const selected = [...new Set(signals.filter((signal): signal is AbortSignal => signal !== undefined))];
   for (const signal of selected) signal.throwIfAborted();
   if (selected.length === 0) return await operation;
   return await new Promise<T>((resolveValue, rejectValue) => {
@@ -875,7 +875,7 @@ export class ManagedProcessSupervisor {
       await record.spawnReady;
       options.signal?.throwIfAborted();
       owner.owner.signal.throwIfAborted();
-      if (record.inputClosing || terminal(record.state)) throw new Error("Managed process input is closed");
+      if (terminal(record.state)) throw new Error("Managed process input is closed");
       const child = record.child;
       if (child === undefined) throw new Error("Managed process did not start");
       await new Promise<void>((resolveValue, rejectValue) => {

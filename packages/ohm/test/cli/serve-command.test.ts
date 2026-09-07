@@ -79,6 +79,19 @@ function createInterruptedServeSession(
     toolsetFingerprint: "serve-recovery-toolset",
   };
   try {
+    manager.commitChanges([
+      { type: "conversation_node", node: {
+        id: "served-tool", parentId: null, createdAt: timestamp, nodeType: "message", role: "tool",
+        content: { id: "served-tool", createdAt: timestamp, role: "tool", content: [
+          { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+          { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+        ] },
+      } },
+      { type: "conversation_node", node: {
+        id: "served-tool~1", parentId: "served-tool", createdAt: timestamp, nodeType: "message", role: "user",
+        content: { id: "served-user", createdAt: timestamp, role: "user", content: [{ type: "text", text: "selected user" }] },
+      } },
+    ]);
     manager.commitChanges([{
       type: "run_accepted",
       branchId: "main",
@@ -236,6 +249,7 @@ test("serve command starts offline, creates one canonical session, and stops cle
   const lifecycleMarker = join(root, "extension-lifecycle");
   const discoveryMarker = join(root, "plugin-discovery");
   const refreshMarker = join(root, "session-refreshed");
+  const navigationMarker = join(root, "tree-navigated");
   const port = await unusedLoopbackPort();
   await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
   await Promise.all([
@@ -271,6 +285,8 @@ await main(${JSON.stringify([
     name: "serve-fixture-provider",
     async factory(ohm) {
       const generation = ++extensionGeneration;
+      let navigationId;
+      let navigationLabel;
       await ohm.facets.register({
         apiVersion: 1,
         kind: "worker",
@@ -308,6 +324,28 @@ await main(${JSON.stringify([
           await context.refresh();
           appendFileSync(${JSON.stringify(refreshMarker)}, "refreshed\\n");
         },
+      });
+      ohm.registerCommand("serve-navigate", {
+        async handler(id, context) {
+          navigationId = id;
+          navigationLabel = undefined;
+          try {
+            const result = await context.navigateTree(id, { label: id });
+            appendFileSync(${JSON.stringify(navigationMarker)}, JSON.stringify({
+              id, cancelled: result.cancelled, label: navigationLabel,
+            }) + "\\n");
+          } catch (error) {
+            appendFileSync(${JSON.stringify(navigationMarker)}, JSON.stringify({
+              id, error: error instanceof Error ? error.message : String(error),
+            }) + "\\n");
+            throw error;
+          } finally {
+            navigationId = undefined;
+          }
+        },
+      });
+      ohm.on("session_tree", (_event, context) => {
+        if (navigationId !== undefined) navigationLabel = context.sessionManager.getLabel(navigationId);
       });
       ohm.on("input", (event, context) => {
         appendFileSync(${JSON.stringify(extensionMarker)}, JSON.stringify({
@@ -741,6 +779,22 @@ await main(${JSON.stringify([
   assert.equal(refreshEventText.match(/event: text_delta/gu)?.length, 1);
   assert.match(await readFile(providerMarker, "utf8"), /reply after runtime refresh through direct extension/u);
   refreshEventText = "";
+  const navigationResults: JsonValue[] = [];
+  for (const id of ["served-tool~1", "served-tool~1~0"]) {
+    const navigated = await fetch(
+      `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/prompts`,
+      { method: "POST", headers, body: JSON.stringify({ text: `/serve-navigate ${id}` }), signal: AbortSignal.timeout(10_000) },
+    );
+    assert.equal(navigated.status, 202, await navigated.text());
+    await waitFor(async () => {
+      try { return (await readFile(navigationMarker, "utf8")).trim().split("\n").length > navigationResults.length; }
+      catch { return false; }
+    }, `serve navigation of ${id}`);
+    const records = (await readFile(navigationMarker, "utf8")).trim().split("\n");
+    const record: JsonValue = JSON.parse(records[navigationResults.length]!);
+    assert.deepEqual(record, { id, cancelled: false, label: id });
+    navigationResults.push(record);
+  }
   const removedView = await fetch(
     `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/prompts`,
     {

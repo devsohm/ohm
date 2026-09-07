@@ -75,6 +75,23 @@ function requestSignal(signal: AbortSignal | undefined, timeoutMs: number | unde
   return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
+async function notifyResponse(request: HttpStreamRequest, response: Response, attempt: number): Promise<void> {
+  if (!request.options?.onResponse || !request.model) return;
+  try {
+    await request.options.onResponse({
+      url: request.url,
+      status: response.status,
+      headers: Object.fromEntries([...response.headers].map(([name, value]) => [name.toLowerCase(), value])),
+      attempt,
+    }, request.model);
+  } catch (error) {
+    // The hook did not transfer body ownership. Start cleanup without letting a
+    // custom cancellation promise delay or replace the original hook failure.
+    void response.body?.cancel(error).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function fetchEventStream(request: HttpStreamRequest): Promise<HttpStreamResponse> {
   const options = request.options ?? {};
   const retries = boundedInteger("maxRetries", options.maxRetries, 2, MAX_RETRIES);
@@ -119,15 +136,12 @@ export async function fetchEventStream(request: HttpStreamRequest): Promise<Http
       await retryWait(backoff(attempt), options.signal);
       continue;
     }
-    const responseHeaders = Object.fromEntries([...response.headers].map(([name, value]) => [name.toLowerCase(), value]));
-    if (options.onResponse && request.model) {
-      await options.onResponse({ url: request.url, status: response.status, headers: responseHeaders, attempt }, request.model);
-    }
+    await notifyResponse(request, response, attempt);
     if (response.ok) {
       if (!response.body) throw new Error("Streaming response did not include a body");
       return { response, events: parseEventStream(response.body, signal) };
     }
-    const details = await boundedResponseText(response, MAX_ERROR_BYTES);
+    const details = await boundedResponseText(response, MAX_ERROR_BYTES, signal);
     if (attempt > retries || !retryStatus(response.status)) {
       throw new Error(`HTTP ${response.status}${details ? `: ${details}` : ""}`);
     }
@@ -172,18 +186,15 @@ export async function fetchJson(request: HttpStreamRequest): Promise<JsonValue> 
       await retryWait(backoff(attempt), options.signal);
       continue;
     }
-    const responseHeaders = Object.fromEntries([...response.headers].map(([name, value]) => [name.toLowerCase(), value]));
-    if (options.onResponse && request.model) {
-      await options.onResponse({ url: request.url, status: response.status, headers: responseHeaders, attempt }, request.model);
-    }
+    await notifyResponse(request, response, attempt);
     if (response.ok) {
-      const text = await boundedResponseText(response, MAX_EVENT_BYTES);
+      const text = await boundedResponseText(response, MAX_EVENT_BYTES, signal);
       try {
         const value: JsonValue = JSON.parse(text);
         return value;
       } catch (cause) { throw new Error(`Invalid JSON response: ${errorMessage(cause)}`); }
     }
-    const details = await boundedResponseText(response, MAX_ERROR_BYTES);
+    const details = await boundedResponseText(response, MAX_ERROR_BYTES, signal);
     if (attempt > retries || !retryStatus(response.status)) throw new Error(`HTTP ${response.status}${details ? `: ${details}` : ""}`);
     const requested = retryAfter(response.headers.get("retry-after"));
     const delay = requested ?? backoff(attempt);
@@ -222,20 +233,42 @@ function retryWait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function boundedResponseText(response: Response, limit: number): Promise<string> {
-  if (!response.body) return "";
+export async function boundedResponseText(response: Response, limit: number, signal?: AbortSignal): Promise<string> {
+  if (!response.body) {
+    signal?.throwIfAborted();
+    return "";
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > limit) {
-      await reader.cancel();
-      return boundedJsonSnapshot({ error: "Response body exceeded limit" }, limit);
+  let finished = false;
+  let cancelled = false;
+  const cancel = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    void reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    signal?.throwIfAborted();
+    while (true) {
+      const { value, done } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) {
+        finished = true;
+        break;
+      }
+      size += value.byteLength;
+      if (size > limit) {
+        if (response.ok) throw new Error(`Response body exceeded ${limit} bytes`);
+        return boundedJsonSnapshot({ error: "Response body exceeded limit" }, limit);
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    if (!finished) cancel();
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -323,7 +356,7 @@ export async function* parseEventStream(
     }
   } finally {
     signal?.removeEventListener("abort", abort);
-    if (!naturalEnd) await reader.cancel().catch(() => undefined);
+    if (!naturalEnd) void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

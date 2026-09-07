@@ -215,7 +215,7 @@ The default active built-ins are `read`, `bash`, `edit`, `write`, `grep`, `find`
 
 Return `{ decision: "allow_once" }` or `{ decision: "deny", reason? }`. A denial never dispatches the tool. Its optional reason is model-visible, so do not include secrets. A thrown or malformed decision fails closed with a generic authorization failure; host error details are not added to model context. Plugin `tool_result` reducers cannot replace a host denial or authorization failure with success.
 
-Approval transactions are serialized per session even when a model requests parallel tools. A queued cancellation settles without waiting for the active decision. An active cancellation revokes that callback's authority and releases the queue; a late decision is ignored. Handlers must still observe `context.signal` promptly so stale host UI or external approval work closes cleanly.
+Approval transactions are serialized per session even when a model requests parallel tools. A queued cancellation settles without waiting for the active decision. An active cancellation revokes that callback's authority and settles the caller's wait promptly, but retains the serial slot until the handler settles; a late decision is ignored. Handlers must still observe `context.signal` promptly so stale host UI or external approval work closes cleanly.
 
 The boundary applies only to provider/model-initiated tool calls, including a fresh decision for every recovered repeatable dispatch. It does not gate direct host calls such as `executeBash()`, user bash, or arbitrary raw Node.js work performed by a trusted in-process plugin. Plugin `tool_call` listeners may transform or block an invocation, but cannot approve it. Version 0.1.0 deliberately stores no approval ledger or invocation digest: an earlier allow decision is never replayed after interruption or restart.
 
@@ -567,7 +567,12 @@ Session data and navigation:
 The low-level session replacement methods update the provider-facing `session.agent.sessionId` when it still tracks
 the prior manager ID. A caller-owned affinity override remains unchanged.
 
-`AgentSession` also implements `Symbol.asyncDispose`. Prefer `await session.close()` or `await using` when cleanup failures must be observed.
+`navigateTree` accepts `options.signal`. Cancellation while the before-tree hook
+or branch summarization is pending prevents the branch commit. Cancellation does
+not roll back a branch already committed before a later notification completes;
+inspect the current leaf when resolving an interrupted navigation.
+
+`AgentSession` also implements `Symbol.asyncDispose`. Prefer `await session.close()` or `await using` when cleanup failures must be observed. If a discovered plugin requests shutdown during startup, `createAgentSession()` rejects after its cleanup instead of returning a closed session.
 
 Host-integration methods are `onEvent()` for sequence-bearing internal envelopes, `createReplacedSessionContext()`, `hasPluginHandlers()`, `bindPlugins()`, `updatePluginBindings()`, and `setPluginCommandActions()`. Application consumers normally use `subscribe()`. Ready-made mode hosts bind plugins with the correct host mode and owner-managed session replacement actions. With its default factory-owned resource loader, `createAgentSession()` has already called `bindPlugins({ mode: "sdk" })` before it returns. Binding that same session and generation in the same mode only updates callbacks; it does not replay startup. Changing host mode, or attaching after a host detached, requires an idle session and emits `session_shutdown` in the previous mode followed by `session_start` in the new mode, both with reason `refresh`. This refreshes session/UI facets without reloading plugin files or restarting worker facets. Concurrent binding attempts are rejected. `updatePluginBindings()` is for callback updates within the current host, not host-mode transitions.
 
@@ -703,7 +708,7 @@ For session replacement (`new`, resume, fork, clone), use `AgentSessionRuntime`.
 
 Its constructors accept either `(initialResult, factory, lifecycle?)` or the lower-level `(session, services, factory, diagnostics?, modelFallbackMessage?, pluginsResult?)`. The first form is preferred when lifecycle guards are needed.
 
-`createAgentSessionRuntime(factory, initialOptions, lifecycle?)` validates the initial workspace, calls the factory, and returns this owner. On new, fork, clone, switch, import, or recovery replacement, the factory input receives the active explicit `modelScope`; `undefined` means the replacement remains settings-owned. Built-in factories return both `pluginsResult` and `diagnostics` on every generation. Existing external factories may omit them; the runtime then uses an empty diagnostics list and leaves `pluginsResult` undefined. Lifecycle guards can cancel switch or fork before teardown; after teardown begins, a factory failure leaves the old session closed and is not a rollback.
+`createAgentSessionRuntime(factory, initialOptions, lifecycle?)` validates the initial workspace, calls the factory, and returns this owner. On new, fork, clone, switch, import, or recovery replacement, the factory input receives the active explicit `modelScope`; `undefined` means the replacement remains settings-owned. Built-in factories return both `pluginsResult` and `diagnostics` on every generation. Existing external factories may omit them; the runtime then uses an empty diagnostics list and leaves `pluginsResult` undefined. Lifecycle guards can cancel switch or fork before teardown. After teardown begins, a replacement failure closes the candidate and attempts to reconstruct the previous session and services through the factory; it cannot reopen the old objects or undo external effects. If recovery also fails, the owner closes. Factories may return sessions without plugins when no `withSession` callback is requested; that callback requires the replacement's plugin command context.
 
 The SDK subpath exports the supporting `AgentSessionRuntimeServices`, `AgentSessionRuntimeLifecycle`, and `SessionGuardResult` types. `importFromJsonl()` throws the exported `SessionImportFileNotFoundError` when its source path does not exist; its `filePath` property retains the resolved source supplied to the runtime.
 

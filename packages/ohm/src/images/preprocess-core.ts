@@ -211,6 +211,7 @@ async function encodeCandidates(
   hasAlpha: boolean,
   jpegQuality: number,
   limitInputPixels: number,
+  maxOutputBytes: number,
 ): Promise<EncodedCandidate[]> {
   const base = sharpFactory(input, { ...inputOptions, failOn: "warning", limitInputPixels, sequentialRead: true })
     .autoOrient()
@@ -218,12 +219,14 @@ async function encodeCandidates(
   const candidates: EncodedCandidate[] = [];
   const png = await base.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
   candidates.push({ bytes: png, mediaType: "image/png" });
+  if (png.byteLength <= maxOutputBytes) return candidates;
   if (!hasAlpha) {
     for (const quality of new Set([jpegQuality, 75, 60, 45])) {
       candidates.push({
         bytes: await base.clone().jpeg({ quality, mozjpeg: true }).toBuffer(),
         mediaType: "image/jpeg",
       });
+      if (candidates.at(-1)!.bytes.byteLength <= maxOutputBytes) return candidates;
     }
   }
   for (const quality of [85, 70, 55]) {
@@ -231,6 +234,7 @@ async function encodeCandidates(
       bytes: await base.clone().webp({ quality, alphaQuality: 90, effort: 4 }).toBuffer(),
       mediaType: "image/webp",
     });
+    if (candidates.at(-1)!.bytes.byteLength <= maxOutputBytes) return candidates;
   }
   return candidates;
 }
@@ -365,6 +369,7 @@ export async function preprocessImageInProcess(
       metadata.hasAlpha === true,
       selected.jpegQuality,
       selected.maxInputPixels,
+      selected.maxOutputBytes,
     );
     selectedCandidate = candidates.find((candidate) => candidate.bytes.byteLength <= selected.maxOutputBytes);
     if (selectedCandidate !== undefined) break;

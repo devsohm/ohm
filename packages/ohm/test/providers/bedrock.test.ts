@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { JsonObject, JsonValue } from "../../src/core/json.js";
@@ -62,6 +63,79 @@ function infiniteByteStream(cancelled: () => void): ReadableStream<Uint8Array> {
     cancel() { cancelled(); },
   }, { highWaterMark: 0 });
 }
+
+for (const operation of ["control", "signed stream", "SDK stream"] as const) {
+  test(`Bedrock ${operation} observer failure releases its unread response`, async () => {
+    const wire = new ProviderWireInterceptorRegistry();
+    const failure = new Error("Bedrock response observer failed");
+    let entered!: () => void;
+    const observing = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const cleanup = new Promise<void>((resolve) => { release = resolve; });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      cancel(reason) { assert.equal(reason, failure); cancellations += 1; return cleanup; },
+    });
+    wire.register("bedrock", { observeResponse() { entered(); throw failure; } });
+    const adapter = new BedrockAdapter({
+      region: "us-east-1",
+      credentials: { accessKeyId: "offline-access", secretAccessKey: "offline-secret" },
+      ...optionalProperties(operation === "SDK stream" ? undefined : { signer: (unsigned: Request) => unsigned }),
+      wire,
+      fetch: fakeFetch(() => new Response(body)),
+    });
+    let settled = false;
+    const signal = new AbortController().signal;
+    const pending = (operation === "control"
+      ? adapter.listModels(signal)
+      : collect(adapter.stream(request("bedrock"), signal)))
+      .then((value) => ({ value }), (error) => ({ error }))
+      .then((result) => { settled = true; return result; });
+    try {
+      await observing;
+      await nextTurn();
+      assert.equal(settled, true, "observer failure must not await source cancellation");
+      const result = await pending;
+      if (operation === "control") {
+        assert.ok("error" in result);
+        assert.equal(result.error, failure);
+      } else {
+        assert.ok("value" in result);
+        const end = result.value.at(-1);
+        assert.ok(end !== undefined && "type" in end && end.type === "error");
+        assert.match(end.error.message, /Bedrock response observer failed/u);
+      }
+      assert.equal(cancellations, 1);
+      assert.equal(body.locked, false);
+    } finally {
+      release();
+      await pending;
+      await body.cancel(failure).catch(() => undefined);
+    }
+  });
+}
+
+test("AWS event-stream return releases its reader before custom cancellation settles", async () => {
+  let release!: () => void;
+  const cleanup = new Promise<void>((resolve) => { release = resolve; });
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(awsFrame({ ":message-type": "event", ":event-type": "messageStart" }, { role: "assistant" }));
+    },
+    cancel() { cancellations += 1; return cleanup; },
+  });
+  const iterator = decodeAwsEventStream(body);
+  assert.equal((await iterator.next()).value?.headers[":event-type"], "messageStart");
+  let settled = false;
+  const returning = iterator.return().then(() => { settled = true; });
+  try {
+    await nextTurn();
+    assert.equal(settled, true, "decoder return must not await source cancellation");
+    assert.equal(cancellations, 1);
+    assert.equal(body.locked, false);
+  } finally { release(); await returning; }
+});
 
 test("AWS event-stream decoder validates and reconstructs arbitrarily split frames", async () => {
   const bytes = concat(

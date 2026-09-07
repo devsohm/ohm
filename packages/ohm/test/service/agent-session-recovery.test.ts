@@ -48,6 +48,7 @@ import {
 } from "../../src/tools/coordinator.js";
 import type {
   HarnessTool,
+  ToolRecoveryResult,
   ToolResult,
 } from "../../src/tools/types.js";
 
@@ -1256,6 +1257,80 @@ test("automatic reconciliation claims once, rejects invalid results, and settles
   });
   assert.equal(recoverCalls, 2, "a claimed reconciliation must never be invoked again");
 });
+
+for (const cooperative of [false, true]) {
+  for (const cancellation of ["caller", "abort", "close"] as const) {
+    test(`reconciliation ${cancellation} cancels ${cooperative ? "cooperative" : "uncooperative"} callbacks without late settlement`, async (t) => {
+      let markEntered!: () => void;
+      let releaseRecovery!: (result: ToolRecoveryResult) => void;
+      const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+      const released = new Promise<ToolRecoveryResult>((resolve) => { releaseRecovery = resolve; });
+      const controller = new AbortController();
+      let callbackSignal: AbortSignal | undefined;
+      let calls = 0;
+      const tool = reconcileRecoveryTool("cancellable_recovery", async (_effect, context) => {
+        calls += 1;
+        callbackSignal = context.signal;
+        markEntered();
+        if (!cooperative) return await released;
+        return await new Promise<ToolRecoveryResult>((resolve, reject) => {
+          const abort = (): void => reject(context.signal.reason);
+          context.signal.addEventListener("abort", abort, { once: true });
+          released.then(resolve, reject).finally(() => context.signal.removeEventListener("abort", abort));
+          if (context.signal.aborted) abort();
+        });
+      });
+      const selected = selection([tool]);
+      const manager = await managerFixture(t, `cancel-reconciliation-${cancellation}-${cooperative}`);
+      const accepted = acceptRun(manager, selected);
+      materializePrompt(manager, accepted.operationId, accepted.promptNodeId);
+      const assistantNodeId = beginToolStep(manager, accepted.operationId, selected);
+      prepareEffect(manager, {
+        operationId: accepted.operationId, assistantNodeId, selected,
+        effectId: "cancel-effect", callId: "cancel-call", toolName: tool.definition.name,
+        policy: "reconcile", input: { value: "uncertain" }, resultNodeId: "cancel-result", index: 0,
+      });
+      dispatchEffect(manager, "cancel-effect");
+      const session = await openSession(manager, [tool]);
+      let timer: NodeJS.Timeout | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Recovery cancellation did not release admission")), 2_000);
+      });
+      const recovering = session.recoverInterruptedRun({ signal: controller.signal });
+      const rejected = assert.rejects(recovering, /cancel recovery|AgentSession closed/u);
+      let cancelling: Promise<void> | undefined;
+      try {
+        await Promise.race([entered, deadline]);
+        if (cancellation === "caller") controller.abort(new Error("cancel recovery"));
+        else if (cancellation === "abort") cancelling = session.abort("cancel recovery");
+        else cancelling = session.close();
+        await Promise.race([Promise.all([rejected, cancelling]), deadline]);
+        assert.equal(callbackSignal?.aborted, true);
+        assert.equal(manager.getV4ToolEffect("cancel-effect")?.status, "recovery_started");
+        if (cancellation !== "close") {
+          const blocked = await session.recoverInterruptedRun();
+          assert.equal(blocked.recovered, false);
+          assert.equal(blocked.blocked[0]?.effectId, "cancel-effect");
+          await assert.rejects(session.prompt("must not repeat uncertain effects"), /Call recoverInterruptedRun/u);
+          assert.equal((await session.recoverInterruptedRun({
+            resolutions: [{ effectId: "cancel-effect", outcome: "abandoned" }],
+          })).recovered, true);
+        }
+        const beforeLateSettlement = manager.getV4State();
+        releaseRecovery({ status: "completed", result: { content: "late result must not commit", isError: false } });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(manager.getV4State(), beforeLateSettlement);
+        assert.equal(calls, 1, "a cancelled reconciliation claim must not run again");
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        releaseRecovery({ status: "in_doubt", reason: "fixture cleanup" });
+        await recovering.catch(() => undefined);
+        await cancelling;
+        await session.close();
+      }
+    });
+  }
+}
 
 test("automatic reconciliation rejects malformed reasons and bounds redacted diagnostics", async (t) => {
   const secret = "automatic-reconcile-secret-value";

@@ -24,6 +24,8 @@ Every protocol record is one UTF-8 JSON object. Output records end with LF.
 - Standard output is protocol-only. Human diagnostics use standard error.
 - Commands can overlap and events can interleave. Match responses with the optional string `id`.
 - Raw agent events do not carry the command ID. `bash_execution_update` is the exception.
+- Plugin UI responses are processed during startup; ordinary commands wait until startup completes.
+- End of input cancels pending plugin dialogs and prevents new ones. Accepted command handlers drain before shutdown; see [Shutdown](#shutdown) for prompt completion and bounded output-drain behavior.
 
 A successful response is:
 
@@ -78,7 +80,7 @@ Construction options are:
 
 The public state is `started` and `pendingRequestCount`. `started` is true while the owned child is starting, running, or stopping, and false after it exits. Starting again after an exit first finishes bounded cleanup of the previous process tree. Lifecycle and observation methods are `start()`, `stop()`, `onEvent(listener)`, `respondToPluginUi(response)`, and `getStderr()`. Every protocol command has a camel-case method, including `listPortablePresentations`, `invokePortablePresentationAction`, `listPluginWireServices`, and `invokePluginWireService`; the existing prompt, queue, model, session, shell, history, and recovery methods retain their current contracts.
 
-`onEvent()` receives the exact `RpcStreamEvent` union: `AgentSessionEvent`, `RpcBashExecutionUpdate`, `RpcPluginUiRequest`, `RpcPluginErrorEvent`, or `PortablePresentationEvent`.
+`onEvent()` receives the exact `RpcStreamEvent` union: `SessionWireEvent`, `RpcBashExecutionUpdate`, `RpcPluginUiRequest`, `RpcPluginErrorEvent`, or `PortablePresentationEvent`.
 
 The event helpers are `waitForIdle(timeout?)`, `collectEvents(timeout?)`, and `promptAndWait(message, images?, timeout?)`. `promptAndWait()` subscribes before sending the prompt, so it cannot miss a fast completion. All three settle on the raw `agent_settled` event, after terminal cleanup and queued work have finished; their default timeout is 60 seconds. At most 256 event waiters may be active. A collection retains at most 4,096 records or 32 MiB of wire records; use `onEvent()` to consume a larger stream incrementally.
 
@@ -194,6 +196,9 @@ Optional `contextUsage` includes `source: "provider" | "estimated"` and
 Estimated values include projected transcript or tool-definition changes; the
 threshold is the active automatic-compaction trigger.
 
+Session selections use public projected entry IDs. Pass `get_fork_messages`
+selection IDs unchanged to `fork`; do not derive journal IDs from their spelling.
+
 Without paging fields, `get_entries`, `get_tree`, and `get_messages` return the complete compatible response when it fits the RPC line budget. If it does not fit, the server asks the caller to request bounded pages instead of silently truncating history. A supplied `limit` must be from 1 through 2048. For `get_entries`, use either the stable exclusive entry ID in `since` or the prior page's `nextSequence` in `afterSequence`; supplying both is an error. The response also includes `sequenceStart`, `nextSequence`, `hasMore`, and `totalEntries`. `RpcClient.getEntries(since?)` follows pages and returns `{ entries, leafId }`. Use `getEntriesPage()` when the caller owns pagination.
 
 `get_tree` and `get_messages` use the same default and maximum page sizes. Start without `cursor`, then pass `nextCursor` until `hasMore` is false. A cursor is valid only for the unchanged session, selected leaf, and entry snapshot that created it. The server rejects malformed, stale, cross-command, and out-of-range cursors. The client also rejects missing or repeated continuations. `get_tree.tree` contains append-order fragments whose `children` include only nodes present in that page; use each entry's `parentId` to assemble the complete tree. The typed `RpcClient.getTree()` validates duplicate IDs, missing parents, cycles, totals, and the leaf while assembling pages. `getTree()` and `getMessages()` retain at most 32,768 items or 32 MiB of wire records, as does `getEntries()`. `getEntriesPage()`, `getTreePage()`, and `getMessagesPage()` are the bounded escape hatches for larger histories.
@@ -284,13 +289,19 @@ thinking and argument deltas by content index; `toolcall_start` includes the cal
 a wire-format change: consumers reading `message_update.message` must migrate
 to deltas or final messages. In-process SDK subscriptions retain their snapshots.
 
+Print/JSON hosts share serialized output with a pending budget of 1,024 records
+and 16 MiB. A failed writer or exceeded backlog cancels the run and fails the
+host; it does not silently discard progress. Custom SDK output writers must
+settle their returned promises, which provide backpressure during output and
+shutdown.
+
 `cycle_model` accepts optional `direction`, `persist`, and `models` preferences,
 for example `models: [{ selector: "provider/model", thinkingLevel: "high" }]`.
 Preferences never bypass the session's model allowlist or configured credentials.
 Model cycling is session-only unless `persist: true`; `cycle_thinking_level`
 preserves its historical persistence default and accepts `persist: false`.
 
-Tool arguments are emitted only on `tool_execution_start`; correlate later updates and completion by `toolCallId`.
+Within `tool_execution_*` events, arguments are emitted only on `tool_execution_start`; correlate later updates and completion by `toolCallId`.
 
 A prompt success response confirms preflight acceptance, not completion. `agent_end` closes one agent run but can be followed by retry or queued work. `agent_settled` is the authoritative idle boundary after cleanup, compaction, retry, and queued follow-up handling.
 
@@ -362,5 +373,13 @@ unavailable. The RPC context uses a non-color mono theme, reports no alternate
 themes, and rejects theme switching.
 
 ## Shutdown
+
+Closing input settles pending plugin dialogs as cancellation and refuses new
+dialogs. The host then drains accepted command handlers before closing the
+session; a prompt acknowledgement is still not a run-completion guarantee.
+On clean EOF, admitted plugin UI output drains for up to five seconds before
+the bridge closes. Forced shutdown may discard queued presentation output.
+During startup, ordinary and priority commands wait for
+initialization; plugin UI responses and input closure can be handled immediately.
 
 Closing standard input shuts down the owned session and its runtime generation. `RpcClient.stop()` is idempotent and terminates the owned process tree through the shared platform lifecycle helper. POSIX uses a detached process group and bounded `SIGTERM`/`SIGKILL` escalation. Windows uses bounded `taskkill /T /F` while the root PID is live and never targets that PID after its exit. The supported Node.js runtime relays file descriptor 0 through a bounded child process to avoid an inherited-stdin regression; this does not change protocol records.

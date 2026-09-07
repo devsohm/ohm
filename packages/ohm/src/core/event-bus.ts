@@ -20,7 +20,7 @@ export function createEventBus(): EventBusController {
       topics.set(topic, handlers);
       return () => {
         handlers.delete(handler);
-        if (handlers.size === 0) topics.delete(topic);
+        if (handlers.size === 0 && topics.get(topic) === handlers) topics.delete(topic);
       };
     },
     emit(topic, value) {

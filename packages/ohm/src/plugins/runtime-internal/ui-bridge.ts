@@ -51,7 +51,7 @@ export function assertAdvancedUiOperationCapacity(
     && retainsAdvancedState(operation)
     && operations.length >= MAX_RETAINED_RUNTIME_UI_OPERATIONS
   ) {
-    throw new Error(`Runtime extension initial advanced UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
+    throw new Error(`Runtime plugin initial advanced UI exceeds ${MAX_RETAINED_RUNTIME_UI_OPERATIONS} operations`);
   }
 }
 

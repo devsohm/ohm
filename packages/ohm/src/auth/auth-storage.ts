@@ -69,6 +69,7 @@ export class AuthStorage implements MutableCredentialStore {
   readonly #lock: CrossProcessFileLock | undefined;
   readonly #lockContext = new AsyncLocalStorage<boolean>();
   #memory: AuthStorageData;
+  #memoryTail: Promise<void> = Promise.resolve();
 
   private constructor(path: string | undefined, initial: AuthStorageData = {}) {
     this.#path = path;
@@ -148,8 +149,14 @@ export class AuthStorage implements MutableCredentialStore {
   async withLock<T>(id: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     assertCredentialId(id);
     signal?.throwIfAborted();
-    if (this.#lock === undefined || this.#lockContext.getStore() === true) return await operation();
-    return await this.#lock.run(() => this.#lockContext.run(true, operation), signal);
+    if (this.#lockContext.getStore() === true) return await operation();
+    if (this.#lock !== undefined) return await this.#lock.run(() => this.#lockContext.run(true, operation), signal);
+    const pending = this.#memoryTail.then(() => {
+      signal?.throwIfAborted();
+      return this.#lockContext.run(true, operation);
+    });
+    this.#memoryTail = pending.then(() => undefined, () => undefined);
+    return await pending;
   }
 
   async #readAll(): Promise<AuthStorageData> {

@@ -66,7 +66,7 @@ export async function expandPromptReferences(
         local = file.relativePath;
       } else {
         path = await boundary.readable(reference.path);
-        local = boundary.relative(reference.path);
+        local = boundary.relative(path);
       }
     } catch (error) {
       if (!reference.explicit && Error.isError(error) && "code" in error && error.code === "ENOENT") continue;

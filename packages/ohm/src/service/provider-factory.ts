@@ -234,14 +234,15 @@ function googleTokenSources(
 
 function azureTokenSource(
   broker: CredentialBroker,
+  provider: string,
   fetchImplementation?: FetchLike,
 ): (signal?: AbortSignal) => Promise<string | undefined> {
   let cached: NonNullable<Awaited<ReturnType<typeof resolveAzureDefaultCredential>>> | undefined;
   return async (signal) => {
-    const explicit = await optionalCredential(broker, "azure-openai", signal);
+    const explicit = await optionalCredential(broker, provider, signal);
     if (explicit?.kind === "api_key") return undefined;
     if (explicit !== undefined) {
-      if (explicit.expiresAt !== undefined && explicit.expiresAt <= Date.now()) throw new Error("azure-openai bearer credential is expired");
+      if (explicit.expiresAt !== undefined && explicit.expiresAt <= Date.now()) throw new Error(`${provider} bearer credential is expired`);
       return explicit.accessToken;
     }
     if (cached !== undefined && cached.expiresAt > Date.now() + 60_000) return cached.accessToken;
@@ -521,7 +522,7 @@ export function createProviderAdapter(
       return new AzureOpenAIResponsesAdapter({
         endpoint: config.endpoint,
         apiKey: optionalApiKeySource(broker, credentialProvider),
-        accessToken: azureTokenSource(broker, options.fetch),
+        accessToken: azureTokenSource(broker, credentialProvider, options.fetch),
         ...optionalProperties(config.store === undefined ? undefined : { store: config.store }),
         ...transport,
       });

@@ -1240,163 +1240,103 @@ test("a near-budget Ctrl+O expansion preserves the collapsed render working set"
   assert.equal(detailReads, revisitedReads, "scrolling back to warmed history rerendered source detail");
 });
 
-test("tool-tail expansion retains unrelated history and both completed variants", async () => {
-  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
-  let historyReads = 0;
-  let toolReads = 0;
-  const history = Array.from({ length: 64 }, (_, index): TuiViewState["transcript"][number] => {
-    const entry: TuiViewState["transcript"][number] = {
-      id: `unrelated-global-tool-${index}`,
-      kind: "status",
-      text: "",
-    };
-    Object.defineProperty(entry, "text", {
-      enumerable: false,
-      get() {
-        historyReads += 1;
-        return `unrelated retained history ${index}`;
-      },
+for (const scenario of [
+  {
+    name: "tool-tail expansion retains unrelated history and both completed variants",
+    position: "tail",
+    historyId: "unrelated-global-tool",
+    historyText: "unrelated retained history",
+    historyDescription: "unrelated history",
+    toolId: "unrelated-global-tool-tail",
+  },
+  {
+    name: "tool-prefix expansion retains the stable suffix and both completed variants",
+    position: "prefix",
+    historyId: "tool-prefix-history",
+    historyText: "stable suffix history",
+    historyDescription: "the stable suffix",
+    toolId: "tool-prefix",
+  },
+]) {
+  test(scenario.name, async () => {
+    const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+    let historyReads = 0;
+    let toolReads = 0;
+    const history = Array.from({ length: 64 }, (_, index): TuiViewState["transcript"][number] => {
+      const entry: TuiViewState["transcript"][number] = {
+        id: `${scenario.historyId}-${index}`,
+        kind: "status",
+        text: "",
+      };
+      Object.defineProperty(entry, "text", {
+        enumerable: false,
+        get() {
+          historyReads += 1;
+          return `${scenario.historyText} ${index}`;
+        },
+      });
+      return entry;
     });
-    return entry;
-  });
-  const tail = (expanded: boolean): TuiViewState["transcript"][number] => {
-    const entry: TuiViewState["transcript"][number] = {
-      id: "unrelated-global-tool-tail",
-      callId: "unrelated-global-tool-tail",
-      kind: "tool",
-      title: "read",
-      status: "completed",
-      expanded,
-      text: "",
+    const transcript = (expanded: boolean): TuiViewState["transcript"] => {
+      const entry: TuiViewState["transcript"][number] = {
+        id: scenario.toolId,
+        callId: scenario.toolId,
+        kind: "tool",
+        title: "read",
+        status: "completed",
+        expanded,
+        text: "",
+      };
+      Object.defineProperty(entry, "text", {
+        enumerable: false,
+        get() {
+          toolReads += 1;
+          return Array.from({ length: 20 }, (_, index) => `tool-${scenario.position}-detail-${index + 1}`).join("\n");
+        },
+      });
+      return scenario.position === "tail" ? [...history, entry] : [entry, ...history];
     };
-    Object.defineProperty(entry, "text", {
-      enumerable: false,
-      get() {
-        toolReads += 1;
-        return Array.from({ length: 20 }, (_, index) => `tool-tail-detail-${index + 1}`).join("\n");
-      },
+    const collapsed = request({ ...baseView(), transcript: transcript(false) }, {
+      size: { columns: 60, rows: 80 },
+      transcriptRevision: 1,
+      toolDetailsExpanded: false,
     });
-    return entry;
-  };
-  const collapsed = request({ ...baseView(), transcript: [...history, tail(false)] }, {
-    size: { columns: 60, rows: 80 },
-    transcriptRevision: 1,
-    toolDetailsExpanded: false,
-  });
-  const projector = internalCreateRichTuiFrameProjector();
+    const projector = internalCreateRichTuiFrameProjector();
 
-  projector(collapsed);
-  const initialReads = historyReads;
-  const collapsedToolReads = toolReads;
-  assert.ok(initialReads > 0);
-  assert.ok(collapsedToolReads > 0);
+    projector(collapsed);
+    const initialReads = historyReads;
+    const collapsedToolReads = toolReads;
+    assert.ok(initialReads > 0);
+    assert.ok(collapsedToolReads > 0);
 
-  const expanded = {
-    ...collapsed,
-    transcriptRevision: 2,
-    toolDetailsExpanded: true,
-    view: { ...collapsed.view, transcript: [...history, tail(true)] },
-  };
-  projector(expanded);
-  const expandedToolReads = toolReads;
-  assert.ok(expandedToolReads > collapsedToolReads);
-  assert.equal(historyReads, initialReads, "expanding the tool tail re-rendered unrelated history");
-
-  projector({
-    ...collapsed,
-    transcriptRevision: 3,
-    view: { ...collapsed.view, transcript: [...history, tail(false)] },
-  });
-  assert.equal(historyReads, initialReads, "collapsing the tool tail re-rendered unrelated history");
-  assert.equal(toolReads, expandedToolReads, "collapsing missed the completed tool variant cache");
-
-  projector({
-    ...expanded,
-    transcriptRevision: 4,
-    view: { ...expanded.view, transcript: [...history, tail(true)] },
-  });
-  assert.equal(historyReads, initialReads, "re-expanding the tool tail re-rendered unrelated history");
-  assert.equal(toolReads, expandedToolReads, "re-expanding missed the completed tool variant cache");
-});
-
-test("tool-prefix expansion retains the stable suffix and both completed variants", async () => {
-  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
-  let historyReads = 0;
-  let toolReads = 0;
-  const history = Array.from({ length: 64 }, (_, index): TuiViewState["transcript"][number] => {
-    const entry: TuiViewState["transcript"][number] = {
-      id: `tool-prefix-history-${index}`,
-      kind: "status",
-      text: "",
+    const expanded = {
+      ...collapsed,
+      transcriptRevision: 2,
+      toolDetailsExpanded: true,
+      view: { ...collapsed.view, transcript: transcript(true) },
     };
-    Object.defineProperty(entry, "text", {
-      enumerable: false,
-      get() {
-        historyReads += 1;
-        return `stable suffix history ${index}`;
-      },
+    projector(expanded);
+    const expandedToolReads = toolReads;
+    assert.ok(expandedToolReads > collapsedToolReads);
+    assert.equal(historyReads, initialReads, `expanding the tool ${scenario.position} re-rendered ${scenario.historyDescription}`);
+
+    projector({
+      ...collapsed,
+      transcriptRevision: 3,
+      view: { ...collapsed.view, transcript: transcript(false) },
     });
-    return entry;
-  });
-  const tool = (expanded: boolean): TuiViewState["transcript"][number] => {
-    const entry: TuiViewState["transcript"][number] = {
-      id: "tool-prefix",
-      callId: "tool-prefix",
-      kind: "tool",
-      title: "read",
-      status: "completed",
-      expanded,
-      text: "",
-    };
-    Object.defineProperty(entry, "text", {
-      enumerable: false,
-      get() {
-        toolReads += 1;
-        return Array.from({ length: 20 }, (_, index) => `tool-prefix-detail-${index + 1}`).join("\n");
-      },
+    assert.equal(historyReads, initialReads, `collapsing the tool ${scenario.position} re-rendered ${scenario.historyDescription}`);
+    assert.equal(toolReads, expandedToolReads, "collapsing missed the completed tool variant cache");
+
+    projector({
+      ...expanded,
+      transcriptRevision: 4,
+      view: { ...expanded.view, transcript: transcript(true) },
     });
-    return entry;
-  };
-  const collapsed = request({ ...baseView(), transcript: [tool(false), ...history] }, {
-    size: { columns: 60, rows: 80 },
-    transcriptRevision: 1,
-    toolDetailsExpanded: false,
+    assert.equal(historyReads, initialReads, `re-expanding the tool ${scenario.position} re-rendered ${scenario.historyDescription}`);
+    assert.equal(toolReads, expandedToolReads, "re-expanding missed the completed tool variant cache");
   });
-  const projector = internalCreateRichTuiFrameProjector();
-
-  projector(collapsed);
-  const initialReads = historyReads;
-  const collapsedToolReads = toolReads;
-  assert.ok(initialReads > 0);
-  assert.ok(collapsedToolReads > 0);
-
-  const expanded = {
-    ...collapsed,
-    transcriptRevision: 2,
-    toolDetailsExpanded: true,
-    view: { ...collapsed.view, transcript: [tool(true), ...history] },
-  };
-  projector(expanded);
-  const expandedToolReads = toolReads;
-  assert.ok(expandedToolReads > collapsedToolReads);
-  assert.equal(historyReads, initialReads, "expanding the tool prefix re-rendered the stable suffix");
-
-  projector({
-    ...collapsed,
-    transcriptRevision: 3,
-    view: { ...collapsed.view, transcript: [tool(false), ...history] },
-  });
-  assert.equal(historyReads, initialReads, "collapsing the tool prefix re-rendered the stable suffix");
-  assert.equal(toolReads, expandedToolReads, "collapsing missed the completed tool variant cache");
-
-  projector({
-    ...expanded,
-    transcriptRevision: 4,
-    view: { ...expanded.view, transcript: [tool(true), ...history] },
-  });
-  assert.equal(historyReads, initialReads, "re-expanding the tool prefix re-rendered the stable suffix");
-  assert.equal(toolReads, expandedToolReads, "re-expanding missed the completed tool variant cache");
-});
+}
 
 test("retained Markdown transforms sample once per relevant chunk and replay the sampled output", async () => {
   const { internalCreateRichTuiFrameProjector } = await richFrameProjector();

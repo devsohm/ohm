@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -127,6 +127,48 @@ test("SDK activates every built-in tool by default", async () => {
     "ls",
   ]);
   await created.session.close();
+});
+
+test("SDK construction rejects a shutdown requested during default plugin startup", { timeout: 10_000 }, async (context) => {
+  const { cwd, agentDir } = await workspace();
+  const { model, runtime, modelRuntime: owner } = await modelRuntime();
+  const manager = SessionManager.inMemory(cwd);
+  const closeManager = context.mock.method(manager, "closeV4Store");
+  const closeOwner = context.mock.method(owner, "close");
+  const pluginDir = join(agentDir, "plugins");
+  const marker = join(cwd, "startup-requested.txt");
+  await mkdir(pluginDir, { recursive: true });
+  await writeFile(join(pluginDir, "startup-shutdown.mjs"), `
+    import { writeFileSync } from "node:fs";
+    export default (api) => {
+      api.on("session_start", (_event, context) => {
+        writeFileSync(${JSON.stringify(marker)}, "requested");
+        context.shutdown();
+      });
+    };
+  `);
+  let session: AgentSession | undefined;
+  context.after(async () => {
+    try { await session?.close(); }
+    finally { await owner.close(); }
+  });
+  let failure: unknown;
+  try {
+    const created = await createAgentSession({
+      cwd,
+      agentDir,
+      modelRuntime: runtime,
+      model,
+      sessionManager: manager,
+      settingsManager: SettingsManager.inMemory(),
+    });
+    session = created.session;
+  } catch (error) { failure = error; }
+  assert.equal(await readFile(marker, "utf8"), "requested");
+  assert.ok(failure instanceof Error, "SDK returned a session after the startup plugin requested shutdown");
+  assert.match(failure.message, /AgentSession closed/u);
+  assert.equal(closeManager.mock.callCount(), 1);
+  assert.equal(closeOwner.mock.callCount(), 0);
 });
 
 for (const registration of ["sdk", "plugin"] as const) {
@@ -271,7 +313,7 @@ test("SDK default sessions use the CLI-discoverable workspace directory", async 
   await created.session.close();
 });
 
-test("SDK reopens suspended never-repeat work for explicit recovery before applying requested selection", async () => {
+test("SDK reopens suspended never-repeat work for explicit recovery before applying requested selection", async (t) => {
   const { cwd, agentDir } = await workspace();
   let executions = 0;
   let markStarted!: () => void;
@@ -440,6 +482,8 @@ test("SDK reopens suspended never-repeat work for explicit recovery before apply
       );
     }
   });
+  const recoveryEntries = t.mock.method(reopened.session.nativeSessionManager, "getEntries");
+  const recoveryPages = t.mock.method(reopened.session.nativeSessionManager, "getEntriesPage");
   await assert.rejects(
     reopened.session.recoverInterruptedRun({
       resolutions: [{ effectId, outcome: "abandoned" }],
@@ -450,6 +494,10 @@ test("SDK reopens suspended never-repeat work for explicit recovery before apply
       return true;
     },
   );
+  assert.equal(recoveryEntries.mock.callCount(), 0, "deferred selection must not hydrate the transcript");
+  assert.equal(recoveryPages.mock.callCount(), 0, "deferred selection must not build the cold history index");
+  recoveryEntries.mock.restore();
+  recoveryPages.mock.restore();
   assert.equal(reopened.session.suspendedRun, undefined);
   assert.equal(reopened.session.thinkingLevel, "medium");
   assert.equal(resumedRuntime.adapter.capturedRequests().length, 0);

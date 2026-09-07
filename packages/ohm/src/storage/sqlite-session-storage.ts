@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, unlinkSync, type BigIntStats } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, toNamespacedPath } from "node:path";
 import type { DatabaseSync as SqliteDatabase } from "node:sqlite";
 import { Value } from "typebox/value";
 import { parseSessionV4Header, SESSION_V4_MAX_RECORD_BYTES, type SessionV4Commit, type SessionV4Header, type SessionV4Json } from "@ohm/kernel/session-v4";
@@ -28,7 +28,7 @@ function matchesCreatedFile(path: string, expected: FileIdentity): boolean {
 function openDatabase(path: string, readOnly: boolean): SqliteDatabase {
   // SAFETY: this fixed built-in specifier is described by the installed Node types.
   const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-  return new DatabaseSync(path, { readOnly, timeout: 5000 });
+  return new DatabaseSync(toNamespacedPath(path), { readOnly, timeout: 5000 });
 }
 
 function validateDatabase(db: SqliteDatabase): void {
@@ -36,6 +36,16 @@ function validateDatabase(db: SqliteDatabase): void {
     || db.prepare("PRAGMA user_version").get()?.user_version !== 1) {
     throw new Error("Not a supported SQLite session database");
   }
+}
+
+function syncDirectory(path: string): void {
+  if (process.platform === "win32") return;
+  const directory = openSync(path, constants.O_RDONLY);
+  try { fsyncSync(directory); }
+  catch (error) {
+    if (!(error instanceof Error && "code" in error
+      && ["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(String(error.code)))) throw error;
+  } finally { closeSync(directory); }
 }
 
 /** @internal Flush the live WAL before moving only the main database file. */
@@ -99,30 +109,27 @@ export class SqliteSessionStorageBackend {
     const identity = lstatSync(source);
     const lease = acquireSessionWriterLeaseSync(target);
     let linked = false;
-    let opened: SessionStorage | undefined;
+    let sourceRemoved = false;
     try {
       linkSync(source, target);
       linked = true;
-      lease.bindToFile();
-      if (process.platform !== "win32") {
-        const directory = openSync(this.#directory, constants.O_RDONLY);
-        try { fsyncSync(directory); }
-        catch (error) {
-          if (!(error instanceof Error && "code" in error
-            && ["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes(String(error.code)))) throw error;
-        } finally { closeSync(directory); }
-      }
-      opened = this.#handle(target, false, lease, undefined, false);
+      syncDirectory(this.#directory);
       unlinkSync(source);
-      const storage = opened;
-      return { ...storage, close() { try { storage.close(); } finally { lease.release(); } } };
+      sourceRemoved = true;
+      syncDirectory(this.#directory);
+      lease.bindToFile();
+      return this.#handle(target, false, lease);
     } catch (error) {
       const failures = [error];
-      try { opened?.close(); } catch (cleanup) { failures.push(cleanup); }
       try {
         if (linked) {
           const current = lstatSync(target);
-          if (current.dev === identity.dev && current.ino === identity.ino) unlinkSync(target);
+          if (current.dev === identity.dev && current.ino === identity.ino) {
+            // Restore the staged name before removing our only published copy.
+            // A failed restore leaves the target available for recovery.
+            if (sourceRemoved) linkSync(target, source);
+            unlinkSync(target);
+          }
         }
       } catch (cleanup) { failures.push(cleanup); }
       lease.release();
@@ -158,11 +165,13 @@ export class SqliteSessionStorageBackend {
     const path = isAbsolute(location) ? resolve(location) : join(this.#directory, `${encodeURIComponent(location)}.sqlite`);
     if (dirname(path) !== this.#directory && dirname(path) !== realpathSync(this.#directory)) throw new Error("SQLite session must stay in its backend directory");
     const canonical = realpathSync(path);
-    if (!lstatSync(canonical).isFile()) throw new Error("SQLite session must be a regular file");
+    const details = lstatSync(canonical);
+    if (!details.isFile()) throw new Error("SQLite session must be a regular file");
+    if (details.nlink > 1) throw new Error("SQLite session has multiple hard links; use a copy or export instead");
     return canonical;
   }
 
-  #handle(path: string, readOnly: boolean, lease?: SessionWriterLease, header?: SessionV4Header, releaseLease = true): SqliteSessionStorage {
+  #handle(path: string, readOnly: boolean, lease?: SessionWriterLease, header?: SessionV4Header): SqliteSessionStorage {
     const db = openDatabase(path, readOnly);
     try {
       if (header !== undefined) {
@@ -252,7 +261,7 @@ export class SqliteSessionStorageBackend {
           closed = true;
           records?.close();
           try { db.close(); }
-          finally { if (releaseLease) lease?.release(); }
+          finally { lease?.release(); }
         },
       };
     } catch (error) { db.close(); throw error; }

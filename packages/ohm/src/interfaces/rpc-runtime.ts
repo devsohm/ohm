@@ -15,6 +15,7 @@ import type { PluginRunner } from "../plugins/compat-runtime.js";
 import { validatePluginWireServiceRequest } from "../plugins/wire-services.js";
 import {
   canonicalSessionEntryId,
+  publicSessionEntryId,
   type SessionEntry as PublicSessionEntry,
   type SessionTreeNode as PublicSessionTreeNode,
 } from "../plugins/session-contract.js";
@@ -947,7 +948,12 @@ export class RpcRuntimeDispatcher {
           return success(id, "clone", { cancelled: result.cancelled });
         }
         case "get_fork_messages":
-          return success(id, "get_fork_messages", { messages: this.#runtime.session.getUserMessagesForForking() });
+          return success(id, "get_fork_messages", {
+            messages: this.#runtime.session.getUserMessagesForForking().map((message) => ({
+              ...message,
+              entryId: publicSessionEntryId(this.#runtime.session.nativeSessionManager, message.entryId) ?? message.entryId,
+            })),
+          });
         case "get_entries": {
           const selected = Value.Parse(GET_ENTRIES_COMMAND_VALUE, command);
           const publicManager = publicSessionManager(this.#runtime.session);

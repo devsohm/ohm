@@ -68,6 +68,7 @@ interface RegisteredFacet {
   readonly definition: PluginFacetDefinition;
   readonly listeners: readonly (() => void)[];
   activation?: FacetActivation;
+  setupAbort?: AbortController;
   disposed: boolean;
   tail: Promise<void>;
 }
@@ -401,18 +402,21 @@ export class PluginFacetCoordinator implements PluginFacetService {
     const context: PluginFacetContext = session === undefined
       ? Object.freeze({ ...contextBase, mode: "worker" })
       : Object.freeze({ ...contextBase, mode: session.mode, session });
+    registration.setupAbort = abort;
     const setup = Promise.resolve().then(() => definition.setup(context));
+    let setupCompleted = false;
     try {
-      const cleanup = await withAbort(setup, setupSignal);
-      signal.throwIfAborted();
+      const cleanup = await withAbort(setup, signal);
+      setupCompleted = true;
       if (cleanup !== undefined) {
         if (!Value.Check(FUNCTION_VALUE, cleanup)) throw new TypeError("Plugin facet setup must return a cleanup function");
         cleanups.push(cleanup);
       }
+      signal.throwIfAborted();
       registration.activation = { abort, cleanup: cleanups };
     } catch (error) {
       abort.abort(new Error("Plugin facet setup failed"));
-      if (setupSignal?.aborted === true) {
+      if (!setupCompleted && signal.aborted) {
         void setup.then(async (lateCleanup) => {
           if (Value.Check(FUNCTION_VALUE, lateCleanup)) await lateCleanup();
         }).catch(() => undefined);
@@ -421,6 +425,7 @@ export class PluginFacetCoordinator implements PluginFacetService {
       catch (cleanupError) { throw new AggregateError([error, cleanupError], "Plugin facet setup and cleanup failed"); }
       throw error;
     } finally {
+      delete registration.setupAbort;
       setupSignal?.removeEventListener("abort", cancelSetup);
     }
   }
@@ -472,23 +477,24 @@ export class PluginFacetCoordinator implements PluginFacetService {
     Object.assign(registration, { listeners: Object.freeze(listeners) });
     this.#registrations.push(registration);
     let disposed = false;
+    let disposal: Promise<void> | undefined;
     const handle: PluginFacetRegistration = Object.freeze({
       get disposed() { return disposed; },
       kind: definition.kind,
       name: definition.name,
       dispose: async (): Promise<void> => {
-        if (disposed) return;
+        if (disposal !== undefined) return await disposal;
         disposed = true;
         registration.disposed = true;
-        for (const listener of [...listeners].reverse()) listener();
-        try {
-          await this.#enqueue(registration, async () => {
-            await this.#stop(registration, "Plugin facet registration was disposed");
-          });
-        } finally {
+        disposal = this.#enqueue(registration, async () => {
+          await this.#stop(registration, "Plugin facet registration was disposed");
+        }).finally(() => {
           const index = this.#registrations.indexOf(registration);
           if (index >= 0) this.#registrations.splice(index, 1);
-        }
+        });
+        registration.setupAbort?.abort(new Error("Plugin facet registration was disposed"));
+        for (const listener of [...listeners].reverse()) listener();
+        await disposal;
       },
     });
     if (definition.kind === "worker" && this.#options.committed()) {
@@ -509,7 +515,9 @@ export class PluginFacetCoordinator implements PluginFacetService {
   async activateWorkers(signal?: AbortSignal): Promise<void> {
     if (this.#closed) return;
     const failures: unknown[] = [];
-    for (const registration of this.#registrations) {
+    // Disposal can remove earlier registrations while another worker's setup is awaited.
+    const registrations = [...this.#registrations];
+    for (const registration of registrations) {
       if (registration.disposed || registration.definition.kind !== "worker") continue;
       try {
         await this.#enqueue(registration, async () => {
@@ -531,6 +539,7 @@ export class PluginFacetCoordinator implements PluginFacetService {
     catch (error) { failures.push(error); }
     for (const registration of [...this.#registrations].reverse()) {
       registration.disposed = true;
+      registration.setupAbort?.abort(new Error("Plugin facet coordinator closed"));
       for (const listener of [...registration.listeners].reverse()) listener();
       try {
         await this.#enqueue(registration, async () => {

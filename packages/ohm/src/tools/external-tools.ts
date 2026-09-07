@@ -338,8 +338,13 @@ async function installFd(
   const binDirectory = join(agentDirectory, "bin");
   await mkdir(binDirectory, { recursive: true, mode: 0o700 });
   const response = await fetch(artifact.url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const archive = await responseBytes(response);
+  let archive: Buffer;
+  try {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    archive = await responseBytes(response);
+  } finally {
+    void response.body?.cancel().catch(() => undefined);
+  }
   validateExternalToolArchiveIntegrity(archive, artifact.sha256);
   const temporary = await mkdtemp(join(agentDirectory, ".external-tool-"));
   try {

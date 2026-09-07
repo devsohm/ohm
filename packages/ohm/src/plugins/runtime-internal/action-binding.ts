@@ -20,11 +20,7 @@ import type {
   RuntimeToolCatalogEntry,
 } from "../runtime.js";
 
-interface CompatibilityRuntimeRecord {
-  host?: RuntimePluginHost;
-}
-
-const compatibilityRuntimes = new WeakMap<PluginRuntime, CompatibilityRuntimeRecord>();
+const compatibilityRuntimes = new WeakMap<PluginRuntime, RuntimePluginHost>();
 const extensionRuntimeOwners = new WeakMap<Plugin, RuntimePluginHost>();
 const STRING_VALUE = Type.String();
 const PROVIDER_CONFIG_VALUE = Type.Object({}, { additionalProperties: true });
@@ -49,25 +45,16 @@ function directInputSchema(parameters: TSchema): Record<string, JsonValue> {
   return parsed;
 }
 
-function runtimeRecord(runtime: PluginRuntime): CompatibilityRuntimeRecord {
-  let selected = compatibilityRuntimes.get(runtime);
-  if (selected === undefined) {
-    selected = {};
-    compatibilityRuntimes.set(runtime, selected);
-  }
-  return selected;
-}
-
 export function attachPluginRuntimeHost(runtime: PluginRuntime, host: RuntimePluginHost): void {
-  const record = runtimeRecord(runtime);
-  if (record.host !== undefined && record.host !== host) {
+  const existing = compatibilityRuntimes.get(runtime);
+  if (existing !== undefined && existing !== host) {
     throw new Error("Plugin runtime is already attached to another host generation");
   }
-  record.host = host;
+  compatibilityRuntimes.set(runtime, host);
 }
 
 export function getPluginRuntimeHost(runtime: PluginRuntime): RuntimePluginHost | undefined {
-  return runtimeRecord(runtime).host;
+  return compatibilityRuntimes.get(runtime);
 }
 
 export function ensurePluginRuntimeHost(runtime: PluginRuntime, cwd: string): RuntimePluginHost {
@@ -145,7 +132,6 @@ export function createPluginRuntime(): PluginRuntime {
       );
     },
   };
-  compatibilityRuntimes.set(runtime, {});
   return runtime;
 }
 
@@ -215,11 +201,11 @@ export function createCompatibilityDirectActions(
     setLabel: active((entryId, label) => runtime.setLabel(entryId, label)),
     exec: active(async (command, args, options = {}) => {
       if (command.trim() === "" || command.includes("\0") || args.some((argument) => argument.includes("\0"))) {
-        throw new Error("Direct extension command is invalid");
+        throw new Error("Direct plugin command is invalid");
       }
       const timeoutMs = options.timeout ?? 600_000;
       if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000) {
-        throw new Error("Direct extension timeout must be between 1 and 3600000 milliseconds");
+        throw new Error("Direct plugin timeout must be between 1 and 3600000 milliseconds");
       }
       const result = await runProcess({
         argv: [command, ...args],

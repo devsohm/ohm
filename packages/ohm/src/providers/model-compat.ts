@@ -180,10 +180,9 @@ export class ModelRuntime implements Models {
   static async create(options: CreateModelRuntimeOptions = {}): Promise<ModelRuntime> {
     const modelRefreshTimeoutMs = options.modelRefreshTimeoutMs ?? 15_000;
     validateModelRefreshTimeout(modelRefreshTimeoutMs);
-    const credentials = options.credentials
-      ?? await createDefaultCredentialStore(options.authPath ?? getAuthPath(), { createLocalKey: true });
     const runtimeCredentials = options.models === undefined
-      ? new RuntimeCredentialStore(providerCredentials(credentials))
+      ? new RuntimeCredentialStore(providerCredentials(options.credentials
+          ?? await createDefaultCredentialStore(options.authPath ?? getAuthPath(), { createLocalKey: true })))
       : undefined;
     const modelsPath = options.modelsPath === null
       ? undefined

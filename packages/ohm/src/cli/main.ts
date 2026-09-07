@@ -93,7 +93,8 @@ import {
 } from "../modes/interactive-interruption-recovery.js";
 import { createInteractiveTuiContext } from "../modes/interactive-tui-context.js";
 import { recoverNonInteractiveSession } from "../modes/noninteractive-recovery.js";
-import { formatPluginError, projectPluginError, type ProjectedPluginError } from "../modes/plugin-error.js";
+import { createPrintOutput } from "../modes/print-output.js";
+import { formatPluginError } from "../modes/plugin-error.js";
 import {
   captureOneShotAssistantBoundary,
   latestOneShotAssistant,
@@ -1509,7 +1510,9 @@ async function runCommandOperation(
   if (options === undefined) return;
   let runtime = await loadRuntime(options);
   let owner: AgentSessionRuntime<InteractiveRuntimeServices> | undefined;
-  let unsubscribe = (): void => undefined;
+  const mode = argumentsValue.mode === "json" ? "json" : "print";
+  const output = createPrintOutput(mode === "json" ? "json" : "text");
+  const runSignal = AbortSignal.any([termination.signal, output.signal]);
   let bindingAbort: AbortController | undefined;
   let bindingGeneration = 0;
   const uninstallTermination = termination.onTerminate((signal) => {
@@ -1526,15 +1529,6 @@ async function runCommandOperation(
       true,
       toolAuthorizationHandler,
     );
-    const mode = argumentsValue.mode === "json" ? "json" : "print";
-    let headerPending = mode === "json";
-    const pendingPluginErrors: ProjectedPluginError[] = [];
-    const reportPluginError = (failure: PluginError): void => {
-      const event = projectPluginError(failure);
-      if (mode === "json" && headerPending) pendingPluginErrors.push(event);
-      else if (mode === "json") writeMachineOutput(`${JSON.stringify(event)}\n`);
-      else console.error(formatPluginError(failure));
-    };
     const bind = async (
       candidate: AgentSession = owner!.session,
       afterBound?: (
@@ -1547,13 +1541,13 @@ async function runCommandOperation(
       const generation = ++bindingGeneration;
       const controller = new AbortController();
       bindingAbort = controller;
-      const signal = AbortSignal.any([termination.signal, controller.signal]);
+      const signal = AbortSignal.any([runSignal, controller.signal]);
       const candidateRuntime = owner.services.runtime;
       try {
         await candidate.bindPlugins({
           mode,
           commandContextActions: createAgentSessionRuntimeCommandActions(owner, candidate),
-          onError: reportPluginError,
+          onError: output.reportPluginError,
         }, signal);
       } catch (error) {
         if (controller.signal.aborted && generation !== bindingGeneration) return;
@@ -1561,25 +1555,14 @@ async function runCommandOperation(
       }
       if (generation !== bindingGeneration || controller.signal.aborted) return;
       runtime = candidateRuntime;
-      unsubscribe();
-      unsubscribe = candidate.subscribe((event) => {
-        if (mode === "json") writeMachineOutput(`${JSON.stringify(event)}\n`);
-      });
-      if (headerPending) {
-        headerPending = false;
-        const header = candidate.sessionManager.getHeader();
-        if (header !== null) writeMachineOutput(`${JSON.stringify(header)}\n`);
-        for (const event of pendingPluginErrors.splice(0)) {
-          writeMachineOutput(`${JSON.stringify(event)}\n`);
-        }
-      }
+      await output.bind(candidate);
+      if (generation !== bindingGeneration || controller.signal.aborted) return;
       await afterBound?.(candidate, candidateRuntime, signal);
     };
     owner.setBeforeSessionInvalidate(() => {
       bindingAbort?.abort(new Error("Session replaced"));
       bindingGeneration += 1;
-      unsubscribe();
-      unsubscribe = (): void => undefined;
+      output.unbind();
     });
     const prepare = async (
       session: AgentSession,
@@ -1613,6 +1596,7 @@ async function runCommandOperation(
         },
       );
       return {
+        signal: runSignal,
         ...optionalProperties(tools.allowedTools === undefined ? undefined : { allowedTools: tools.allowedTools }),
         ...optionalProperties(tools.excludedTools === undefined ? undefined : { excludedTools: tools.excludedTools }),
         noContextFiles: argumentsValue.noContextFiles === true,
@@ -1625,6 +1609,7 @@ async function runCommandOperation(
       const expanded = await expandPromptReferences(input, runtime.workspace, undefined, runtime.settings.getImageAutoResize());
       const boundary = captureOneShotAssistantBoundary(runtime.session);
       await runtime.session.prompt(expanded.text, { ...promptOptions(), images: expanded.images });
+      await output.drain();
       const assistant = latestOneShotAssistant(boundary, runtime.session);
       latestAssistant = assistant;
       throwIfAssistantFailed(assistant, mode);
@@ -1632,6 +1617,7 @@ async function runCommandOperation(
     for (const message of messages) {
       const boundary = captureOneShotAssistantBoundary(runtime.session);
       await runtime.session.prompt(message, promptOptions());
+      await output.drain();
       const assistant = latestOneShotAssistant(boundary, runtime.session);
       latestAssistant = assistant;
       throwIfAssistantFailed(assistant, mode);
@@ -1639,19 +1625,23 @@ async function runCommandOperation(
     if (mode !== "json") {
       if (latestAssistant !== undefined) {
         const text = latestAssistant.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
-        if (text !== "") writeMachineOutput(`${text}\n`);
+        if (text !== "") await output.write(`${text}\n`);
       }
     }
   } finally {
     uninstallTermination();
-    unsubscribe();
-    if (owner === undefined) {
-      try {
-        await runtime.runtimePlugins.dispatch("session_shutdown", { reason: "quit" }).catch(() => undefined);
-      } finally {
-        await runtime.close();
-      }
-    } else await owner.dispose();
+    output.unbind();
+    try {
+      if (owner === undefined) {
+        try {
+          await runtime.runtimePlugins.dispatch("session_shutdown", { reason: "quit" }).catch(() => undefined);
+        } finally {
+          await runtime.close();
+        }
+      } else await owner.dispose();
+    } finally {
+      await output.close();
+    }
   }
 }
 

@@ -300,6 +300,29 @@ test("lazyStream shares a factory rejection between iteration and result", async
   assert.equal(factoryCalls, 1);
 });
 
+test("lazyStream concurrent first reads share one source iterator", async () => {
+  let iterators = 0;
+  const event = startEvent();
+  const stream = lazyStream(async () => ({
+    result: async () => assistant(),
+    [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+      iterators += 1;
+      let sent = false;
+      return {
+        async next() {
+          if (sent) return { done: true, value: undefined };
+          sent = true;
+          return { done: false, value: event };
+        },
+      };
+    },
+  }));
+  const iterator = stream[Symbol.asyncIterator]();
+  const results = await Promise.all([iterator.next(), iterator.next()]);
+  assert.equal(iterators, 1);
+  assert.deepEqual(results, [{ done: false, value: event }, { done: true, value: undefined }]);
+});
+
 test("lazyStream cancellation wins while its factory is still pending", async () => {
   let resolveSource!: (source: AssistantMessageEventStream) => void;
   let nextCalls = 0;

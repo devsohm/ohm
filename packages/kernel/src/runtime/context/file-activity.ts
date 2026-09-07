@@ -104,8 +104,6 @@ export function collectCompactionFileActivity(messages: readonly CanonicalMessag
     for (const block of message.content) {
       if (block.type === "tool_call") calls.set(block.callId, block);
     }
-  }
-  for (const message of messages) {
     for (const block of message.content) {
       if (block.type !== "tool_result" || block.isError) continue;
       const call = calls.get(block.callId);

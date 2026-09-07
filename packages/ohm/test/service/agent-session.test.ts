@@ -37,7 +37,7 @@ import { DefaultResourceLoader, type ResourceLoader } from "../../src/core/resou
 import { promptCompositionSource } from "../../src/core/prompt-composition.js";
 import { InMemorySettingsStorage, SettingsManager } from "../../src/core/settings-manager.js";
 import type { BuildSystemPromptOptions } from "../../src/core/system-prompt.js";
-import { NUMBER_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
+import { isObjectValue, NUMBER_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
 import {
   getPluginRuntimeHost,
   projectLoadedPluginHost,
@@ -60,7 +60,7 @@ import {
   loadDirectPlugins,
   type RuntimePluginListenerContext,
 } from "../../src/plugins/runtime.js";
-import { extensionUsage } from "../../src/plugins/session-contract.js";
+import { extensionUsage, type SessionEntry } from "../../src/plugins/session-contract.js";
 import {
   providerAdapterFromModels,
   providerModelFromInfo,
@@ -83,6 +83,8 @@ import {
   type AgentSessionOptions,
   type AgentSessionPromptOptions,
 } from "../../src/service/agent-session.js";
+import { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
+import { createAgentSessionRuntimeCommandActions } from "../../src/service/runtime-command-actions.js";
 import { SessionManager } from "../../src/storage/index.js";
 import type { BashOperations } from "../../src/tools/builtins/shell.js";
 import type { HarnessTool } from "../../src/tools/types.js";
@@ -1830,12 +1832,25 @@ test("tool-call deltas redact payloads and retain cumulative snapshots across mi
   await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
 
+  let toolDeltaDeepClones = 0;
+  const clone = globalThis.structuredClone;
+  const cloneMock = context.mock.method(globalThis, "structuredClone", <T>(
+    value: T,
+    options?: Parameters<typeof structuredClone>[1],
+  ): T => {
+    if (isObjectValue(value) && "type" in value && value.type === "tool_call_delta") {
+      toolDeltaDeepClones += 1;
+    }
+    return clone(value, options);
+  });
   const running = session.prompt("stream direct structured blocks", { allowedTools: [] });
   await completed;
   await session.abort("direct structured stream test complete");
   await running;
   await session.close();
+  cloneMock.mock.restore();
 
+  assert.equal(toolDeltaDeepClones, 0, "scalar tool deltas must not require deep cloning");
   assert.deepEqual(directDeltas, [redactedChunks[1]]);
   assert.deepEqual(observedDeltas, redactedChunks.map((jsonFragment) => ({ index: 0, jsonFragment })));
   assert.deepEqual(publicDeltas, redactedChunks);
@@ -1848,13 +1863,19 @@ test("tool-call deltas redact payloads and retain cumulative snapshots across mi
     ? retainedFirst.message.content.find((block) => block.type === "toolCall")
     : undefined;
   assert.deepEqual(retainedFirstCall?.arguments, {});
+  assert.ok(retainedFirstCall);
+  retainedFirstCall.arguments.detachmentProbe = true;
+  assert.deepEqual(publicMessageArguments[1], {});
+  assert.deepEqual(publicPartialArguments, [{}, {}]);
+  assert.deepEqual(publicStateArguments, [{}, {}]);
 });
 
-test("tiny tool-argument chunks preserve exact no-listener delivery within bounded CPU", async () => {
+test("tiny tool-argument chunks preserve exact no-listener delivery within bounded CPU", async (context) => {
   const cwd = await workspace();
   const provider = new TinyChunkToolArgumentProvider(8_192);
   const manager = SessionManager.inMemory(cwd, { id: "tiny-tool-argument-stream" });
   const session = await AgentSession.create(sessionOptions(manager, new ProviderRegistry([provider])));
+  context.after(async () => await session.close());
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   let envelopeDeltas = 0;
   let publicDeltas = 0;
@@ -1885,7 +1906,7 @@ test("tiny tool-argument chunks preserve exact no-listener delivery within bound
       || (process.platform === "darwin" && process.arch === "x64")) ? 5_000 : 3_000;
   assert.ok(
     cpuMs < cpuCeilingMs,
-    `${provider.fragments} tiny tool fragments occupied JavaScript for ${cpuMs.toFixed(1)} ms (limit ${cpuCeilingMs} ms)`,
+    `${provider.fragments} tiny tool fragments used ${cpuMs.toFixed(1)} ms process CPU including prompt setup (limit ${cpuCeilingMs} ms)`,
   );
   assert.equal(session.state.streamingMessage?.role, "assistant");
 
@@ -6185,6 +6206,35 @@ test("active custom messages preserve identity without entering the visible text
   await session.close();
 });
 
+test("clearAllQueues removes active custom steering and follow-up delivery", async (context) => {
+  const cwd = await workspace();
+  const provider = new GatedProvider();
+  const manager = SessionManager.inMemory(cwd, { id: "clear-active-custom" });
+  context.after(() => manager.closeV4Store());
+  const session = await AgentSession.create(sessionOptions(manager, new ProviderRegistry([provider])));
+  context.after(async () => { provider.release(); await session.close(); });
+  await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
+  const active = session.prompt("initial", { allowedTools: [] });
+  const settled = Promise.allSettled([active]);
+  await provider.started;
+  await session.sendCustomMessage({ customType: "active", content: "steer custom", display: true }, { triggerTurn: true });
+  await session.sendCustomMessage({ customType: "active", content: "follow custom", display: false }, { deliverAs: "followUp" });
+  const queued = [...manager.getV4State().queue.values()].filter((entry) => entry.status === "queued");
+  assert.equal(queued.length, 2);
+
+  session.agent.clearAllQueues();
+  provider.release();
+  const [outcome] = await settled;
+
+  assert.equal(outcome?.status, "fulfilled");
+  if (outcome?.status !== "fulfilled") throw new Error("Cleared custom messages failed the active prompt");
+  assert.equal(outcome.value.results.at(-1)?.finishReason, "stop");
+  assert.equal(provider.requests.length, 1);
+  assert.equal(session.pendingMessageCount, 0);
+  assert.equal(manager.getBranch().some((entry) => entry.type === "custom_message"), false);
+  for (const entry of queued) assert.equal(manager.getV4State().queue.get(entry.id)?.status, "cancelled");
+});
+
 test("AgentSession bindPlugins preserves the replacement start reason", async (context) => {
   const cwd = await workspace();
   const starts: string[] = [];
@@ -6752,6 +6802,51 @@ test("AgentSession binds extension context before start and discovers resources 
   await session.close();
 });
 
+test("AgentSession adopts published plugins after retired generation cleanup fails", async (context) => {
+  const cwd = await workspace();
+  const settings = SettingsManager.inMemory();
+  const commands: number[] = [];
+  const starts: number[] = [];
+  let generation = 0;
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: join(cwd, "agent-home"),
+    settingsManager: settings,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    pluginFactories: [{ name: "retirement-failure", factory(api) {
+      const current = ++generation;
+      api.registerCommand("generation", { async handler() { commands.push(current); } });
+      api.on("session_start", () => { starts.push(current); });
+      api.onDispose(() => {
+        if (current === 1) throw new Error("retired generation cleanup failed");
+      });
+    } }],
+  });
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
+  await loader.refresh();
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(cwd),
+    providers: new ProviderRegistry(),
+    settingsManager: settings,
+    resourceLoader: loader,
+    pluginRunner: getPluginRuntimeHost(loader.getPlugins().runtime)!,
+  });
+  context.after(async () => await session.close());
+  await session.bindPlugins({ reason: "startup" });
+  const previous = session.pluginRunner;
+  await session.prompt("/generation");
+  await session.refresh();
+  assert.notEqual(session.pluginRunner, previous);
+  await session.prompt("/generation");
+  assert.deepEqual(commands, [1, 2]);
+  assert.deepEqual(starts, [1, 2]);
+  assert.equal(loader.getPlugins().errors.length, 1);
+  assert.match(loader.getPlugins().errors[0]!.error, /retired generation cleanup failed/u);
+});
+
 test("AgentSession refresh swaps extension generations and routes later commands and events to the new host", async (context) => {
   const cwd = await workspace();
   const agentDir = join(cwd, "agent-home");
@@ -6998,7 +7093,7 @@ test("AgentSession disables a committed generation when session_start is cancell
   assert.equal(modelRegistry.find("generation-provider-2", "generation-model-2"), undefined);
   assert.equal(modelRegistry.find("partial-provider-2", "partial-model-2"), undefined);
   assert.equal(loader.getPrompts().prompts.some((prompt) => prompt.name === "dynamic-2"), false);
-  assert.throws(() => failedContext?.isIdle(), /Runtime extension host is closed/u);
+  assert.throws(() => failedContext?.isIdle(), /Runtime plugin host is closed/u);
   const failedHost = getPluginRuntimeHost(loader.getPlugins().runtime)!;
   const errorCount = extensionErrors.length;
   failedHost.addDiagnostic({
@@ -7117,128 +7212,76 @@ test("AgentSession refresh aborts a staged resource generation without committin
   await session.close();
 });
 
-test("AgentSession refresh keeps the active runner when resources republish the same runtime", async () => {
-  const cwd = await workspace();
-  const settings = SettingsManager.inMemory();
-  const lifecycle: string[] = [];
-  let generation = 0;
-  let stable: ReturnType<DefaultResourceLoader["getPlugins"]> | undefined;
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir: join(cwd, "agent-home"),
-    settingsManager: settings,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    pluginFactories: [{
-      name: "stable-runtime",
-      factory(api) {
-        const current = ++generation;
-        lifecycle.push(`${current}:activate`);
-        api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
-        api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
-        api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
+for (const [name, rejectProjection] of [
+  ["AgentSession refresh keeps the active runner when resources republish the same runtime", false],
+  ["AgentSession rejects a changed projection on the active runtime without closing it", true],
+] as const) {
+  test(name, async () => {
+    const cwd = await workspace();
+    const settings = SettingsManager.inMemory();
+    const lifecycle: string[] = [];
+    let generation = 0;
+    let stable: ReturnType<DefaultResourceLoader["getPlugins"]> | undefined;
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir: join(cwd, "agent-home"),
+      settingsManager: settings,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      pluginFactories: [{
+        name: rejectProjection ? "changed-projection" : "stable-runtime",
+        factory(api) {
+          const current = ++generation;
+          lifecycle.push(`${current}:activate`);
+          api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
+          api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
+          api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
+        },
+      }],
+      pluginsOverride(base) {
+        if (stable === undefined) {
+          stable = base;
+          return base;
+        }
+        return rejectProjection ? { ...stable, plugins: [] } : {
+          ...stable,
+          errors: [...stable.errors, { path: "<override>", error: "updated diagnostics" }],
+        };
       },
-    }],
-    pluginsOverride(base) {
-      if (stable === undefined) {
-        stable = base;
-        return base;
-      }
-      return {
-        ...stable,
-        errors: [...stable.errors, { path: "<override>", error: "updated diagnostics" }],
-      };
-    },
+    });
+    await loader.refresh();
+    const initialResult = loader.getPlugins();
+    const session = await AgentSession.create({
+      ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+      settingsManager: settings,
+      resourceLoader: loader,
+    });
+    await session.bindPlugins({ reason: "startup" });
+    const initialRunner = session.pluginRunner;
+
+    if (rejectProjection) {
+      await assert.rejects(session.refresh(), /cannot change the plugin projection without a new runtime generation/u);
+      assert.equal(loader.getPlugins(), initialResult);
+    } else {
+      await session.refresh();
+      assert.notEqual(loader.getPlugins(), initialResult);
+      assert.equal(loader.getPlugins().runtime, initialResult.runtime);
+    }
+    assert.equal(session.pluginRunner, initialRunner);
+    assert.equal(initialRunner.createContext().isIdle(), true);
+    assert.deepEqual(lifecycle, [
+      "1:activate",
+      "1:start:startup",
+      "1:shutdown:refresh",
+      "2:activate",
+      "2:dispose",
+      "1:start:refresh",
+    ]);
+    await session.close();
   });
-  await loader.refresh();
-  const initialResult = loader.getPlugins();
-  const session = await AgentSession.create({
-    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    settingsManager: settings,
-    resourceLoader: loader,
-  });
-  await session.bindPlugins({ reason: "startup" });
-  const initialRunner = session.pluginRunner;
-
-  await session.refresh();
-
-  assert.notEqual(loader.getPlugins(), initialResult);
-  assert.equal(loader.getPlugins().runtime, initialResult.runtime);
-  assert.equal(session.pluginRunner, initialRunner);
-  assert.equal(initialRunner.createContext().isIdle(), true);
-  assert.deepEqual(lifecycle, [
-    "1:activate",
-    "1:start:startup",
-    "1:shutdown:refresh",
-    "2:activate",
-    "2:dispose",
-    "1:start:refresh",
-  ]);
-  await session.close();
-});
-
-test("AgentSession rejects a changed projection on the active runtime without closing it", async () => {
-  const cwd = await workspace();
-  const settings = SettingsManager.inMemory();
-  const lifecycle: string[] = [];
-  let generation = 0;
-  let stable: ReturnType<DefaultResourceLoader["getPlugins"]> | undefined;
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir: join(cwd, "agent-home"),
-    settingsManager: settings,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    pluginFactories: [{
-      name: "changed-projection",
-      factory(api) {
-        const current = ++generation;
-        lifecycle.push(`${current}:activate`);
-        api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
-        api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
-        api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
-      },
-    }],
-    pluginsOverride(base) {
-      if (stable === undefined) {
-        stable = base;
-        return base;
-      }
-      return { ...stable, plugins: [] };
-    },
-  });
-  await loader.refresh();
-  const initialResult = loader.getPlugins();
-  const session = await AgentSession.create({
-    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    settingsManager: settings,
-    resourceLoader: loader,
-  });
-  await session.bindPlugins({ reason: "startup" });
-  const initialRunner = session.pluginRunner;
-
-  await assert.rejects(
-    session.refresh(),
-    /cannot change the extension projection without a new runtime generation/u,
-  );
-
-  assert.equal(loader.getPlugins(), initialResult);
-  assert.equal(session.pluginRunner, initialRunner);
-  assert.equal(initialRunner.createContext().isIdle(), true);
-  assert.deepEqual(lifecycle, [
-    "1:activate",
-    "1:start:startup",
-    "1:shutdown:refresh",
-    "2:activate",
-    "2:dispose",
-    "1:start:refresh",
-  ]);
-  await session.close();
-});
+}
 
 test("AgentSession refresh atomically adds, removes, and replaces direct providers", async (context) => {
   const cwd = await workspace();
@@ -7607,7 +7650,7 @@ test("command context modelRegistry overrides, streams, unregisters, and restore
   const staleRegistry = capturedRegistry;
   assert.throws(
     () => staleRegistry.registerProvider(replacement.id, replacement.config),
-    /no longer active|inactive extension generation|stale after AgentSession close/u,
+    /no longer active|inactive plugin generation|stale after AgentSession close/u,
   );
 });
 
@@ -8225,7 +8268,7 @@ test("AgentSession executes commands during streaming and expands queued input",
   assert.deepEqual(await session.prompt("/probe while-active"), { sessionId: session.sessionId, results: [] });
   await assert.rejects(
     session.steer("/probe queued-command"),
-    /Queued input cannot invoke extension command "\/probe"/u,
+    /Queued input cannot invoke plugin command "\/probe"/u,
   );
   assert.deepEqual(await session.prompt("queued", { streamingBehavior: "steer" }), {
     sessionId: session.sessionId,
@@ -8419,6 +8462,67 @@ test("AgentSession requeues cancelled active input in durable FIFO order", async
     operationId: entry.operationId,
   })), queuedIds.map((id) => ({ id, status: "queued", operationId: null })));
   await session.close();
+});
+
+test("AgentSession compaction commits the canonical boundary selected by a colliding public override ID", async (t) => {
+  const cwd = await workspace();
+  const provider = new RecordingProvider();
+  const manager = SessionManager.inMemory(cwd);
+  const createdAt = "2026-07-29T12:00:00.000Z";
+  manager.commitChanges([{ type: "conversation_node", node: {
+    id: "tool", parentId: null, nodeType: "message", role: "tool", createdAt,
+    content: { id: "orphan-tools", role: "tool", createdAt, content: [
+      { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+      { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+    ] },
+  } }]);
+  seedCompactableHistory(manager, provider);
+  manager.appendMessage({ id: "retained-user", role: "user", createdAt,
+    content: [{ type: "text", text: "retained question" }],
+  }, { nodeId: "tool~1" });
+  manager.appendMessage({ id: "retained-assistant", role: "assistant", createdAt,
+    content: [{ type: "text", text: "retained answer" }],
+  });
+  const compacted: { entry: SessionEntry; lookup: SessionEntry | undefined; boundary: SessionEntry | undefined }[] = [];
+  const host = await loadDirectPlugins([], { workspace: cwd, inlinePlugins: [{
+    name: "public-compaction-selection",
+    factory(api) {
+      api.on("session_before_compact", (_event, context) => {
+        const selected = context.sessionManager.getEntry("tool~1~0");
+        assert.equal(selected?.type === "message" ? selected.message.role : undefined, "user");
+        return { compaction: { summary: "publicly selected summary", firstKeptEntryId: "tool~1~0", tokensBefore: 777 } };
+      });
+      api.on("session_compact", (event, context) => {
+        compacted.push({
+          entry: event.compactionEntry,
+          lookup: context.sessionManager.getEntry(event.compactionEntry.id),
+          boundary: context.sessionManager.getEntry(event.compactionEntry.firstKeptEntryId),
+        });
+      });
+    },
+  }] });
+  t.after(async () => await host.close());
+  const session = await AgentSession.create({
+    ...sessionOptions(manager, new ProviderRegistry([provider])), pluginRunner: host,
+    compactionReserveTokens: 200, compactionRecentTokens: 200,
+  });
+  t.after(async () => await session.close());
+  await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one",
+    info: { ...provider.models[0]!, contextTokens: 10_000 },
+  });
+  const result = await session.compact();
+  assert.equal(result.firstKeptEntryId, "tool~1", "direct SDK result remains canonical");
+  const committed = manager.getBranch().findLast((entry) => entry.type === "compaction");
+  assert.equal(committed?.firstKeptEntryId, "tool~1");
+  assert.equal(compacted.length, 1);
+  const observed = compacted[0]!;
+  assert.equal(observed.entry.id, committed?.id, "the plugin event identifies the real committed journal entry");
+  assert.equal(observed.entry.type === "compaction" ? observed.entry.firstKeptEntryId : undefined, "tool~1~0");
+  assert.deepEqual(observed.entry, observed.lookup, "the emitted compaction entry round-trips through its own context");
+  assert.equal(observed.boundary?.type === "message" ? observed.boundary.message.role : undefined, "user");
+  assert.deepEqual(manager.buildContextEntries().flatMap((entry) => entry.type === "message" && "id" in entry.message ? [entry.message.id] : []),
+    ["retained-user", "retained-assistant"]);
+  assert.equal(provider.requests.length, 0);
 });
 
 test("AgentSession persists extension-selected compaction boundaries and token totals", async (context) => {
@@ -9673,6 +9777,265 @@ test("AgentSession ignores assistant usage retained across the last compaction b
   await session.close();
 });
 
+for (const boundary of ["plugin", "default-plugin", "compatibility-plugin", "native"] as const) {
+  for (const mutation of (boundary === "plugin" ? ["fork", "navigateTree"] : ["fork", "navigateTree", "setLabel"])) {
+    for (const selected of ["split-tool", "colliding-user"] as const) {
+      test(`${boundary} ${mutation} preserves ${selected} entry identity across projection collisions`, async (t) => {
+        const cwd = await workspace();
+        const manager = boundary === "default-plugin" || boundary === "compatibility-plugin"
+          ? SessionManager.create(cwd, join(cwd, "sessions"), { id: "projected-mutation" })
+          : SessionManager.inMemory(cwd, { id: "projected-mutation" });
+        t.after(() => manager.closeV4Store());
+        const createdAt = "2026-07-29T12:00:00.000Z";
+        manager.appendMessage({
+          id: "root-message", role: "user", content: [{ type: "text", text: "root" }], createdAt,
+        }, { nodeId: "root" });
+        manager.appendMessage({ id: "tool-message", role: "tool", content: [
+          { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+          { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+        ], createdAt }, { nodeId: "tool" });
+        manager.appendMessage({
+          id: "colliding-message", role: "user", content: [{ type: "text", text: "selected user" }], createdAt,
+        }, { nodeId: "tool~1" });
+        manager.appendMessage({
+          id: "current-message", role: "assistant", content: [{ type: "text", text: "current" }], createdAt,
+        }, { nodeId: "current" });
+        const create = async (sessionManager: SessionManager) => {
+          const host = await loadDirectPlugins([], { workspace: cwd });
+          try {
+            const session = await AgentSession.create({
+              ...sessionOptions(sessionManager, new ProviderRegistry()), pluginRunner: host,
+            });
+            return { session, host, services: { cwd, agentDir: cwd, close: async () => await host.close() } };
+          } catch (error) {
+            await host.close();
+            throw error;
+          }
+        };
+        const initial = await create(manager);
+        const runtime = new AgentSessionRuntime(initial, async ({ sessionManager }) => await create(sessionManager));
+        try {
+          const session = runtime.session;
+          const directBindings = t.mock.method(initial.host, "setDirectActionsHandler");
+          const commandBindings = t.mock.method(session.pluginRunner, "bindCommandContext");
+          const coreBindings = t.mock.method(session.pluginRunner, "bindCore");
+          await session.bindPlugins();
+          const directActions = directBindings.mock.calls.at(-1)?.arguments[0];
+          const compatibilityActions = commandBindings.mock.calls.at(-1)?.arguments[0];
+          const compatibilityCore = coreBindings.mock.calls.at(-1)?.arguments[0];
+          assert.ok(directActions);
+          assert.ok(compatibilityActions);
+          assert.ok(compatibilityCore);
+          const publicEntries = session.sessionManager.getEntries();
+          const publicId = selected === "split-tool" ? "tool~1" : "tool~1~0";
+          const canonicalId = selected === "split-tool" ? "tool" : "tool~1";
+          const entry = publicEntries.find((candidate) => candidate.id === publicId);
+          assert.equal(entry?.type === "message" ? entry.message.role : undefined,
+            selected === "split-tool" ? "toolResult" : "user");
+          const actions = boundary === "default-plugin" ? directActions
+            : boundary === "compatibility-plugin" ? compatibilityActions
+              : createAgentSessionRuntimeCommandActions(runtime, session);
+          const id = boundary === "native" ? canonicalId : publicId;
+          if (mutation === "fork") {
+            const result = boundary === "native"
+              ? await runtime.fork(id, { position: "at" })
+              : await actions.fork(id, { position: "at" });
+            assert.equal(result.cancelled, false);
+            assert.equal(runtime.session.nativeSessionManager.getLeafId(), canonicalId);
+          } else if (mutation === "navigateTree") {
+            const result = boundary === "native"
+              ? await session.navigateTree(id, { label: "selected record" })
+              : await actions.navigateTree(id, { label: "selected record" });
+            assert.equal(result.cancelled, false);
+            assert.equal(manager.getLeafId(), "tool");
+            assert.equal(manager.getLabel(canonicalId), "selected record");
+            assert.equal(manager.getLabel(selected === "split-tool" ? "tool~1" : "tool"), undefined);
+          } else {
+            if (boundary === "native") session.setLabel(id, "selected record");
+            else if (boundary === "compatibility-plugin") compatibilityCore.setLabel(id, "selected record");
+            else directActions.setLabel(id, "selected record");
+            assert.equal(manager.getLeafId(), "current");
+            assert.equal(manager.getLabel(canonicalId), "selected record");
+            assert.equal(manager.getLabel(selected === "split-tool" ? "tool~1" : "tool"), undefined);
+          }
+        } finally {
+          await runtime.dispose();
+        }
+      });
+    }
+  }
+}
+
+for (const event of ["session_before_fork", "session_before_tree", "session_tree", "session_before_compact", "sdk-before-fork"] as const) {
+  test(`${event} selection IDs round-trip through the matching session context after projection collisions`, async (t) => {
+    const cwd = await workspace();
+    const manager = SessionManager.inMemory(cwd);
+    const createdAt = "2026-07-29T12:00:00.000Z";
+    manager.appendMessage({ id: "tool-message", role: "tool", createdAt, content: [
+      { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+      { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+    ] }, { nodeId: "tool" });
+    manager.appendMessage({ id: "user-message", role: "user", createdAt,
+      content: [{ type: "text", text: "selected user" }],
+    }, { nodeId: "tool~1" });
+    if (event !== "session_tree") manager.appendMessage({ id: "current", role: "assistant", createdAt,
+      content: [{ type: "text", text: "current" }],
+    }, { nodeId: "current" });
+    let observedId: string | undefined;
+    let observedRole: string | undefined;
+    let relatedIds: Array<string | null> | undefined;
+    const host = await loadDirectPlugins([], { workspace: cwd, inlinePlugins: [{
+      name: "selection-roundtrip",
+      factory(api) {
+        const observe = (id: string, context: RuntimePluginListenerContext) => {
+          observedId = id;
+          const selected = context.sessionManager.getEntry(id);
+          observedRole = selected?.type === "message" ? selected.message.role : undefined;
+          if (selected !== undefined) api.setLabel(id, "selected by hook");
+        };
+        if (event === "session_before_fork") api.on(event, (value, context) => {
+          observe(value.entryId, context);
+          return { cancel: true };
+        });
+        else if (event === "session_before_tree") api.on(event, (value, context) => {
+          relatedIds = [value.preparation.targetId, value.preparation.commonAncestorId];
+          observe(value.preparation.entriesToSummarize[0]!.id, context);
+          return { cancel: true };
+        });
+        else if (event === "session_tree") api.on(event, (value, context) => {
+          relatedIds = [value.newLeafId, context.sessionManager.getLeafId()];
+          if (value.oldLeafId !== null) observe(value.oldLeafId, context);
+        });
+        else if (event === "session_before_compact") api.on(event, (value, context) => {
+          relatedIds = [value.preparation.firstKeptEntryId, value.branchEntries[0]!.id];
+          observe(value.preparation.firstKeptEntryId, context);
+          return { cancel: true };
+        });
+      },
+    }] });
+    t.after(async () => await host.close());
+    const session = await AgentSession.create({ ...sessionOptions(manager, new ProviderRegistry()), pluginRunner: host });
+    const runtime = new AgentSessionRuntime({ session, services: { cwd, agentDir: cwd } }, async () => {
+      throw new Error("Guarded selection must not replace the session");
+    }, event === "sdk-before-fork" ? {
+      async beforeFork(value) {
+        observedId = value.entryId;
+        const selected = manager.getEntry(value.entryId);
+        observedRole = selected?.type === "message" ? selected.message.role : undefined;
+        session.setLabel(value.entryId, "selected by hook");
+        return { cancel: true };
+      },
+    } : {});
+    try {
+      await session.bindPlugins();
+      const result = event === "session_before_compact"
+        ? { cancelled: (await host.reduceSessionBeforeCompact({
+          preparation: {
+            firstKeptEntryId: "tool~1", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, tokensBefore: 10,
+            fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+            settings: { enabled: true, reserveTokens: 1, recentTokens: 1, maxInputTokens: 20 },
+          },
+          branchEntries: manager.getBranch().slice(1), reason: "manual", willRetry: false, signal: new AbortController().signal,
+        })).cancel === true }
+        : event === "session_before_fork" || event === "sdk-before-fork"
+          ? await runtime.fork("tool~1", { position: "at" })
+          : await session.navigateTree("tool");
+      assert.equal(result.cancelled, event !== "session_tree");
+      assert.equal(observedId, event === "sdk-before-fork" ? "tool~1" : "tool~1~0");
+      assert.equal(observedRole, "user");
+      assert.equal(manager.getLabel("tool~1"), "selected by hook");
+      assert.equal(manager.getLabel("tool"), undefined);
+      if (event === "session_before_tree" || event === "session_tree") assert.deepEqual(relatedIds, ["tool~1", "tool~1"]);
+      if (event === "session_before_compact") assert.deepEqual(relatedIds, ["tool~1~0", "tool~1~0"]);
+    } finally { await runtime.dispose(); }
+  });
+}
+
+for (const binding of ["direct", "runtime", "default-command", "compatibility-command"] as const) {
+  test(`tree caller cancellation prevents pre-commit mutation through ${binding} binding`, async (t) => {
+    const cwd = await workspace();
+    const manager = SessionManager.inMemory(cwd, { id: `cancel-tree-${binding}` });
+    const target = manager.appendMessage({
+      id: "tree-root", role: "user", content: [{ type: "text", text: "root" }],
+      createdAt: "2026-07-20T00:00:00.000Z",
+    });
+    manager.appendMessage({
+      id: "tree-current", role: "user", content: [{ type: "text", text: "current" }],
+      createdAt: "2026-07-20T00:00:01.000Z",
+    });
+    let markEntered!: () => void;
+    let releaseHook!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const released = new Promise<void>((resolve) => { releaseHook = resolve; });
+    let hookSignal: AbortSignal | undefined;
+    const host = await loadDirectPlugins([], {
+      workspace: cwd,
+      activationFailure: "throw",
+      inlinePlugins: [{
+        name: "cancellable-tree",
+        factory(api) {
+          api.on("session_before_tree", async (event) => {
+            hookSignal = event.signal;
+            markEntered();
+            await released;
+          });
+          api.registerCommand("cancel-tree", {
+            async handler(_args, context) { await context.navigateTree(target); },
+          });
+        },
+      }],
+    });
+    t.after(async () => await host.close());
+    const provider = new RecordingProvider();
+    const session = await AgentSession.create({
+      ...sessionOptions(manager, new ProviderRegistry([provider])), pluginRunner: host,
+    });
+    const commandBindings = binding === "compatibility-command"
+      ? t.mock.method(session.pluginRunner, "bindCommandContext")
+      : undefined;
+    const owner = new AgentSessionRuntime({ session, services: { cwd, agentDir: cwd } }, async () => {
+      throw new Error("Tree cancellation must not replace sessions");
+    });
+    let navigation: Promise<void> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
+      await session.bindPlugins();
+      const compatibilityActions = commandBindings?.mock.calls.at(-1)?.arguments[0];
+      if (binding === "compatibility-command") assert.ok(compatibilityActions);
+      const before = manager.getV4State();
+      const controller = new AbortController();
+      const reason = new Error("cancel tree before commit");
+      const operation = binding === "direct"
+        ? session.navigateTree(target, { signal: controller.signal })
+        : binding === "runtime"
+          ? createAgentSessionRuntimeCommandActions(owner, session).navigateTree(target, {}, controller.signal)
+          : binding === "compatibility-command"
+            ? compatibilityActions!.navigateTree(target, {}, controller.signal)
+            : session.prompt("/cancel-tree", { signal: controller.signal });
+      navigation = binding === "direct"
+        ? operation.then((result) => { assert.deepEqual(result, { cancelled: true, aborted: true }); })
+        : assert.rejects(operation, /cancel tree before commit/u);
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Tree cancellation did not settle")), 2_000);
+      });
+      await Promise.race([entered, navigation, deadline]);
+      controller.abort(reason);
+      releaseHook();
+      await Promise.race([navigation, deadline]);
+      await Promise.race([session.waitForIdle(), deadline]);
+      assert.equal(hookSignal?.aborted, true);
+      assert.deepEqual(manager.getV4State(), before, "cancelled pre-commit work must leave the journal unchanged");
+      assert.equal(provider.requests.length, 0);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      releaseHook();
+      try { await navigation; }
+      finally { await owner.dispose(); }
+    }
+  });
+}
+
 test("AgentSession lets extensions guard and summarize direct JSONL tree navigation", async (context) => {
   const cwd = await workspace();
   const credential = "registered-extension-branch-summary-credential";
@@ -10386,6 +10749,56 @@ test("AgentSession branch-summary cancellation settles without moving the JSONL 
   assert.equal(runtimeEvents.some((event) => event.type === "branch_summary_created"), false);
   await session.close();
 });
+
+test("native branch summarization keeps canonical targets distinct from split public IDs", async (context) => {
+  const cwd = await workspace();
+  const manager = SessionManager.inMemory(cwd, { id: "canonical-summary-target" });
+  context.after(() => manager.closeV4Store());
+  const createdAt = "2026-07-29T12:00:00.000Z";
+  manager.appendMessage({ id: "root-message", role: "user", content: [{ type: "text", text: "root" }], createdAt }, { nodeId: "root" });
+  manager.appendMessage({ id: "tool-message", role: "tool", content: [
+    { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+    { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+  ], createdAt }, { nodeId: "tool" });
+  manager.appendMessage({ id: "selected-message", role: "user", content: [{ type: "text", text: "selected user must stay outside summary" }], createdAt }, { nodeId: "tool~1" });
+  manager.appendMessage({ id: "abandoned-message", role: "assistant", content: [{ type: "text", text: "abandoned assistant must be summarized" }], createdAt }, { nodeId: "current" });
+  const before = manager.getEntries();
+  const provider = new RecordingProvider();
+  const session = await AgentSession.create(sessionOptions(manager, new ProviderRegistry([provider])));
+  context.after(async () => await session.close());
+  await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: branchSummaryModel(provider.models[0]!) });
+
+  const result = await session.navigateTree("tool~1", { summarize: true });
+
+  assert.equal(result.cancelled, false);
+  assert.equal(result.editorText, "selected user must stay outside summary");
+  assert.ok(result.summaryEntry);
+  const transcript = provider.requests[0]?.messages.filter((message) => message.role === "user")
+    .flatMap((message) => message.content).flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+  assert.match(transcript ?? "", /abandoned assistant must be summarized/u);
+  assert.doesNotMatch(transcript ?? "", /selected user must stay outside summary/u);
+  for (const entry of before) assert.deepEqual(manager.getEntry(entry.id), entry);
+});
+
+for (const kind of ["text", "reasoning"] as const) {
+  test(`branch summarization bounds retained empty ${kind} parts`, async (context) => {
+    const events: AdapterEvent[] = [{ type: "response_start", model: "one" }];
+    for (let part = 0; part <= ASSISTANT_CONTENT_LIMITS.blocks; part += 1) {
+      events.push(kind === "text"
+        ? { type: "text_delta", part, text: "" }
+        : { type: "reasoning_delta", part, text: "", visibility: "summary" });
+    }
+    events.push({ type: "text_delta", part: 0, text: "summary" }, {
+      type: "response_end", reason: "stop", state: { kind: "chat_completions", assistantMessage: {} },
+    });
+    const provider = new BranchSummaryEventProvider(events);
+    const { session, manager, target, leaf } = await branchSummaryFixture(provider);
+    context.after(async () => await session.close());
+    await assert.rejects(session.navigateTree(target, { summarize: true }), /(?:part|block|content).*(?:limit|exceed|maximum)|(?:limit|exceed|maximum).*(?:part|block|content)/iu);
+    assert.equal(manager.getLeafId(), leaf);
+    assert.equal(manager.getEntries().some((entry) => entry.type === "branch_summary"), false);
+  });
+}
 
 test("AgentSession uses the fallback context window for a sparse-model branch summary", async () => {
   const provider = new RecordingProvider();

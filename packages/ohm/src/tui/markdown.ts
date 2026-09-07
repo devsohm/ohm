@@ -286,11 +286,22 @@ function codeSpanEnd(source: string, index: number): number {
   return close > markerEnd ? close + marker.length : markerEnd;
 }
 
-function linkBounds(source: string, index: number): { labelEnd: number; targetEnd: number } | undefined {
+interface InlineScan {
+  linkSearchStart: number;
+  linkLabelEnd: number | undefined;
+  missingClosers: Set<string>;
+}
+
+function linkBounds(source: string, index: number, scan: InlineScan): { labelEnd: number; targetEnd: number } | undefined {
   if (source[index] !== "[" || delimiterIsEscaped(source, index)) return undefined;
-  let labelEnd = source.indexOf("](", index + 1);
-  while (labelEnd >= 0 && delimiterIsEscaped(source, labelEnd)) {
-    labelEnd = source.indexOf("](", labelEnd + 2);
+  let labelEnd = scan.linkLabelEnd;
+  if (labelEnd === undefined || index < scan.linkSearchStart || (labelEnd >= 0 && labelEnd <= index)) {
+    labelEnd = source.indexOf("](", index + 1);
+    while (labelEnd >= 0 && delimiterIsEscaped(source, labelEnd)) {
+      labelEnd = source.indexOf("](", labelEnd + 2);
+    }
+    scan.linkSearchStart = index;
+    scan.linkLabelEnd = labelEnd;
   }
   if (labelEnd <= index + 1) return undefined;
   const nested = source.indexOf("[", index + 1);
@@ -337,8 +348,9 @@ function delimiterRunCanClose(source: string, index: number, marker: string, len
   return rightFlanking && (marker !== "_" || !leftFlanking || next.punctuation);
 }
 
-function closingDelimiter(source: string, marker: string, length: number, start: number): number {
+function closingDelimiter(source: string, marker: string, length: number, start: number, scan: InlineScan): number {
   const delimiter = marker.repeat(length);
+  if (scan.missingClosers.has(delimiter)) return -1;
   let candidate = start;
   while (candidate < source.length) {
     if (source[candidate] === "\\") {
@@ -349,7 +361,7 @@ function closingDelimiter(source: string, marker: string, length: number, start:
       candidate = codeSpanEnd(source, candidate);
       continue;
     }
-    const link = linkBounds(source, candidate);
+    const link = linkBounds(source, candidate, scan);
     if (link !== undefined) {
       candidate = link.targetEnd + 1;
       continue;
@@ -374,6 +386,7 @@ function closingDelimiter(source: string, marker: string, length: number, start:
     }
     candidate += 1;
   }
+  scan.missingClosers.add(delimiter);
   return -1;
 }
 
@@ -395,6 +408,8 @@ function appendNestedInline(
 function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): MarkdownSpan[] {
   if (depth >= MAX_INLINE_DEPTH) return source === "" ? [] : [{ text: source, ...optionalProperties(baseRole === undefined ? undefined : { role: baseRole }) }];
   const spans: MarkdownSpan[] = [];
+  // A failed suffix search stays failed for later openers in this same source.
+  const scan: InlineScan = { linkSearchStart: 0, linkLabelEnd: undefined, missingClosers: new Set() };
   let index = 0;
   while (index < source.length) {
     if (spans.length >= MAX_MARKDOWN_SPANS_PER_LINE - 4) {
@@ -431,7 +446,7 @@ function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): M
         ? "___"
         : undefined;
     if (combined !== undefined && delimiterCanOpen(source, index, combined[0]!, 3)) {
-      const close = closingDelimiter(source, combined[0]!, 3, index + 3);
+      const close = closingDelimiter(source, combined[0]!, 3, index + 3, scan);
       if (close > index + 3) {
         appendNestedInline(spans, source.slice(index + 3, close), "title", depth);
         index = close + 3;
@@ -440,7 +455,7 @@ function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): M
     }
     const strong = source.startsWith("**", index) ? "**" : source.startsWith("__", index) ? "__" : undefined;
     if (strong !== undefined && delimiterCanOpen(source, index, strong[0]!, 2)) {
-      const close = closingDelimiter(source, strong[0]!, 2, index + 2);
+      const close = closingDelimiter(source, strong[0]!, 2, index + 2, scan);
       if (close > index + 2) {
         appendNestedInline(spans, source.slice(index + 2, close), "title", depth);
         index = close + 2;
@@ -448,7 +463,7 @@ function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): M
       }
     }
     if (source.startsWith("~~", index) && delimiterCanOpen(source, index, "~", 2)) {
-      const close = closingDelimiter(source, "~", 2, index + 2);
+      const close = closingDelimiter(source, "~", 2, index + 2, scan);
       if (close > index + 2) {
         appendNestedInline(spans, source.slice(index + 2, close), "muted", depth);
         index = close + 2;
@@ -457,7 +472,7 @@ function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): M
     }
     const emphasis = source[index] === "*" || source[index] === "_" ? source[index] : undefined;
     if (emphasis !== undefined && delimiterCanOpen(source, index, emphasis, 1)) {
-      const close = closingDelimiter(source, emphasis, 1, index + 1);
+      const close = closingDelimiter(source, emphasis, 1, index + 1, scan);
       if (close > index + 1) {
         appendNestedInline(spans, source.slice(index + 1, close), "muted", depth);
         index = close + 1;
@@ -465,7 +480,7 @@ function inlineMarkdownSpans(source: string, baseRole?: ThemeRole, depth = 0): M
       }
     }
     if (source[index] === "[") {
-      const link = linkBounds(source, index);
+      const link = linkBounds(source, index, scan);
       if (link !== undefined) {
         const target = source.slice(link.labelEnd + 2, link.targetEnd);
         const hyperlink = trustedHyperlinkTarget(target);

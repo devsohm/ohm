@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { copyToNativeClipboard } from "./clipboard-text.js";
 
 export interface ResizedImage {
   data: string;
@@ -56,27 +56,12 @@ interface CopyToClipboardOptions {
   signal?: AbortSignal;
 }
 
-async function pipeClipboard(command: string, args: string[], text: string, signal?: AbortSignal): Promise<boolean> {
-  return await new Promise<boolean>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"], windowsHide: true, signal });
-    child.once("error", (error: NodeJS.ErrnoException) => error.code === "ENOENT" ? resolve(false) : reject(error));
-    child.once("close", (code) => resolve(code === 0));
-    child.stdin.end(text);
-  });
-}
-
 export async function copyToClipboard(text: string, options: CopyToClipboardOptions = {}): Promise<void> {
   if (text === "") throw new Error("There is no text to copy");
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes > 75_000) throw new RangeError("Clipboard text exceeds the 75,000-byte terminal fallback limit");
   options.signal?.throwIfAborted();
-  const platform = options.platform ?? process.platform;
-  if (platform === "darwin" && await pipeClipboard("pbcopy", [], text, options.signal)) return;
-  if (platform === "win32" && await pipeClipboard("clip.exe", [], text, options.signal)) return;
-  if (platform === "linux") {
-    if (await pipeClipboard("wl-copy", [], text, options.signal)) return;
-    if (await pipeClipboard("xclip", ["-selection", "clipboard"], text, options.signal)) return;
-  }
+  if (await copyToNativeClipboard(text, options) !== undefined) return;
   options.signal?.throwIfAborted();
   process.stdout.write(`\u001b]52;c;${Buffer.from(text).toString("base64")}\u0007`);
 }

@@ -53,24 +53,39 @@ async function readResponseBody(
   response: Response,
   maxResponseBytes: number,
   label: string,
+  signal: AbortSignal,
 ): Promise<string> {
   const reader = response.body?.getReader();
-  if (reader === undefined) return "";
+  if (reader === undefined) {
+    signal.throwIfAborted();
+    return "";
+  }
 
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  let cancelled = false;
+  const cancel = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
+      signal.throwIfAborted();
       const next = await reader.read();
+      signal.throwIfAborted();
       if (next.done) break;
       bytes += next.value.byteLength;
       if (bytes > maxResponseBytes) {
-        await reader.cancel().catch(() => undefined);
+        cancel();
         throw new CloudAuthIoError("response_limit", `${label} response exceeded configured limit`);
       }
       chunks.push(next.value);
     }
   } finally {
+    signal.removeEventListener("abort", cancel);
+    if (signal.aborted) cancel();
     reader.releaseLock();
   }
   return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
@@ -105,7 +120,7 @@ export async function requestBounded(
 
   let text: string;
   try {
-    text = await readResponseBody(response, options.maxResponseBytes, options.label);
+    text = await readResponseBody(response, options.maxResponseBytes, options.label, timeoutSignal);
   } catch (error) {
     if (error instanceof CloudAuthIoError) throw error;
     if (options.signal?.aborted === true) {

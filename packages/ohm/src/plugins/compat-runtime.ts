@@ -833,7 +833,7 @@ export class PluginRunner {
           ? undefined
           : runner.#host.pluginDataPaths(selected.resolvedPath);
         if (paths === undefined) {
-          throw new Error("Plugin data paths are available only inside a loaded extension callback");
+          throw new Error("Plugin data paths are available only inside a loaded plugin callback");
         }
         return Object.freeze({ userData: paths.user, workspaceData: paths.workspace });
       },

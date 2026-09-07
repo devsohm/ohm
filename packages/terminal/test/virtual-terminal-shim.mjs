@@ -27,6 +27,8 @@ export class VirtualTerminal {
     this._italic = false;
     this._underline = false;
     this._wrapPending = false;
+    this._autoWrap = true;
+    this.cursorVisible = true;
     this._savedCursor = undefined;
     this.xterm = {
       get rows() { return rows; },
@@ -110,6 +112,9 @@ export class VirtualTerminal {
 
   reset() {
     this.clear();
+    this._autoWrap = true;
+    this.cursorVisible = true;
+    this._savedCursor = undefined;
     this._italic = false;
     this._underline = false;
     this.writes.length = 0;
@@ -156,13 +161,15 @@ export class VirtualTerminal {
   _put(grapheme) {
     const width = Math.max(0, visibleWidth(grapheme));
     if (width === 0) {
-      const column = Math.max(0, this._cursorX - 1);
+      const column = this._wrapPending ? this._cursorX : Math.max(0, this._cursorX - 1);
       this._ensureLine(this._cursorY)[column].text += grapheme;
       return;
     }
     if (this._wrapPending || this._cursorX + width > this.columns) {
-      this._cursorX = 0;
-      this._lineFeed();
+      if (this._autoWrap) {
+        this._cursorX = 0;
+        this._lineFeed();
+      } else if (width > this.columns - this._cursorX) return;
       this._wrapPending = false;
     }
     const line = this._ensureLine(this._cursorY);
@@ -170,8 +177,9 @@ export class VirtualTerminal {
     for (let offset = 1; offset < width && this._cursorX + offset < this.columns; offset += 1) {
       line[this._cursorX + offset] = { text: "", italic: this._italic, underline: this._underline, continuation: true, written: true };
     }
-    this._cursorX += width;
-    this._wrapPending = this._cursorX >= this.columns;
+    const next = this._cursorX + width;
+    this._cursorX = Math.min(next, this.columns - 1);
+    this._wrapPending = this._autoWrap && next >= this.columns;
   }
 
   _eraseLine(mode) {
@@ -207,14 +215,14 @@ export class VirtualTerminal {
     const amount = Math.max(1, first || 1);
     if (final !== "m" && final !== "h" && final !== "l") this._wrapPending = false;
     if (final === "A") this._cursorY = Math.max(this._viewportY, this._cursorY - amount);
-    else if (final === "B") { this._cursorY += amount; this._ensureLine(this._cursorY); this._viewportY = Math.max(this._viewportY, this._cursorY - this.rows + 1); }
+    else if (final === "B") this._cursorY = Math.min(this._viewportY + this.rows - 1, this._cursorY + amount);
     else if (final === "C") this._cursorX = Math.min(this.columns - 1, this._cursorX + amount);
     else if (final === "D") this._cursorX = Math.max(0, this._cursorX - amount);
-    else if (final === "E") { this._cursorY += amount; this._cursorX = 0; this._ensureLine(this._cursorY); }
+    else if (final === "E") { this._cursorY = Math.min(this._viewportY + this.rows - 1, this._cursorY + amount); this._cursorX = 0; }
     else if (final === "F") { this._cursorY = Math.max(this._viewportY, this._cursorY - amount); this._cursorX = 0; }
     else if (final === "G" || final === "`") this._cursorX = Math.max(0, Math.min(this.columns - 1, amount - 1));
     else if (final === "H" || final === "f") {
-      this._cursorY = this._viewportY + Math.max(0, (values[0] || 1) - 1);
+      this._cursorY = this._viewportY + Math.max(0, Math.min(this.rows - 1, (values[0] || 1) - 1));
       this._cursorX = Math.max(0, Math.min(this.columns - 1, (values[1] || 1) - 1));
       this._ensureLine(this._cursorY);
     } else if (final === "J") this._eraseDisplay(first);
@@ -228,8 +236,19 @@ export class VirtualTerminal {
         else if (mode === 4) this._underline = true;
         else if (mode === 24) this._underline = false;
       }
-    } else if (final === "s") this._savedCursor = { x: this._cursorX, y: this._cursorY };
-    else if (final === "u" && this._savedCursor) { this._cursorX = this._savedCursor.x; this._cursorY = this._savedCursor.y; }
+    } else if ((final === "h" || final === "l") && parameters.startsWith("?")) {
+      if (first === 7) { this._autoWrap = final === "h"; this._wrapPending = false; }
+      if (first === 25) this.cursorVisible = final === "h";
+    } else if (final === "s") this._saveCursor();
+    else if (final === "u") this._restoreCursor();
+  }
+
+  _saveCursor() { this._savedCursor = { x: this._cursorX, y: this._cursorY - this._viewportY }; }
+  _restoreCursor() {
+    if (!this._savedCursor) return;
+    this._cursorX = Math.min(this.columns - 1, this._savedCursor.x);
+    this._cursorY = this._viewportY + Math.min(this.rows - 1, this._savedCursor.y);
+    this._wrapPending = false;
   }
 
   _consume(value) {
@@ -253,8 +272,8 @@ export class VirtualTerminal {
           index = end;
           continue;
         }
-        if (next === "7") this._savedCursor = { x: this._cursorX, y: this._cursorY };
-        else if (next === "8" && this._savedCursor) { this._cursorX = this._savedCursor.x; this._cursorY = this._savedCursor.y; }
+        if (next === "7") this._saveCursor();
+        else if (next === "8") this._restoreCursor();
         index += Math.min(2, value.length - index);
         continue;
       }
@@ -262,8 +281,8 @@ export class VirtualTerminal {
       if (character === "\n") { this._lineFeed(); this._wrapPending = false; index += 1; continue; }
       if (character === "\b") { this._cursorX = Math.max(0, this._cursorX - 1); index += 1; continue; }
       if (character === "\t") {
-        const stop = Math.min(this.columns, this._cursorX + (8 - (this._cursorX % 8)));
-        while (this._cursorX < stop) this._put(" ");
+        const count = Math.min(this.columns - this._cursorX, 8 - (this._cursorX % 8));
+        for (let offset = 0; offset < count; offset += 1) this._put(" ");
         index += 1;
         continue;
       }

@@ -12,7 +12,7 @@ import { optionalProperties } from "../../src/core/optional-properties.js";
 import type { SessionEntry } from "../../src/plugins/session-contract.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { AgentSession } from "../../src/service/agent-session.js";
-import { startServeServer, type ServeSessionRuntime } from "../../src/serve/server.js";
+import { startServeServer, type ServeServer, type ServeSessionRuntime } from "../../src/serve/server.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
 
 const TOKEN = "history-fixture-token-0123456789abcdef";
@@ -278,8 +278,14 @@ test("serve history handles empty and unavailable history and rejects inconsiste
 
 test("serve history reopens durable SQLite entries without exposing private provider state", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-http-history-"));
-  t.after(async () => await rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "durable-history" });
+  let manager: SessionManager | undefined;
+  let server: ServeServer | undefined;
+  t.after(async () => {
+    await server?.close();
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, join(root, "sessions"), { id: "durable-history" });
   const userId = manager.appendMessage({ id: "user-message", role: "user", content: [{ type: "text", text: "durable question" }], createdAt: "2026-09-05T00:00:00.000Z" });
   const secret = "history-fixture-registered-secret";
   defaultSecretRedactor.register(secret);
@@ -309,8 +315,7 @@ test("serve history reopens durable SQLite entries without exposing private prov
       async close() { await session.close(); },
     };
   };
-  const server = await startServeServer({ token: TOKEN, sessionFactory: { create: open, open } });
-  t.after(async () => await server.close());
+  server = await startServeServer({ token: TOKEN, sessionFactory: { create: open, open } });
   const base = `${server.origin}/v1/sessions`;
   const openSession = async () => await fetch(`${base}/open`, {
     method: "POST", headers: HEADERS, body: JSON.stringify({ sessionId: "durable-history" }),

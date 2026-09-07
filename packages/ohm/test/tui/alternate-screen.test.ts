@@ -86,6 +86,23 @@ test("alternate-screen parser consumes focus reports and distinguishes hover mot
   }]);
 });
 
+test("alternate-screen parser preserves pasted mouse and focus controls at every chunk boundary", () => {
+  const pasted = Buffer.from("\u001b[200~before界\u001b[<0;1;1M\u001b[<0;1;1m\u001b[<64;2;2M\u001b[M !!\u001b[Oafter\u001b[201~");
+  for (let boundary = 0; boundary <= pasted.length; boundary += 1) {
+    const parser = new AlternateScreenInputParser();
+    const results = [parser.push(pasted.subarray(0, boundary)), parser.push(pasted.subarray(boundary))];
+    assert.deepEqual({
+      data: Buffer.concat(results.map((result) => result.data)),
+      mouse: results.flatMap((result) => result.mouse),
+      focusLost: results.some((result) => result.focusLost),
+    }, { data: pasted, mouse: [], focusLost: false }, `boundary ${boundary}`);
+    const outside = parser.push("\u001b[<0;1;1M\u001b[O");
+    assert.equal(outside.mouse.length, 1, `ordinary mouse report after paste at ${boundary}`);
+    assert.equal(outside.focusLost, true, `ordinary focus report after paste at ${boundary}`);
+    assert.equal(outside.data.length, 0);
+  }
+});
+
 test("alternate-screen interaction scrolls vertically and ignores horizontal wheels", () => {
   const interaction = new AlternateScreenInteraction();
   interaction.updateFrame("frame", 20, 4);

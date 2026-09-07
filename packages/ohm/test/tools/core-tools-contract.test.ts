@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ import {
   ShellTool,
   WorkspaceBoundary,
   WriteTool,
+  withFileMutationQueue,
 } from "../../src/tools/index.js";
 import type { ToolContext } from "../../src/tools/types.js";
 
@@ -762,6 +763,50 @@ test("edit and write serialize aliases of the same physical file", async (t) => 
   ]);
   assert.equal(await readFile(path, "utf8"), "ALPHA\nBETA\n");
 });
+
+for (const created of [false, true]) {
+  test(`write retains one parent-alias mutation lane while the target is ${created ? "newly created" : "missing"}`, {
+    timeout: 5_000,
+  }, async (t) => {
+    const workspace = await fixture();
+    const entered = deferred();
+    const release = deferred();
+    const runs: Array<Promise<unknown>> = [];
+    t.after(async () => {
+      release.resolve();
+      await Promise.allSettled(runs);
+      await workspace.close();
+    });
+    const directory = join(workspace.root, "real");
+    const alias = join(workspace.root, "alias");
+    await mkdir(directory);
+    await symlink(directory, alias, process.platform === "win32" ? "junction" : "dir");
+    const path = join(directory, "new.txt");
+    const aliasPath = join(alias, "new.txt");
+    const writes: string[] = [];
+    const tool = new WriteTool({ operations: {
+      async mkdir(parent) { assert.ok(parent === directory || parent === alias); },
+      async writeFile(target, content) {
+        writes.push(content);
+        if (content === "first") {
+          if (created) await writeFile(target, content);
+          entered.resolve();
+          await release.promise;
+        }
+        await writeFile(target, content);
+      },
+    } });
+    runs.push(tool.execute({ path: aliasPath, content: "first" }, workspace.context));
+    await entered.promise;
+    runs.push(tool.execute({ path: created ? aliasPath : path, content: "second" }, workspace.context));
+    // Registration is ordered: this unrelated lane observes both prior admissions.
+    await withFileMutationQueue(join(workspace.root, "unrelated.txt"), async () => {});
+    assert.deepEqual(writes, ["first"], "an alias must not bypass the active raw write");
+    release.resolve();
+    await Promise.all(runs);
+    assert.equal(await readFile(path, "utf8"), "second");
+  });
+}
 
 for (const kind of ["write", "edit"] as const) {
   test(`an aborted ${kind} retains its mutation lane until the underlying write settles`, async (t) => {

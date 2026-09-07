@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isObjectValue } from "../../src/internal/value-schemas.js";
 import {
 	parseSessionV4Bytes,
 	parseSessionV4CommitDraft,
@@ -65,6 +66,57 @@ function isBoundedValidationError<ErrorValue>(error: ErrorValue): boolean {
 	assert.equal(error instanceof RangeError, false);
 	return true;
 }
+
+function rawStateBytes(state: string): Buffer {
+	const commit: SessionV4Commit = {
+		...nameCommit(),
+		changes: [{ type: "conversation_node", node: {
+			id: "state", parentId: null, createdAt: TIME,
+			nodeType: "extension_state", extensionId: "test", state: "__raw_state__",
+		} }],
+	};
+	return Buffer.from(`${JSON.stringify(HEADER)}\n${JSON.stringify(commit).replace('"__raw_state__"', state)}\n`);
+}
+
+test("byte reader rejects numeric overflow and malformed JSON through strict validation", () => {
+	for (const value of ["1e400", "-1e400"]) {
+		assert.throws(() => parseSessionV4Bytes(rawStateBytes(`{"value":${value}}`)), isBoundedValidationError);
+		const structural = rawStateBytes("null").toString().replace('"sequence":1', `"sequence":${value}`);
+		assert.throws(() => parseSessionV4Bytes(Buffer.from(structural)), isBoundedValidationError);
+		const header = rawStateBytes("null").toString().replace('"version":4', `"version":${value}`);
+		assert.throws(() => parseSessionV4Bytes(Buffer.from(header)), isBoundedValidationError);
+	}
+	assert.throws(() => parseSessionV4Bytes(rawStateBytes("{broken")), /line 2 is not valid JSON/u);
+	const unknown = rawStateBytes("null").toString().replace('"sequence":1', '"extra":true,"sequence":1');
+	assert.throws(() => parseSessionV4Bytes(Buffer.from(unknown)), /line 2.extra is not allowed/u);
+});
+
+test("byte reader preserves exact JSON depth and value limits without unbounded recursion", () => {
+	// The state value starts at depth 4; its enclosing commit contains 15 values including state.
+	const nested = (depth: number): string => `${"[".repeat(depth)}null${"]".repeat(depth)}`;
+	const wide = (count: number): string => `[${Array.from({ length: count }, () => "null").join(",")}]`;
+	parseSessionV4Bytes(rawStateBytes(nested(SESSION_V4_MAX_JSON_DEPTH - 4)));
+	parseSessionV4Bytes(rawStateBytes(wide(SESSION_V4_MAX_JSON_VALUE_COUNT - 15)));
+	for (const value of [nested(SESSION_V4_MAX_JSON_DEPTH - 3), nested(10_000), wide(SESSION_V4_MAX_JSON_VALUE_COUNT - 14)]) {
+		assert.throws(() => parseSessionV4Bytes(rawStateBytes(value)), isBoundedValidationError);
+	}
+});
+
+test("byte reader preserves own prototype keys and detaches returned commits from state", () => {
+	const result = parseSessionV4Bytes(rawStateBytes('{"__proto__":{"safe":true}}'));
+	const change = result.commits[0]?.changes[0];
+	assert.ok(change?.type === "conversation_node" && change.node.nodeType === "extension_state");
+	const state = change.node.state;
+	assert.ok(isObjectValue(state));
+	assert.equal(Object.getPrototypeOf(state), Object.prototype);
+	assert.equal(Object.hasOwn(state, "__proto__"), true);
+	const own = Object.getOwnPropertyDescriptor(state, "__proto__");
+	assert.deepEqual(own?.value, { safe: true });
+	Reflect.set(state, "__proto__", { changed: true });
+	const retained = result.state.nodes.get("state");
+	assert.ok(retained?.nodeType === "extension_state");
+	assert.deepEqual(retained.state, JSON.parse('{"__proto__":{"safe":true}}'));
+});
 
 test("session writers create private storage and secure reopened files under permissive umasks", {
 	skip: process.platform === "win32" ? "POSIX permission bits do not apply on Windows" : false,

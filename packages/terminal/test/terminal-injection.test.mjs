@@ -163,4 +163,63 @@ describe("ProcessTerminal stream injection", () => {
     assert.equal(output.writes.filter((value) => value === "\x1b[<u").length, 1);
     terminal.stop();
   });
+
+  it("releases input ownership when the stop output write throws", () => {
+    const input = new TestInput();
+    const output = new TestOutput();
+    const terminal = new ProcessTerminal({ input, output });
+    const failure = new Error("terminal output closed");
+    const write = output.write.bind(output);
+    const received = [];
+    let resizes = 0;
+    output.write = (value) => {
+      if (value === "\x1b[?2004l\x1b[<u") throw failure;
+      return write(value);
+    };
+    try {
+      terminal.start((value) => received.push(value), () => { resizes += 1; });
+      input.emit("data", "\x1b[?7u");
+      input.emit("data", "a");
+      output.emit("resize");
+      assert.equal(terminal.kittyProtocolActive, true);
+      assert.throws(() => terminal.stop(), (error) => error === failure);
+      terminal.stop();
+      assert.equal(input.listenerCount("data"), 0);
+      assert.equal(output.listenerCount("resize"), 0);
+      assert.equal(input.pauses, 1);
+      assert.equal(input.isRaw, false);
+      assert.deepEqual(input.rawModes, [true, false]);
+      assert.equal(terminal.kittyProtocolActive, false);
+      input.emit("data", "b");
+      output.emit("resize");
+      assert.deepEqual(received, ["a"]);
+      assert.equal(resizes, 1);
+    } finally {
+      output.write = write;
+      terminal.stop();
+      input.removeAllListeners();
+      output.removeAllListeners();
+    }
+  });
+
+  for (const [name, previous, next] of [
+    ["partial control sequence", "\x1b[", "A"],
+    ["keyboard echo", "\x1b[97u", "a"],
+  ]) {
+    it(`clears ${name} ownership before restarting`, () => {
+      const input = new TestInput();
+      const terminal = new ProcessTerminal({ input, output: new TestOutput() });
+      const before = [];
+      const after = [];
+      try {
+        terminal.start((value) => before.push(value), () => {});
+        input.emit("data", previous);
+        assert.deepEqual(before, name === "keyboard echo" ? [previous] : []);
+        terminal.stop();
+        terminal.start((value) => after.push(value), () => {});
+        input.emit("data", next);
+        assert.deepEqual(after, [next]);
+      } finally { terminal.stop(); }
+    });
+  }
 });

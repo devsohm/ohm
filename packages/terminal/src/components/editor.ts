@@ -43,6 +43,7 @@ export class Editor implements Component {
   #provider: AutocompleteProvider | undefined;
   #completion: CompletionState | undefined;
   #completionRequest = 0;
+  #completionController: AbortController | undefined;
   #historyReady = false;
   #paddingX: number;
   #autocompleteMaxVisible: number;
@@ -110,10 +111,13 @@ export class Editor implements Component {
       this.insertTextAtCursor("  ");
       return;
     }
-    const request = ++this.#completionRequest;
+    this.#closeAutocomplete();
+    const request = this.#completionRequest;
+    const controller = new AbortController();
+    this.#completionController = controller;
     try {
       const result = await provider.getSuggestions(lines, cursor.line, cursor.col, {
-        signal: new AbortController().signal,
+        signal: controller.signal,
         force,
       });
       if (request !== this.#completionRequest) return;
@@ -126,6 +130,8 @@ export class Editor implements Component {
       }
     } catch {
       if (request === this.#completionRequest) this.#completion = undefined;
+    } finally {
+      if (this.#completionController === controller) this.#completionController = undefined;
     }
     this.tui.requestRender();
   }
@@ -159,6 +165,9 @@ export class Editor implements Component {
   #closeAutocomplete(): void {
     this.#completionRequest += 1;
     this.#completion = undefined;
+    const controller = this.#completionController;
+    this.#completionController = undefined;
+    controller?.abort();
   }
 
   #changed(before: string): void {
@@ -176,6 +185,7 @@ export class Editor implements Component {
 
   handleInput(data: string): void {
     const before = this.#editor.text;
+    const beforeCursor = this.#editor.cursor;
     const paste = data.startsWith(BRACKETED_PASTE_START) && data.endsWith(BRACKETED_PASTE_END)
       ? data.slice(BRACKETED_PASTE_START.length, -BRACKETED_PASTE_END.length)
       : undefined;
@@ -185,7 +195,7 @@ export class Editor implements Component {
       this.#changed(before);
       return;
     }
-    if (matchesKey(data, "escape") && this.#completion !== undefined) this.#closeAutocomplete();
+    if (matchesKey(data, "escape")) this.#closeAutocomplete();
     else if (matchesKey(data, "tab")) {
       if (this.#completion === undefined) void this.#complete(true);
       else this.#applyCompletion();
@@ -218,7 +228,10 @@ export class Editor implements Component {
     else if (matchesKey(data, "shift+enter") || matchesKey(data, "ctrl+j")) this.#editor.insert("\n");
     else if (matchesKey(data, "enter")) {
       if (this.#completion !== undefined) this.#applyCompletion();
-      else this.onSubmit?.(this.getExpandedText());
+      else {
+        this.#closeAutocomplete();
+        this.onSubmit?.(this.getExpandedText());
+      }
       return;
     } else {
       const printable = decodePrintableKey(data);
@@ -228,7 +241,7 @@ export class Editor implements Component {
       }
     }
     if (before !== this.#editor.text && this.#shouldCompleteAfterTyping()) void this.#complete(false);
-    else if (before !== this.#editor.text) this.#closeAutocomplete();
+    else if (before !== this.#editor.text || beforeCursor !== this.#editor.cursor) this.#closeAutocomplete();
     this.#changed(before);
   }
 

@@ -45,6 +45,13 @@ host close also stops the worker and closes generation-owned services, state,
 and presentations. Observer failures cannot roll back committed state or stop
 later observers.
 
+Calling the returned registration's `dispose()` promptly aborts in-flight
+setup. Concurrent disposal calls join the same cleanup completion for an
+already-active facet. If aborted setup returns a cleanup function only later,
+the host invokes it exactly once and observes its completion or rejection, but
+`dispose()` does not wait for that late setup or cleanup. Setup and cleanup
+should therefore honor cancellation and bound their own work.
+
 ## Named replicated JSON state
 
 `facet.createState(initial, options?)` is an activation-local bounded reducer.

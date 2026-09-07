@@ -61,6 +61,34 @@ test("AuthStorage serializes concurrent writers without dropping provider entrie
   }
 });
 
+test("in-memory AuthStorage serializes writers without dropping provider entries", async () => {
+  const storage = AuthStorage.inMemory();
+  await Promise.all([
+    storage.write("left", { kind: "api_key", provider: "left", apiKey: "left-fixture-key" }),
+    storage.write("right", { kind: "api_key", provider: "right", apiKey: "right-fixture-key" }),
+  ]);
+  assert.deepEqual((await storage.list()).map((entry) => entry.providerId).sort(), ["left", "right"]);
+});
+
+test("in-memory AuthStorage serializes concurrent credential rotation", async () => {
+  const storage = AuthStorage.inMemory({
+    fixture: { kind: "api_key", provider: "fixture", apiKey: "original-fixture-key" },
+  });
+  let rotations = 0;
+  const rotate = async () => await storage.modify("fixture", async (current) => {
+    assert.equal(current?.kind, "api_key");
+    if (current?.kind !== "api_key" || current.apiKey !== "original-fixture-key") return undefined;
+    rotations += 1;
+    await Promise.resolve();
+    return { ...current, apiKey: "rotated-fixture-key" };
+  });
+  await Promise.all([rotate(), rotate()]);
+  assert.equal(rotations, 1);
+  assert.deepEqual(await storage.read("fixture"), {
+    kind: "api_key", provider: "fixture", apiKey: "rotated-fixture-key",
+  });
+});
+
 test("AuthStorage rejects unprotectable credentials before writing or replacing stored data", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-auth-storage-"));
   try {

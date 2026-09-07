@@ -1057,11 +1057,12 @@ export function createOwnedInteractiveDirectUiContext(
       ...optionalProperties(options.onHandle === undefined ? undefined : { onHandle: (handle: RuntimeUiComponentHandle) => options.onHandle?.(overlayHandle(handle)) }),
     };
     let mounted: (Component & { dispose?(): void }) | undefined;
+    let settled = false;
     try {
       const result = await controller.customRaw<T>(
         async (done) => {
           mounted = await factory(callbackTui(tui, presentationSignal), theme, keybindings, done);
-          themedComponents.add(mounted);
+          if (!settled && !presentationSignal.aborted) themedComponents.add(mounted);
           return mounted;
         },
         selectedOptions,
@@ -1069,6 +1070,7 @@ export function createOwnedInteractiveDirectUiContext(
       );
       return result!;
     } finally {
+      settled = true;
       if (mounted !== undefined) themedComponents.delete(mounted);
     }
   };

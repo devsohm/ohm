@@ -153,7 +153,7 @@ export function projectLoadedPluginHost(
 }
 
 /**
- * Low-level pre-approved compatibility loader for direct extension factories.
+ * Low-level pre-approved compatibility loader for direct plugin factories.
  *
  * Discovers project, user, then explicitly configured factories and loads them
  * sequentially. The caller must already have approved project-local executable

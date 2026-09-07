@@ -713,10 +713,20 @@ class ModelsCollection implements MutableModels {
     }
     await Promise.all(providers.map(async (provider) => {
       if (options.signal?.aborted) return;
+      const isCurrent = (): boolean => this.#providers.get(provider.id) === provider;
+      const providerStore: ProviderModelsStore = {
+        read: async (id, cacheScope) => isCurrent() ? await modelsStore.read(id, cacheScope) : undefined,
+        write: async (id, entry) => {
+          if (isCurrent()) await modelsStore.write(id, entry);
+        },
+        delete: async (id) => {
+          if (isCurrent()) await modelsStore.delete(id);
+        },
+      };
       let store = this.#modelsStoreForCredential(
         provider.id,
         providerModelsCacheScope(provider.id, undefined),
-        modelsStore,
+        providerStore,
       );
       let stored: ProviderCredential | undefined;
       try {
@@ -725,14 +735,14 @@ class ModelsCollection implements MutableModels {
         store = this.#modelsStoreForCredential(
           provider.id,
           providerModelsCacheScope(provider.id, stored, storedScope),
-          modelsStore,
+          providerStore,
         );
         const credential = await this.#refreshCredential(provider, stored, allowNetwork, options.signal);
         if (options.signal?.aborted) return;
         store = this.#modelsStoreForCredential(
           provider.id,
           providerModelsCacheScope(provider.id, credential, providerCredentialScope(credential) ?? storedScope),
-          modelsStore,
+          providerStore,
         );
         await provider.refreshModels({
           ...optionalProperties(credential === undefined ? undefined : { credential }),

@@ -275,7 +275,6 @@ class ChatCompletionsAdapter implements ProviderAdapter {
       });
 
       let started = false;
-      let sawDone = false;
       let responseId: string | undefined;
       let responseModel = request.model;
       let finishReason: string | undefined;
@@ -470,15 +469,9 @@ class ChatCompletionsAdapter implements ProviderAdapter {
           nativeFinishReason = asString(choice.native_finish_reason) ?? nativeFinishReason;
         }
       }
-      sawDone = true;
-
       if (!started) throw new ProtocolError("Chat completion stream ended before any response chunk");
       if (finishReason === undefined) {
-        throw new ProtocolError(
-          sawDone
-            ? "Chat completion emitted [DONE] without a finish reason"
-            : "Chat completion stream ended before a finish reason",
-        );
+        throw new ProtocolError("Chat completion emitted [DONE] without a finish reason");
       }
       const mappedFinishReason = mapChatFinish(finishReason, tools.size > 0, refusal !== "");
       if (mappedFinishReason === "error") {
@@ -734,7 +727,7 @@ function buildChatBody(
   if (openRouter && request.sessionId !== undefined && request.cacheRetention !== "none") {
     body.session_id = request.sessionId;
   }
-  if (profile === "kimi-coding" && request.sessionId !== undefined && request.sessionId !== "") {
+  if (profile === "kimi-coding" && request.cacheRetention !== "none" && request.sessionId !== undefined && request.sessionId !== "") {
     const cacheKey = sessionAffinityKey(request.sessionId);
     if (cacheKey !== undefined) body.prompt_cache_key = cacheKey;
   }

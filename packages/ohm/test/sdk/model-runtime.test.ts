@@ -148,6 +148,27 @@ test("ModelRuntime refresh updates provider configuration without applying it to
   assert.equal(callerOwned.getModel("sdk-refreshed", "refreshed-model"), undefined);
 });
 
+test("ModelRuntime caller-owned models do not acquire ignored credential storage", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "ohm-caller-model-storage-"));
+  context.after(async () => await rm(directory, { recursive: true, force: true }));
+  const blockedParent = join(directory, "not-a-directory");
+  await writeFile(blockedParent, "fixture marker");
+  const models = createModels();
+  const runtime = await ModelRuntime.create({
+    models,
+    authPath: join(blockedParent, "auth.json"),
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
+  try {
+    assert.equal(runtime.models(), models);
+    assert.deepEqual(runtime.getModels(), []);
+    assert.equal(await readFile(blockedParent, "utf8"), "fixture marker");
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("caller-owned model refresh failures are contained without reflection", async () => {
   const models = createModels();
   let traps = 0;

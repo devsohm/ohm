@@ -1791,7 +1791,7 @@ export class ProviderRegistry {
     return this.list();
   }
 
-  /** Synchronous last-known model snapshot used by direct extension APIs. */
+  /** Synchronous last-known model snapshot used by direct plugin APIs. */
   getModels(provider?: ProviderId): readonly ModelInfo[] {
     if (provider !== undefined) return this.#adapters.has(provider) ? this.#effectiveModels(provider) : [];
     return [...this.#adapters.keys()].flatMap((id) => this.#effectiveModels(id));

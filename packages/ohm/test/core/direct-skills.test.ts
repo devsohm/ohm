@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { formatSkillsForPrompt, loadSkills } from "../../src/core/skills.js";
+import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir } from "../../src/core/skills.js";
 
 const manifest = (name: string, description: string, disabled = false): string =>
   `---\nname: ${name}\ndescription: ${description}\n${disabled ? "disable-model-invocation: true\n" : ""}---\nInstructions`;
@@ -17,6 +17,20 @@ async function writeFlatFiles(directory: string, count: number, name: (index: nu
     ));
   }
 }
+
+test("loadSkillsFromDir honors explicit resource ownership scope", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-direct-skill-scope-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const skill = join(root, "review");
+  await mkdir(skill);
+  await writeFile(join(skill, "SKILL.md"), manifest("review", "Review"));
+  for (const scope of ["user", "project", "temporary"] as const) {
+    const result = loadSkillsFromDir(root, { scope });
+    assert.equal(result.skills.length, 1);
+    assert.equal(result.skills[0]?.sourceInfo.scope, scope);
+  }
+  assert.equal(loadSkillsFromDir(root).skills[0]?.sourceInfo.scope, "temporary");
+});
 
 test("direct skill loading discovers defaults, stops recursion, and reports name collisions", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-direct-skills-"));

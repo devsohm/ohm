@@ -111,6 +111,12 @@ embedded or downloadable journal.
 Tools and thinking can be hidden globally. The viewer stores its sidebar width
 locally and uses an overlay on narrow screens.
 
+Pre-rendered tool output in `buildSessionExportData().renderedTools` is keyed by
+`JSON.stringify([entryId, contentBlockIndex])`. Provider call IDs are not unique
+across turns or branches; renderer views retain those original call IDs while
+the viewer selects each stored occurrence separately. Result inputs and call
+status are paired through the entry's ancestry, not another branch's invocation.
+
 When shell conversion has no live runtime metadata, ohm derives stored
 metadata where possible and uses the safe generic tool renderer.
 

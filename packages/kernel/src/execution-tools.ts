@@ -54,7 +54,7 @@ function captureText(capture: ShellCapture): string {
     const largest = Math.max(capture.lastLineBytes, capture.truncation.totalBytes);
     notes.push(`[A complete line size is ${(largest / (1024 * 1024)).toFixed(1)}MB.]`);
   }
-  if (capture.fullOutputPath !== undefined) notes.push(`[Complete output: ${capture.fullOutputPath}]`);
+  if (capture.fullOutputPath !== undefined) notes.push(`[${capture.executionError?.code === "output_limit" ? "Captured output" : "Complete output"}: ${capture.fullOutputPath}]`);
   return [capture.output, ...notes].filter((value) => value !== "").join("\n");
 }
 
@@ -76,6 +76,7 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
       await options.prepare?.(execution, selected);
       const captured = await executeShellWithCapture(selected.env, execution.command, {
         env: execution.env,
+        ...optionalProperty("cwd", execution.cwd),
         ...optionalProperty("abortSignal", signal),
         ...optionalProperty("timeout", execution.timeout),
         returnExecutionErrors: true,
@@ -150,11 +151,12 @@ async function serialMutation<T>(path: string, action: () => Promise<T>): Promis
   const previous = mutations.get(path) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((accept) => { release = accept; });
-  mutations.set(path, previous.then(() => current));
+  const tail = previous.then(() => current);
+  mutations.set(path, tail);
   await previous;
   try { return await action(); } finally {
     release();
-    if (mutations.get(path) === current) mutations.delete(path);
+    if (mutations.get(path) === tail) mutations.delete(path);
   }
 }
 
@@ -166,7 +168,7 @@ export function createWriteTool<TContext extends ExecutionToolContext = Executio
     parameters: writeParameters,
     async execute(_toolCallId, input, signal, _onUpdate, context) {
       const { env } = requireContext(context);
-      return serialMutation(input.path, async () => {
+      return serialMutation(getOrThrow(await env.absolutePath(input.path)), async () => {
         getOrThrow(await env.replaceFile(input.path, input.content, signal));
         const bytes = Buffer.byteLength(input.content, "utf8");
         return {
@@ -187,7 +189,7 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
     async execute(_toolCallId, input, signal, _onUpdate, context) {
       if (input.edits.length === 0) throw new Error("Provide at least one replacement edit");
       const { env } = requireContext(context);
-      return serialMutation(input.path, async () => {
+      return serialMutation(getOrThrow(await env.absolutePath(input.path)), async () => {
         let value = getOrThrow(await env.readTextFile(input.path, signal, MAX_FILE_BYTES));
         let replacements = 0;
         for (const edit of input.edits) {

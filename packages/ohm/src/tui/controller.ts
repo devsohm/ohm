@@ -2881,21 +2881,22 @@ export class TuiController {
       const index = this.#rawEditors.indexOf(owner);
       if (index < 0) return;
       const wasActive = index === this.#rawEditors.length - 1;
-      const text = wasActive ? component.getExpandedText?.() ?? component.getText() : undefined;
       this.#rawEditors.splice(index, 1);
-      if (text !== undefined) {
-        const successor = this.#rawEditors.at(-1)?.component;
-        if (successor === undefined) this.#editor.setText(text);
-        else {
-          successor.setText(text);
-          if ("focused" in successor) successor.focused = true;
-        }
-      }
-      if ("focused" in component) component.focused = false;
       try {
-        if ("dispose" in component && isFunctionValue(component.dispose)) component.dispose();
-      } catch {}
-      this.#scheduleRender();
+        if ("focused" in component) component.focused = false;
+        if (wasActive) {
+          const successor = this.#rawEditors.at(-1)?.component;
+          if (successor !== undefined && "focused" in successor) successor.focused = true;
+          const text = component.getExpandedText?.() ?? component.getText();
+          if (successor === undefined) this.#editor.setText(text);
+          else successor.setText(text);
+        }
+      } finally {
+        try {
+          if ("dispose" in component && isFunctionValue(component.dispose)) component.dispose();
+        } catch {}
+        this.#scheduleRender();
+      }
     };
     owner.onAbort = dispose;
     component.onChange = (text) => {
@@ -5749,20 +5750,9 @@ export class TuiController {
     this.#clearAdvancedUiOverrides();
     for (const owner of this.#normalizedKeyObservers.values()) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#normalizedKeyObservers.clear();
-    for (const [key] of this.#extensionStatusOwners) this.#clearPluginValueOwner(this.#extensionStatusOwners, key);
-    for (const [key] of this.#extensionWidgetOwners) this.#clearPluginValueOwner(this.#extensionWidgetOwners, key);
-    for (const [key] of this.#extensionHeaderOwners) this.#clearPluginValueOwner(this.#extensionHeaderOwners, key);
-    for (const [key] of this.#extensionFooterOwners) this.#clearPluginValueOwner(this.#extensionFooterOwners, key);
-    for (const [key] of this.#extensionWorkingMessageOwners) this.#clearPluginValueOwner(this.#extensionWorkingMessageOwners, key);
-    for (const [key] of this.#extensionWorkingVisibilityOwners) this.#clearPluginValueOwner(this.#extensionWorkingVisibilityOwners, key);
+    this.#clearPluginTextOwners();
     this.#clearPluginUiSlots();
-    this.#extensionStatuses.clear();
-    this.#extensionWidgets.clear();
-    this.#extensionHeaders.clear();
-    this.#extensionFooters.clear();
-    this.#extensionWorkingMessages.clear();
-    this.#extensionWorkingVisibility.clear();
-    this.#model.setContext({ extensionStatus: "", widgets: [], extensionHeaders: [], extensionFooters: [] });
+    this.#clearPluginTextValues();
     this.#terminalTitleOverride = undefined;
     for (const owner of this.#terminalTitleOwners) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#terminalTitleOwners.length = 0;
@@ -5787,6 +5777,29 @@ export class TuiController {
     }
     this.#extensionUiSlotOwners.clear();
     this.#extensionUiSlots.clear();
+  }
+
+  #clearPluginTextOwners(): void {
+    for (const owners of [
+      this.#extensionStatusOwners,
+      this.#extensionWidgetOwners,
+      this.#extensionHeaderOwners,
+      this.#extensionFooterOwners,
+      this.#extensionWorkingMessageOwners,
+      this.#extensionWorkingVisibilityOwners,
+    ]) {
+      for (const key of owners.keys()) this.#clearPluginValueOwner(owners, key);
+    }
+  }
+
+  #clearPluginTextValues(): void {
+    this.#extensionStatuses.clear();
+    this.#extensionWidgets.clear();
+    this.#extensionHeaders.clear();
+    this.#extensionFooters.clear();
+    this.#extensionWorkingMessages.clear();
+    this.#extensionWorkingVisibility.clear();
+    this.#model.setContext({ extensionStatus: "", widgets: [], extensionHeaders: [], extensionFooters: [] });
   }
 
   #pruneSessionEntries(): void {
@@ -7330,25 +7343,8 @@ export class TuiController {
     for (const owner of this.#toolOutputExpansions.values()) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#toolOutputExpansions.clear();
     this.#toolOutputExpansionBaseline = undefined;
-    for (const owner of this.#extensionStatusOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionStatusOwners.clear();
-    for (const owner of this.#extensionWidgetOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionWidgetOwners.clear();
-    for (const owner of this.#extensionHeaderOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionHeaderOwners.clear();
-    for (const owner of this.#extensionFooterOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionFooterOwners.clear();
-    for (const owner of this.#extensionWorkingMessageOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionWorkingMessageOwners.clear();
-    for (const owner of this.#extensionWorkingVisibilityOwners.values()) owner.signal.removeEventListener("abort", owner.onAbort);
-    this.#extensionWorkingVisibilityOwners.clear();
-    this.#extensionStatuses.clear();
-    this.#extensionWidgets.clear();
-    this.#extensionHeaders.clear();
-    this.#extensionFooters.clear();
-    this.#extensionWorkingMessages.clear();
-    this.#extensionWorkingVisibility.clear();
-    this.#model.setContext({ extensionStatus: "", widgets: [], extensionHeaders: [], extensionFooters: [] });
+    this.#clearPluginTextOwners();
+    this.#clearPluginTextValues();
     for (const owner of this.#terminalTitleOwners) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#terminalTitleOwners.length = 0;
     for (const owner of this.#normalizedKeyObservers.values()) owner.signal.removeEventListener("abort", owner.onAbort);

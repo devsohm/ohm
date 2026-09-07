@@ -165,6 +165,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
   let inputEnded = false;
   let inputOverloaded = false;
   let finishingInput = false;
+  let started = false;
   let priorityPending = 0;
   let priorityTail: Promise<void> = Promise.resolve();
   const input = createModeInput();
@@ -233,6 +234,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
     if (
       finishingInput
       || shuttingDown
+      || !started
       || !inputEnded
       || hasPendingInputs()
       || handlers.size > 0
@@ -242,11 +244,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
     const failure = await input.failure();
     if (failure !== undefined) {
       await writer.send(errorResponse(undefined, "parse", failure)).catch(() => undefined);
-    }
+    } else await settleBounded([bridge.drain()]);
     await shutdown(failure === undefined ? 0 : 1);
   };
 
   const handle = async (inputRecord: RpcInputEnvelope): Promise<void> => {
+    await startup;
     if (inputRecord.error !== undefined) {
       await writer.send(errorResponse(undefined, "parse", `Failed to parse command: ${message(inputRecord.error)}`));
       return;
@@ -376,10 +379,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
     cleanupSignals.push(() => process.off(signal, handler));
   }
 
+  const startup = Promise.resolve().then(async () => { await dispatcher.start(); });
   try {
-    await dispatcher.start();
     const onEnd = (): void => {
       inputEnded = true;
+      bridge.endInput();
       void finishInput();
     };
     const detachLines = attachJsonlLineReader(input.stream, submit, (error) => {
@@ -394,12 +398,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
     void input.failure().then((failure) => {
       if (failure === undefined || shuttingDown) return;
       inputEnded = true;
+      bridge.endInput();
       void finishInput();
     });
     detachInput = () => {
       detachLines();
       input.stream.off("end", onEnd);
     };
+    await startup;
+    started = true;
+    drainPendingInputs();
   } catch (error) {
     await writer.send(errorResponse(undefined, "startup", error)).catch(() => undefined);
     await shutdown(1);

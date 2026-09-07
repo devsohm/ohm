@@ -6,7 +6,7 @@ export class CancellableLoader extends Loader {
   handleInput(data: string): void {
     if (this.aborted || !matchesKey(data, "escape")) return;
     this.aborted = true;
-    this.onAbort?.();
-    this.stop();
+    try { this.onAbort?.(); }
+    finally { this.stop(); }
   }
 }

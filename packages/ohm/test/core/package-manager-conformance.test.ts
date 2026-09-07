@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
@@ -315,6 +318,96 @@ test("availability checks retain the user package behind a project resource delt
   }]);
 });
 
+for (const selection of ["HEAD", "branch", "tag", "annotated tag", "commit", "publication failure", "rollback failure"] as const) {
+  test(`local Git package staging preserves checkout semantics for ${selection}`, { timeout: 20_000 }, async (context) => {
+    const value = await fixture("local-git");
+    context.after(async () => await rm(value.root, { recursive: true, force: true }));
+    const repository = join(value.root, "repository");
+    const emptyConfig = join(value.root, "empty-git-config");
+    const emptyHooks = join(value.root, "empty-git-hooks");
+    await mkdir(join(repository, "extensions"), { recursive: true });
+    await mkdir(emptyHooks);
+    await writeFile(emptyConfig, "");
+    const environment = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: emptyConfig, GIT_TERMINAL_PROMPT: "0" };
+    const configuration = ["-c", `core.hooksPath=${emptyHooks}`, "-c", `init.templateDir=${emptyHooks}`];
+    const git = (args: string[]): string => {
+      const result = spawnSync("git", [...configuration, ...args], {
+        encoding: "utf8", env: environment, timeout: 5_000, maxBuffer: 1024 * 1024,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    git(["init", "--initial-branch=main", repository]);
+    const entry = join(repository, "extensions", "entry.mjs");
+    const first = "export default () => {}; // first checkout\n";
+    await writeFile(entry, first);
+    git(["-C", repository, "add", "extensions/entry.mjs"]);
+    git(["-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"]);
+    git(["-C", repository, "tag", "release"]);
+    git(["-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "tag", "-a", "annotated", "-m", "annotated fixture"]);
+    const revision = git(["-C", repository, "rev-parse", "HEAD"]);
+    const wrapper = join(value.root, "isolated-git.mjs");
+    await writeFile(wrapper, [
+      'import { spawnSync } from "node:child_process";',
+      `const result = spawnSync("git", [...${JSON.stringify(configuration)}, ...process.argv.slice(2)], { stdio: "inherit", timeout: 5_000, killSignal: "SIGKILL", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: ${JSON.stringify(emptyConfig)}, GIT_TERMINAL_PROMPT: "0" } });`,
+      'if (result.error) throw result.error;',
+      'process.exitCode = result.status ?? 1;',
+    ].join("\n"));
+    const packages = new DefaultPackageManager({
+      cwd: value.cwd, agentDir: value.agentDir, settingsManager: value.settings,
+      gitCommand: [process.execPath, wrapper],
+    });
+    const ref = selection === "HEAD" ? "" : `#${selection === "tag" ? "release" : selection === "annotated tag" ? "annotated" : selection === "commit" ? revision : "main"}`;
+    const source = `git:${pathToFileURL(repository).href}${ref}`;
+    await packages.install(source);
+    const installed = packages.getInstalledPath(source, "user");
+    assert.ok(installed);
+    assert.equal(await readFile(join(installed, "extensions", "entry.mjs"), "utf8"), first);
+    if (selection !== "publication failure" && selection !== "rollback failure") return;
+
+    await writeFile(entry, "export default () => {}; // replacement checkout\n");
+    git(["-C", repository, "add", "extensions/entry.mjs"]);
+    git(["-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "replacement"]);
+    const originalRename = fs.promises.rename;
+    const failure = new Error("injected Git publication rename failure");
+    const restoreFailure = new Error("injected Git rollback rename failure");
+    let retainedPrevious: string | undefined;
+    let injected = false;
+    fs.promises.rename = async (from, to) => {
+      if (!injected && String(to) === installed) { injected = true; throw failure; }
+      if (selection === "rollback failure" && String(to) === installed) {
+        retainedPrevious = String(from);
+        throw restoreFailure;
+      }
+      await originalRename(from, to);
+    };
+    syncBuiltinESMExports();
+    try {
+      const [outcome] = await Promise.allSettled([packages.install(source)]);
+      assert.equal(outcome!.status, "rejected");
+      if (outcome!.status === "rejected") {
+        if (selection === "rollback failure") {
+          assert.ok(outcome!.reason instanceof AggregateError);
+          assert.deepEqual(outcome!.reason.errors, [failure, restoreFailure]);
+        } else assert.equal(outcome!.reason, failure);
+      }
+    } finally {
+      fs.promises.rename = originalRename;
+      syncBuiltinESMExports();
+    }
+    assert.equal(injected, true);
+    if (selection === "rollback failure") {
+      assert.ok(retainedPrevious);
+      assert.equal(await readFile(join(retainedPrevious, "extensions", "entry.mjs"), "utf8"), first);
+      return;
+    }
+    assert.equal(packages.getInstalledPath(source, "user"), installed);
+    assert.equal(await readFile(join(installed, "extensions", "entry.mjs"), "utf8"), first);
+  });
+}
+
+// Command-shape fakes below deliberately do not model clone --no-checkout worktree behavior.
 test("an installed pinned Git source is freshly staged before dependency installation", async () => {
   const value = await fixture("git-ref");
   const binaryDirectory = join(value.root, "bin");

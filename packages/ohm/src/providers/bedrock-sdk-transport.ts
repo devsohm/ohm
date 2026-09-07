@@ -201,7 +201,12 @@ class HostFetchHandler implements HttpHandler<Record<string, never>> {
       init.duplex = "half";
     }
     const response = await fetchAtSdkBoundary(this.fetch, new Request(smithyUrl(request), init));
-    await this.observe(response);
+    try {
+      await this.observe(response);
+    } catch (error) {
+      void response.body?.cancel(error).catch(() => undefined);
+      throw error;
+    }
     return {
       response: {
         statusCode: response.status,

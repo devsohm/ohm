@@ -82,7 +82,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
       });
       if (harness.#closeFlight !== undefined) {
         await harness.#closeFlight;
-        throw new Error("Harness runtime shut down during extension startup");
+        throw new Error("Harness runtime shut down during plugin startup");
       }
       return harness;
     } catch (error) {
@@ -92,7 +92,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
         if (cleanupError === error) throw error;
         throw new AggregateError(
           [error, cleanupError],
-          "Harness runtime extension binding and cleanup failed",
+          "Harness runtime plugin binding and cleanup failed",
         );
       }
       throw error;

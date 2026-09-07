@@ -146,9 +146,11 @@ export class RpcPluginUiBridge {
   #editorText = "";
   #editorTextBytes = 0;
   #emitting = false;
+  #writeSettled: Promise<void> = Promise.resolve();
   readonly #outputBytes = { cleanup: 0, presentation: 0, required: 0 };
   #pendingBytes = 0;
   #retainedOwnerBytes = 0;
+  #inputEnded = false;
   #closed = false;
 
   constructor(options: RpcPluginUiBridgeOptions) {
@@ -283,7 +285,7 @@ export class RpcPluginUiBridge {
         queued.completion?.resolve();
         continue;
       }
-      void Promise.resolve(result).then(
+      this.#writeSettled = Promise.resolve(result).then(
         () => queued.completion?.resolve(),
         (error) => queued.completion?.reject(errorFromThrown(error)),
       ).finally(() => {
@@ -378,7 +380,7 @@ export class RpcPluginUiBridge {
       parse: (response: RpcPluginUiResponse) => T,
     ): Promise<T> => {
       const timeout = validatedTimeout(options);
-      if (this.#closed || signal.aborted || options?.signal?.aborted) return Promise.resolve(fallback);
+      if (this.#inputEnded || signal.aborted || options?.signal?.aborted) return Promise.resolve(fallback);
       if (this.#pending.size >= MAX_PENDING_RPC_PLUGIN_UI_DIALOGS) return Promise.resolve(fallback);
       const id = randomUUID();
       let prepared: RpcPreparedUiRequest;
@@ -578,12 +580,22 @@ export class RpcPluginUiBridge {
     return true;
   }
 
+  /** @internal End response-dependent dialogs without dropping remaining output. */
+  endInput(): void {
+    if (this.#inputEnded) return;
+    this.#inputEnded = true;
+    for (const pending of this.#pending.values()) pending.cancel();
+  }
+
+  /** @internal Drain admitted output; the host owns the shutdown deadline. */
+  async drain(): Promise<void> {
+    while (this.#emitting) await this.#writeSettled;
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const pending of this.#pending.values()) pending.cancel();
-    this.#pending.clear();
-    this.#pendingBytes = 0;
+    this.endInput();
     for (const queued of this.#queue) {
       this.#outputBytes[queued.lane] -= queued.bytes;
       queued.completion?.resolve();

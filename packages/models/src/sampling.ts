@@ -78,8 +78,10 @@ export function appendGrammarInputDelta(
   done: boolean,
 ): string {
   buffer.value = nextInput;
-  const prefix = `{"${property}":`;
-  const encoded = JSON.stringify(nextInput);
+  const prefix = `{${JSON.stringify(property)}:`;
+  // Keep a trailing high surrogate until its next chunk determines the encoding.
+  const visibleInput = !done && /[\uD800-\uDBFF]$/u.test(nextInput) ? nextInput.slice(0, -1) : nextInput;
+  const encoded = JSON.stringify(visibleInput);
   const complete = `${prefix}${encoded}}`;
   const emitted = buffer.emitted ?? 0;
   const visibleEnd = done ? complete.length : Math.max(prefix.length + 1, complete.length - 2);

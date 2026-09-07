@@ -280,7 +280,8 @@ export class ExternalCommandCredentialSource implements CredentialSource {
 
   async resolve(request: CredentialRequest): Promise<AuthCredential | undefined> {
     request.signal?.throwIfAborted();
-    const spec = this.#specs.get(request.provider);
+    const specs = this.#specs;
+    const spec = specs.get(request.provider);
     if (spec === undefined) return undefined;
     const now = this.#now();
     const cached = this.#cache.get(request.provider);
@@ -300,7 +301,7 @@ export class ExternalCommandCredentialSource implements CredentialSource {
       ? credential.expiresAt - 60_000
       : Number.POSITIVE_INFINITY;
     const freshUntil = Math.min(configuredFreshUntil, credentialFreshUntil);
-    if (freshUntil > now) this.#cache.set(request.provider, { credential, freshUntil });
+    if (this.#specs === specs && freshUntil > now) this.#cache.set(request.provider, { credential, freshUntil });
     return { ...credential };
   }
 }

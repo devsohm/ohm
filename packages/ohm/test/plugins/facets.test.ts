@@ -595,6 +595,234 @@ test("a committed extension generation starts worker facets before any session b
   assert.equal(workerStarts, 1);
 });
 
+test("disposing an earlier worker does not skip pending worker activation", { timeout: 3_000 }, async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  let markEntered!: () => void;
+  let releaseSetup!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const setupGate = new Promise<void>((resolve) => { releaseSetup = resolve; });
+  const started: string[] = [];
+  const stopped: string[] = [];
+  let first: PluginFacetRegistration | undefined;
+  const loading = loadDirectPlugins([], {
+    workspace,
+    activationFailure: "throw",
+    inlinePlugins: [{
+      name: "worker-disposal-during-activation",
+      async factory(api) {
+        for (const name of ["first", "second", "third"]) {
+          const registration = await api.facets.register({
+            apiVersion: PLUGIN_FACET_API_VERSION,
+            kind: "worker",
+            name,
+            async setup() {
+              started.push(name);
+              if (name === "second") {
+                markEntered();
+                await setupGate;
+              }
+              return () => { stopped.push(name); };
+            },
+          });
+          if (name === "first") first = registration;
+        }
+      },
+    }],
+  });
+  try {
+    await entered;
+    assert.ok(first);
+    assert.deepEqual(started, ["first", "second"]);
+    await first.dispose();
+    assert.deepEqual(stopped, ["first"]);
+    releaseSetup();
+    await loading;
+    assert.deepEqual(started, ["first", "second", "third"]);
+  } finally {
+    releaseSetup();
+    const host = await loading;
+    await host.close();
+  }
+  assert.deepEqual(stopped.toSorted(), ["first", "second", "third"]);
+});
+
+test("generation close owns cleanup returned by an in-flight session facet", { timeout: 3_000 }, async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  let markEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  let cleanupCalls = 0;
+  const host = await loadDirectPlugins([], {
+    workspace,
+    mode: "rpc",
+    activationFailure: "throw",
+    inlinePlugins: [{
+      name: "in-flight-cleanup",
+      async factory(api) {
+        await api.facets.register({
+          apiVersion: PLUGIN_FACET_API_VERSION,
+          kind: "session",
+          name: "cooperative",
+          async setup({ signal }) {
+            markEntered();
+            await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+            return () => { cleanupCalls += 1; };
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  const dispatch = host.dispatch("session_start", { reason: "startup", threadId: "facet-close" });
+  const observed = dispatch.catch(() => undefined);
+  await entered;
+  await host.close();
+  await observed;
+  assert.equal(cleanupCalls, 1);
+  await host.close();
+  assert.equal(cleanupCalls, 1);
+});
+
+test("disposing an in-flight facet aborts setup before waiting for its cleanup", { timeout: 3_000 }, async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  let markEntered!: (signal: AbortSignal) => void;
+  let releaseCleanup!: () => void;
+  const entered = new Promise<AbortSignal>((resolve) => { markEntered = resolve; });
+  const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  let registration: PluginFacetRegistration | undefined;
+  let cleanupCalls = 0;
+  let cleanupFinished = 0;
+  const host = await loadDirectPlugins([], {
+    workspace,
+    mode: "rpc",
+    activationFailure: "throw",
+    inlinePlugins: [{
+      name: "disposed-in-flight-facet",
+      async factory(api) {
+        registration = await api.facets.register({
+          apiVersion: PLUGIN_FACET_API_VERSION,
+          kind: "session",
+          name: "cooperative",
+          async setup({ signal }) {
+            markEntered(signal);
+            await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+            return async () => { cleanupCalls += 1; await cleanupGate; cleanupFinished += 1; };
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  assert.ok(registration);
+  const dispatch = host.dispatch("session_start", { reason: "startup", threadId: "facet-dispose" });
+  const observed = dispatch.catch(() => undefined);
+  const signal = await entered;
+  const disposal = registration.dispose();
+  try {
+    assert.equal(signal.aborted, true, "disposal must abort setup before joining its pending task");
+    await disposal;
+    await observed;
+    assert.equal(cleanupCalls, 1);
+    assert.equal(cleanupFinished, 0, "cleanup arriving after cancellation remains observed without blocking disposal");
+    await registration.dispose();
+    assert.equal(cleanupCalls, 1);
+  } finally {
+    releaseCleanup();
+    await host.close();
+    await disposal;
+    await observed;
+  }
+  assert.equal(cleanupFinished, 1);
+});
+
+test("concurrent facet disposal waits for the same cleanup completion", { timeout: 3_000 }, async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  let markCleanupEntered!: () => void;
+  let releaseCleanup!: () => void;
+  const cleanupEntered = new Promise<void>((resolve) => { markCleanupEntered = resolve; });
+  const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  let registration: PluginFacetRegistration | undefined;
+  let cleanupCalls = 0;
+  const host = await loadDirectPlugins([], {
+    workspace,
+    activationFailure: "throw",
+    inlinePlugins: [{
+      name: "concurrent-facet-disposal",
+      async factory(api) {
+        registration = await api.facets.register({
+          apiVersion: PLUGIN_FACET_API_VERSION,
+          kind: "worker",
+          name: "cleanup",
+          setup() {
+            return async () => {
+              cleanupCalls += 1;
+              markCleanupEntered();
+              await cleanupGate;
+            };
+          },
+        });
+      },
+    }],
+  });
+  context.after(async () => await host.close());
+  assert.ok(registration);
+  const first = registration.dispose();
+  await cleanupEntered;
+  let secondSettled = false;
+  const second = registration.dispose().then(() => { secondSettled = true; });
+  try {
+    await Promise.resolve();
+    assert.equal(secondSettled, false, "a second disposer must not report completion while cleanup is pending");
+  } finally {
+    releaseCleanup();
+    await Promise.all([first, second]);
+  }
+  assert.equal(cleanupCalls, 1);
+  await host.close();
+  assert.equal(cleanupCalls, 1);
+});
+
+test("cancelled worker activation drains its late setup cleanup exactly once", { timeout: 3_000 }, async (context) => {
+  const workspace = await temporaryWorkspace(context);
+  let markEntered!: () => void;
+  let releaseSetup!: () => void;
+  let markCleaned!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const release = new Promise<void>((resolve) => { releaseSetup = resolve; });
+  const cleaned = new Promise<void>((resolve) => { markCleaned = resolve; });
+  const cancellation = new AbortController();
+  let cleanupCalls = 0;
+  const loading = loadDirectPlugins([], {
+    workspace,
+    activationFailure: "throw",
+    signal: cancellation.signal,
+    inlinePlugins: [{
+      name: "late-worker-cleanup",
+      async factory(api) {
+        await api.facets.register({
+          apiVersion: PLUGIN_FACET_API_VERSION,
+          kind: "worker",
+          name: "late",
+          async setup() {
+            markEntered();
+            await release;
+            return () => { cleanupCalls += 1; markCleaned(); };
+          },
+        });
+      },
+    }],
+  });
+  const rejected = assert.rejects(loading, /cancelled worker/u);
+  try {
+    await entered;
+    cancellation.abort(new Error("cancelled worker"));
+    await rejected;
+  } finally {
+    releaseSetup();
+  }
+  await cleaned;
+  assert.equal(cleanupCalls, 1);
+});
+
 test("a committed worker setup failure is diagnosed without discarding other contributions", async (context) => {
   const workspace = await temporaryWorkspace(context);
   let api: PluginAPI | undefined;

@@ -138,6 +138,7 @@ export interface SessionExportData {
   systemPrompt?: string;
   tools?: SessionExportTool[];
   skills?: SessionExportSkill[];
+  /** Keyed by JSON-encoded [entry ID, content-block index], not provider call ID. */
   renderedTools?: Record<string, SessionExportRenderedTool>;
   /** True when every user-controlled export field and the downloadable JSONL were redacted. */
   redacted?: true;
@@ -651,25 +652,44 @@ function preRenderTools(
       return false;
     }
   };
+  const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+  const ancestorCall = (entry: SessionEntry, callId: string) => {
+    let ancestor = entry.parentId === null ? undefined : entryById.get(entry.parentId);
+    while (ancestor !== undefined) {
+      if (ancestor.type === "message" && "content" in ancestor.message && Array.isArray(ancestor.message.content)) {
+        for (const [index, block] of ancestor.message.content.entries()) {
+          if (block.type === "tool_call" && block.callId === callId) {
+            return { key: JSON.stringify([ancestor.id, index]), name: block.name, input: block.arguments };
+          }
+        }
+      }
+      ancestor = ancestor.parentId === null ? undefined : entryById.get(ancestor.parentId);
+    }
+    return undefined;
+  };
   const resultErrors = new Map<string, boolean>();
+  const calls = new Map<string, { name: string; input: JsonValue }>();
   for (const entry of entries) {
     if (entry.type !== "message" || !("content" in entry.message) || !Array.isArray(entry.message.content)) continue;
-    for (const block of entry.message.content) {
+    for (const [index, block] of entry.message.content.entries()) {
       if (redact && "callId" in block && defaultSecretRedactor.redact(block.callId) !== block.callId) continue;
-      if (block.type === "tool_result") resultErrors.set(block.callId, block.isError);
+      if (block.type !== "tool_result") continue;
+      const call = ancestorCall(entry, block.callId);
+      if (call === undefined) continue;
+      resultErrors.set(call.key, block.isError);
+      calls.set(JSON.stringify([entry.id, index]), call);
     }
   }
-  const calls = new Map<string, { name: string; input: JsonValue }>();
   const rendered: Record<string, SessionExportRenderedTool> = Object.create(null);
   for (const entry of entries) {
     if (entry.type !== "message" || !("content" in entry.message) || !Array.isArray(entry.message.content)) continue;
-    for (const block of entry.message.content) {
+    for (const [index, block] of entry.message.content.entries()) {
       if (redact && "callId" in block && defaultSecretRedactor.redact(block.callId) !== block.callId) continue;
+      const key = JSON.stringify([entry.id, index]);
       if (block.type === "tool_call") {
-        calls.set(block.callId, { name: block.name, input: block.arguments });
         if (!hasRenderer(block.name)) continue;
         try {
-          const resultIsError = resultErrors.get(block.callId);
+          const resultIsError = resultErrors.get(key);
           const selected = boundedUiBlock(renderer.renderCall(block.name, immutableRuntimeToolRenderView({
             callId: block.callId,
             name: block.name,
@@ -679,13 +699,13 @@ function preRenderTools(
             status: resultIsError === undefined ? "pending" : resultIsError ? "failed" : "completed",
             expanded: false,
           }), rendererContext(false, theme)), redact);
-          if (selected !== undefined) rendered[block.callId] = { call: selected };
+          if (selected !== undefined) rendered[key] = { call: selected };
         } catch (cause) {
           reportFailure({ name: block.name, slot: "call", cause });
         }
       }
       if (block.type !== "tool_result") continue;
-      const call = calls.get(block.callId);
+      const call = calls.get(key);
       const name = block.name || call?.name || "tool";
       if (!hasRenderer(name)) continue;
       const base = {
@@ -717,8 +737,7 @@ function preRenderTools(
       const collapsed = renderResult(false);
       const expanded = renderResult(true);
       if (collapsed !== undefined || expanded !== undefined) {
-        rendered[block.callId] = {
-          ...rendered[block.callId],
+        rendered[key] = {
           ...optionalProperties(collapsed === undefined ? undefined : { resultCollapsed: collapsed }),
           ...optionalProperties(expanded === undefined ? undefined : { resultExpanded: expanded }),
         };

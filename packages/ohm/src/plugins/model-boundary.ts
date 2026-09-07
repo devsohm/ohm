@@ -91,7 +91,7 @@ import type {
 import { modelRuntimeForInternalRegistry } from "../providers/model-runtime-ownership.js";
 import { ProviderStreamProjector } from "../providers/stream-envelope.js";
 
-/** Public provider-model declaration used by trusted direct extensions. */
+/** Public provider-model declaration used by trusted direct plugins. */
 export interface PluginProviderModelConfig {
   id: string;
   name: string;
@@ -117,7 +117,7 @@ export interface PluginOAuthConfig {
   refreshToken(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials>;
 }
 
-/** Public configuration accepted by direct extension provider registration. */
+/** Public configuration accepted by direct plugin provider registration. */
 export interface PluginProviderConfig {
   name?: string;
   baseUrl?: string;
@@ -1547,9 +1547,13 @@ function publicStreamFromAdapterEvents(
             message.diagnostics = canonicalAssistantDiagnostics(event.assistantDiagnostics)!;
           }
           const terminalContent = event.content ?? assistantContentFromProviderState(canonicalSourceEvent.state);
+          const completedTextIndexes = new Set([...textIndexes]
+            .filter(([part]) => retainedParts.isCompleted("text", part)).map(([, index]) => index));
+          const completedThinkingIndexes = new Set([...thinkingIndexes]
+            .filter(([part]) => retainedParts.isCompleted("thinking", part)).map(([, index]) => index));
           if (terminalContent !== undefined) {
-            const startedTextParts = new Set(textIndexes.keys());
-            const startedThinkingParts = new Set(thinkingIndexes.keys());
+            const startedTextIndexes = new Set(textIndexes.values());
+            const startedThinkingIndexes = new Set(thinkingIndexes.values());
             message.content = publicAssistantContent(terminalContent.filter((block) =>
               block.type !== "thinking" || block.visibility === "summary"));
             textIndexes.clear();
@@ -1558,17 +1562,17 @@ function publicStreamFromAdapterEvents(
             for (const [index, block] of message.content.entries()) {
               if (block.type === "text") {
                 textIndexes.set(index, index);
-                if (!startedTextParts.has(index)) output.push({ type: "text_start", contentIndex: index, partial: snapshot() });
+                if (!startedTextIndexes.has(index)) output.push({ type: "text_start", contentIndex: index, partial: snapshot() });
               }
               else if (block.type === "thinking") {
                 thinkingIndexes.set(index, index);
-                if (!startedThinkingParts.has(index)) output.push({ type: "thinking_start", contentIndex: index, partial: snapshot() });
+                if (!startedThinkingIndexes.has(index)) output.push({ type: "thinking_start", contentIndex: index, partial: snapshot() });
               }
               else toolIndexes.set(index, index);
             }
           }
-          for (const [part, index] of textIndexes) {
-            if (retainedParts.isCompleted("text", part)) continue;
+          for (const index of textIndexes.values()) {
+            if (completedTextIndexes.has(index)) continue;
             const block = message.content[index];
             if (block?.type === "text") output.push({
               type: "text_end",
@@ -1578,8 +1582,8 @@ function publicStreamFromAdapterEvents(
               partial: snapshot(),
             });
           }
-          for (const [part, index] of thinkingIndexes) {
-            if (retainedParts.isCompleted("thinking", part)) continue;
+          for (const index of thinkingIndexes.values()) {
+            if (completedThinkingIndexes.has(index)) continue;
             const block = message.content[index];
             if (block?.type === "thinking") output.push({
               type: "thinking_end",
@@ -1785,7 +1789,7 @@ export function pluginModel(
   };
 }
 
-/** Clone and recursively freeze one extension-facing model snapshot. */
+/** Clone and recursively freeze one plugin-facing model snapshot. */
 export function immutablePluginModel(model: Model<Api>): Model<Api> {
   const freeze = <T>(value: T): void => {
     if (!isObjectValue(value) || Object.isFrozen(value)) return;
@@ -1795,6 +1799,28 @@ export function immutablePluginModel(model: Model<Api>): Model<Api> {
   const snapshot = structuredClone(model);
   freeze(snapshot);
   return snapshot;
+}
+
+function internalModelFromPlugin(model: Model<Api>): ProviderModel {
+  return {
+    id: model.id,
+    name: model.name,
+    api: protocolFromPublicApi(model.api),
+    provider: model.provider,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    ...optionalProperties(model.thinkingLevelMap === undefined ? undefined : { thinkingLevelMap: { ...model.thinkingLevelMap } }),
+    input: [...model.input],
+    cost: { ...model.cost, ...optionalProperties(model.cost.tiers === undefined ? undefined : { tiers: model.cost.tiers.map((tier) => ({ ...tier })) }) },
+    contextWindow: model.contextWindow,
+    ...optionalProperties(model.maxInputTokens === undefined ? undefined : { maxInputTokens: model.maxInputTokens }),
+    maxTokens: model.maxTokens,
+    ...optionalProperties(model.headers === undefined ? undefined : { headers: { ...model.headers } }),
+    ...(() => {
+      const compat = compatibilityToInternal(model.compat);
+      return compat === undefined ? {} : { compat };
+    })(),
+  };
 }
 
 /** Plugin-facing model directory backed by the active internal model registry. */
@@ -1839,30 +1865,7 @@ export class PluginModelRegistry {
   }
 
   resolve(model: Model<Api>): ProviderModel {
-    const selected = this.#internal.find(model.provider, model.id);
-    if (selected !== undefined) {
-      this.#publicModels.set(modelKey(model.provider, model.id), model);
-      return selected;
-    }
-    const converted: ProviderModel = {
-      id: model.id,
-      name: model.name,
-      api: protocolFromPublicApi(model.api),
-      provider: model.provider,
-      baseUrl: model.baseUrl,
-      reasoning: model.reasoning,
-      ...optionalProperties(model.thinkingLevelMap === undefined ? undefined : { thinkingLevelMap: { ...model.thinkingLevelMap } }),
-      input: [...model.input],
-      cost: { ...model.cost, ...optionalProperties(model.cost.tiers === undefined ? undefined : { tiers: model.cost.tiers.map((tier) => ({ ...tier })) }) },
-      contextWindow: model.contextWindow,
-      ...optionalProperties(model.maxInputTokens === undefined ? undefined : { maxInputTokens: model.maxInputTokens }),
-      maxTokens: model.maxTokens,
-      ...optionalProperties(model.headers === undefined ? undefined : { headers: { ...model.headers } }),
-      ...(() => {
-        const compat = compatibilityToInternal(model.compat);
-        return compat === undefined ? {} : { compat };
-      })(),
-    };
+    const converted = this.#internal.find(model.provider, model.id) ?? internalModelFromPlugin(model);
     this.#publicModels.set(modelKey(model.provider, model.id), model);
     return converted;
   }
@@ -1907,20 +1910,20 @@ export class PluginModelRegistry {
   registerProvider(providerOrName: PluginProvider | string, config?: PluginProviderConfig): void {
     const id = Value.Check(STRING_VALUE, providerOrName) ? providerOrName : providerOrName.id;
     if (!Value.Check(STRING_VALUE, providerOrName)) {
+      const models = providerOrName.getModels();
+      const internal = internalProviderFromPlugin(providerOrName, this, models.map(internalModelFromPlugin));
+      this.#internal.registerProvider(internal);
       this.#clearPublicModels(id);
       this.#publicProviders.set(id, providerOrName);
       this.#providerViews.delete(id);
       this.#publicConfigs.delete(id);
-      for (const model of providerOrName.getModels()) this.#publicModels.set(modelKey(id, model.id), model);
-      this.#internal.registerProvider(internalProviderFromPlugin(providerOrName, this));
+      for (const model of models) this.#publicModels.set(modelKey(id, model.id), model);
       return;
     }
     if (config === undefined) {
       throw new Error("A provider object is required when registration uses a string name");
     }
     const replacingNativeProvider = this.#publicProviders.has(id);
-    this.#publicProviders.delete(id);
-    this.#providerViews.delete(id);
     const merged: PluginProviderConfig = { ...this.#publicConfigs.get(id) };
     if (config.name !== undefined) merged.name = config.name;
     if (config.baseUrl !== undefined) merged.baseUrl = config.baseUrl;
@@ -1932,10 +1935,16 @@ export class PluginModelRegistry {
     if (config.oauth !== undefined) merged.oauth = config.oauth;
     if (config.models !== undefined) merged.models = config.models;
     if (config.refreshModels !== undefined) merged.refreshModels = config.refreshModels;
+    const models = config.models === undefined ? [] : configModels(id, merged, config.models, (modelId) => {
+      const current = this.#internal.find(id, modelId);
+      return current === undefined ? undefined : pluginModel(current, this.#publicModels.get(modelKey(id, modelId))?.api);
+    });
+    this.#internal.registerProvider(id, internalProviderConfigFromPlugin(id, config, this));
+    this.#publicProviders.delete(id);
+    this.#providerViews.delete(id);
     this.#publicConfigs.set(id, merged);
     if (replacingNativeProvider || config.models !== undefined) this.#clearPublicModels(id);
-    if (config.models !== undefined) rememberConfigModels(this, id, merged, config.models);
-    this.#internal.registerProvider(id, internalProviderConfigFromPlugin(id, config, this));
+    for (const model of models) this.#publicModels.set(modelKey(id, model.id), model);
   }
 
   unregisterProvider(providerName: string): void {
@@ -1967,18 +1976,19 @@ export function pluginModelRegistry(internal: InternalModelRegistry): PluginMode
   return created;
 }
 
-function rememberConfigModels(
-  registry: PluginModelRegistry,
+function configModels(
   provider: string,
   config: PluginProviderConfig,
   definitions: readonly PluginProviderModelConfig[],
-): void {
+  find: (modelId: string) => Model<Api> | undefined,
+): Model<Api>[] {
+  const models: Model<Api>[] = [];
   for (const definition of definitions) {
-    const current = registry.find(provider, definition.id);
+    const current = find(definition.id);
     const api = definition.api ?? config.api ?? current?.api;
     const baseUrl = definition.baseUrl ?? config.baseUrl ?? current?.baseUrl;
     if (api === undefined || baseUrl === undefined) continue;
-    registry.resolve({
+    models.push({
       id: definition.id,
       name: definition.name,
       api,
@@ -1998,6 +2008,7 @@ function rememberConfigModels(
       ...optionalProperties(definition.compat === undefined ? undefined : { compat: definition.compat }),
     });
   }
+  return models;
 }
 
 function publicProviderFromInternal(
@@ -2061,8 +2072,8 @@ function publicProviderFromInternal(
 function internalProviderFromPlugin(
   provider: PluginProvider,
   registry: PluginModelRegistry,
+  models: ProviderModel[],
 ): InternalProvider {
-  let models = provider.getModels().map((model) => registry.resolve(model));
   const refreshModels = provider.refreshModels;
   const filterModels = provider.filterModels;
   return {
@@ -2198,7 +2209,9 @@ function internalProviderConfigFromPlugin(
           ...optionalProperties(context.force === undefined ? undefined : { force: context.force }),
           ...optionalProperties(context.signal === undefined ? undefined : { signal: context.signal }),
         });
-        rememberConfigModels(registry, providerName, config, models);
+        for (const model of configModels(providerName, config, models, (id) => registry.find(providerName, id))) {
+          registry.resolve(model);
+        }
         return models.map(internalProviderConfigModel);
       },
     }),

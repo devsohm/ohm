@@ -32,6 +32,41 @@ function append(manager: SessionManager, text: string): string {
   });
 }
 
+for (const length of [256, 320]) {
+  test(`SQLite preserves file identity and WAL writes at a ${length}-character path`, (t) => {
+    const root = fixture(t);
+    const prefix = join(root, "nested # %", "a".repeat(64));
+    const filename = "long-path.sqlite";
+    const padding = length - prefix.length - filename.length - 2;
+    assert.ok(padding > 0 && padding <= 255, "Fixture must cross the path boundary without exceeding a directory component limit");
+    const directory = join(prefix, "b".repeat(padding));
+    const path = join(directory, filename);
+    assert.equal(path.length, length);
+    let manager: SessionManager | undefined;
+    let reader: SessionManager | undefined;
+    try {
+      manager = SessionManager.create(root, directory, { id: "long-path" });
+      append(manager, "committed through WAL");
+      assert.equal(manager.getSessionFile(), path);
+      assert.equal(existsSync(`${path}-wal`), true);
+      reader = SessionManager.open(path, undefined, undefined, { readOnly: true });
+      assert.equal(reader.getEntryCount(), 1);
+      assert.equal(reader.getSessionFile(), path);
+      reader.closeV4Store();
+      reader = undefined;
+      manager.closeV4Store();
+      manager = undefined;
+      manager = SessionManager.open(path);
+      append(manager, "continued after reopen");
+      assert.equal(manager.getEntryCount(), 2);
+      assert.equal(manager.getSessionFile(), path);
+    } finally {
+      try { reader?.closeV4Store(); }
+      finally { manager?.closeV4Store(); }
+    }
+  });
+}
+
   test(`SQLite: append/reopen preserves V4 recovery, idempotency and detached snapshots`, (t) => {
     const root = fixture(t);
     const manager = SessionManager.create(root, join(root, "sessions"), { id: "source" });
@@ -335,7 +370,8 @@ test("no-save session switching copies saved history without modifying the datab
   assert.deepEqual(readFileSync(path), bytes);
 });
 
-test("failed import publication leaves neither a visible SQLite candidate nor staging residue", (t) => {
+for (const failedSync of process.platform === "win32" ? [0] : [1, 2]) {
+test(`import publication preserves source across directory sync policy ${failedSync}`, (t) => {
   const root = fixture(t);
   const source = legacy(root);
   const directory = join(root, "sessions");
@@ -344,18 +380,54 @@ test("failed import publication leaves neither a visible SQLite candidate nor st
     import fs from "node:fs";
     import { syncBuiltinESMExports } from "node:module";
     const original = fs.fsyncSync;
+    let directorySyncs = 0;
     fs.fsyncSync = (fd) => {
-      if (fs.fstatSync(fd).isDirectory()) throw Object.assign(new Error("injected publication failure"), { code: "EIO" });
+      if (fs.fstatSync(fd).isDirectory() && ++directorySyncs === ${failedSync}) {
+        throw Object.assign(new Error("injected publication failure"), { code: "EIO" });
+      }
       original(fd);
     };
     syncBuiltinESMExports();
     const { SessionManager } = await import(${JSON.stringify(module)});
-    try { await SessionManager.importJsonl(process.argv[1], process.argv[2]); process.exitCode = 1; }
-    catch (error) { if (!String(error).includes("injected publication failure")) throw error; }
+    try {
+      const imported = await SessionManager.importJsonl(process.argv[1], process.argv[2]);
+      imported.closeV4Store();
+      if (${failedSync} !== 0) process.exitCode = 1;
+    } catch (error) {
+      if (${failedSync} === 0 || !String(error).includes("injected publication failure")) throw error;
+    }
   `;
   execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script, source.path, directory]);
-  assert.deepEqual(readdirSync(directory), []);
+  if (failedSync === 0) {
+    const reopened = SessionManager.open(join(directory, "legacy.sqlite"));
+    try { assert.deepEqual(reopened.getV4State(), source.state); }
+    finally { reopened.closeV4Store(); }
+    assert.equal(readdirSync(directory).some((name) => name.endsWith(".tmp")), false);
+  } else assert.deepEqual(readdirSync(directory), []);
   assert.deepEqual(readFileSync(source.path), source.bytes);
+});
+}
+
+test("failed publication restores the staged name after removing its temporary hard link", (t) => {
+  const root = fixture(t);
+  const source = legacy(root);
+  const backend = new SqliteSessionStorageBackend(join(root, "sessions"));
+  const staging = backend.pathFor("staging");
+  backend.create(source.state.header, staging).close();
+  const before = readFileSync(staging);
+  const failure = new Error("injected target open failure");
+  const original = DatabaseSync.prototype.prepare;
+  const mocked = t.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+    if (sql === "PRAGMA application_id") throw failure;
+    return original.call(this, sql);
+  });
+  try { assert.throws(() => backend.publish(staging, source.state.header.sessionId), (error) => error === failure); }
+  finally { mocked.mock.restore(); }
+  assert.deepEqual(readFileSync(staging), before);
+  assert.equal(statSync(staging).nlink, 1);
+  assert.equal(existsSync(backend.pathFor(source.state.header.sessionId)), false);
+  const reopened = backend.open(staging);
+  reopened.close();
 });
 
 for (const targetState of ["owned", "absent", "replaced"] as const) {

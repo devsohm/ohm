@@ -16,6 +16,7 @@ import {
   githubCopilotBaseUrl,
   refreshGitHubCopilotOAuth,
 } from "../../src/auth/github-copilot.js";
+import { authorizeOpenAICodex } from "../../src/auth/openai-codex.js";
 
 const ANTHROPIC_CLIENT_ID = "ohm-anthropic-test-client";
 const GITHUB_CLIENT_ID = "ohm-github-test-client";
@@ -123,6 +124,46 @@ test("Anthropic OAuth cancellation does not inspect a hostile abort reason", asy
   }), /aborted|cancelled/iu);
   assert.equal(traps, 0);
 });
+
+for (const provider of ["Anthropic", "OpenAI Codex"] as const) {
+  test(`${provider} manual-only OAuth remains cancellable after manual input is declined`, async (t) => {
+    const release = await occupyAnthropicCallbackPort();
+    t.after(release);
+    const controller = new AbortController();
+    const reason = new Error("cancel declined manual OAuth input");
+    let resolveReady!: () => void;
+    const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+    let fetchCalls = 0;
+    const options = {
+      clientId: "fixture-client",
+      signal: controller.signal,
+      showAuthorization() {},
+      async requestManualAuthorization() {
+        resolveReady();
+        return undefined;
+      },
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("Declined OAuth input must not exchange a token");
+      },
+    };
+    const authorization = provider === "Anthropic"
+      ? authorizeAnthropic(options)
+      : authorizeOpenAICodex({ ...options, flow: "browser", callbackPort: ANTHROPIC_OAUTH_CALLBACK_PORT });
+    let settled = false;
+    let failure: unknown;
+    void authorization.then(
+      () => { settled = true; },
+      (error) => { settled = true; failure = error; },
+    );
+    await ready;
+    controller.abort(reason);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, true, "Manual-only OAuth must settle when its caller cancels");
+    assert.equal(failure, reason);
+    assert.equal(fetchCalls, 0);
+  });
+}
 
 test("Anthropic OAuth login does not inspect a hostile manual callback rejection", async () => {
   let traps = 0;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { access, link, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,14 +59,12 @@ test("successful native deletion reports trash without permanent fallback", asyn
   const root = await mkdtemp(join(tmpdir(), "ohm-session-delete-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
   const path = join(root, "session.jsonl");
-  const alias = join(root, "session-alias.jsonl");
   await writeFile(path, "{}\n");
-  await link(path, alias);
   const calls: string[][] = [];
   const runner: ProcessRunner = {
     async run(spec) {
       calls.push(spec.argv);
-      assert.throws(() => acquireSessionWriterLeaseSync(alias), /active writer/u);
+      assert.throws(() => acquireSessionWriterLeaseSync(path), /active writer/u);
       await rm(path);
       return result(0);
     },
@@ -79,8 +77,6 @@ test("successful native deletion reports trash without permanent fallback", asyn
   }), "trash");
   assert.deepEqual(calls, [["gio", "trash", path]]);
   await assert.rejects(access(path));
-  const aliasLease = acquireSessionWriterLeaseSync(alias);
-  aliasLease.release();
   assert.equal(existsSync(`${path}.writer-lock`), false);
 });
 
@@ -121,7 +117,7 @@ test("session deletion fails closed for active writers and their hard-link alias
     const options = { cwd: root, processRunner: runner, platform: "freebsd" as const };
 
     await assert.rejects(deleteSessionFile(path, options), /active writer/u);
-    await assert.rejects(deleteSessionFile(alias, options), /active writer/u);
+    await assert.rejects(deleteSessionFile(alias, options), /multiple hard links/u);
     await access(path);
     await access(alias);
     assert.equal(existsSync(`${alias}.writer-lock`), false);
@@ -133,26 +129,36 @@ test("session deletion fails closed for active writers and their hard-link alias
 
 test("SQLite recycling checkpoints committed WAL records before moving the main file", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-delete-wal-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, root, { id: "saved" });
+  let manager: SessionManager | undefined;
+  let database: DatabaseSync | undefined;
+  context.after(async () => {
+    if (database?.isOpen) database.close();
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, root, { id: "saved" });
   const path = manager.getSessionFile()!;
   const db = new DatabaseSync(path);
+  database = db;
   manager.closeV4Store();
   db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
   const commit = { record: "commit", sequence: 1, commitId: "wal-name", committedAt: new Date().toISOString(), changes: [{ type: "session_name", name: "from WAL" }] };
   db.prepare("INSERT INTO session_commits VALUES (?, ?, ?)").run(1, commit.commitId, JSON.stringify(commit));
   assert.equal(existsSync(path + "-wal"), true);
+  assert.ok(statSync(path + "-wal").size > 0);
   const recycled = join(root, "recycled.sqlite");
   try {
     assert.equal(await deleteSessionFile(path, {
       cwd: root, platform: "linux", processRunner: { async run() {
         assert.throws(() => acquireSessionWriterLeaseSync(path), /active writer/u);
+        assert.equal(statSync(path + "-wal").size, 0);
+        db.close();
         await rename(path, recycled);
         return result(0);
       } },
     }), "trash");
     assert.equal(SessionManager.openSnapshot(recycled).getSessionName(), "from WAL");
-  } finally { db.close(); }
+  } finally { if (db.isOpen) db.close(); }
 });
 
 test("SQLite recycling fails closed when a reader prevents a complete WAL checkpoint", async (context) => {

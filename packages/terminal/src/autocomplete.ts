@@ -57,7 +57,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
       const name = prefix.slice(1, space);
       const command = this.commands.find((item) => item.name === name);
       if (command?.getArgumentCompletions === undefined) return null;
-      return { prefix, items: await command.getArgumentCompletions(prefix.slice(space + 1), options.signal) };
+      const argumentPrefix = prefix.slice(space + 1);
+      return { prefix: argumentPrefix, items: await command.getArgumentCompletions(argumentPrefix, options.signal) };
     }
     const marker = prefix.lastIndexOf("@");
     const fragment = marker >= 0 ? prefix.slice(marker + 1) : prefix;
@@ -72,13 +73,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
     }
     const query = marker >= 0 ? fragment : resolved.needle;
     const matched = fuzzyFilter(files, query.replaceAll("/", ""), (value) => value.replaceAll("/", ""));
-    return { prefix, items: matched.map((value) => ({ value: `${marker >= 0 ? "@" : ""}${value}`, label: value })) };
+    return { prefix: marker >= 0 ? prefix.slice(marker) : prefix, items: matched.map((value) => ({ value: `${marker >= 0 ? "@" : ""}${value}`, label: value })) };
   }
   applyCompletion(lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, prefix: string): AutocompleteEdit {
     const copy = [...lines];
     const line = copy[cursorLine] ?? "";
     const start = Math.max(0, cursorCol - prefix.length);
-    const slash = prefix.startsWith("/") && !item.value.startsWith("/") ? "/" : "";
+    const slash = start === 0 && prefix.startsWith("/") && !item.value.startsWith("/") ? "/" : "";
     const value = `${slash}${item.value}${item.value.endsWith("/") ? "" : " "}`;
     copy[cursorLine] = `${line.slice(0, start)}${value}${line.slice(cursorCol)}`;
     return { lines: copy, cursorLine, cursorCol: start + value.length };

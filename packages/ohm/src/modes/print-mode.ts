@@ -4,14 +4,11 @@ import type { ImageContent } from "@ohm/models";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import { errorMessage } from "../core/errors.js";
 import { canonicalPublicImages } from "../core/public-image-content.js";
-import type { PluginError } from "../plugins/direct.js";
-import { writeMachineOutput } from "../interfaces/output-guard.js";
-import { projectSessionWireEvent } from "../interfaces/session-wire.js";
 import type { AgentSession } from "../service/agent-session.js";
 import type { AgentSessionRuntime } from "../service/agent-session-runtime.js";
 import { createAgentSessionRuntimeCommandActions } from "../service/runtime-command-actions.js";
 import { escapeTerminal } from "../tools/output.js";
-import { formatPluginError, projectPluginError, type ProjectedPluginError } from "./plugin-error.js";
+import { createPrintOutput } from "./print-output.js";
 import { recoverNonInteractiveSession } from "./noninteractive-recovery.js";
 import {
 	captureOneShotAssistantBoundary,
@@ -24,6 +21,7 @@ export interface PrintModeOptions {
 	messages?: readonly string[];
 	initialMessage?: string;
 	initialImages?: readonly ImageContent[];
+	/** A returned promise must settle; it backpressures generation and shutdown. */
 	write?: ((text: string) => void) | ((text: string) => Promise<void>);
 }
 
@@ -49,64 +47,27 @@ export async function runPrintMode(
 	runtime: AgentSessionRuntime,
 	options: PrintModeOptions,
 ): Promise<number> {
-	const outputAbort = new AbortController();
-	const writeOutput = options.write ?? ((text: string): Promise<void> => new Promise((resolve, reject) => {
-		writeMachineOutput(text, (error) => {
-			if (error === undefined || error === null) resolve();
-			else reject(error);
-		});
-	}));
-	let outputTail = Promise.resolve();
-	const write = (text: string): Promise<void> => {
-		outputTail = outputTail.then(async () => { await writeOutput(text); });
-		// Cancel without awaiting the run from its own event listener; the drain reports the failure.
-		void outputTail.catch((error) => { outputAbort.abort(error); });
-		return outputTail;
-	};
-	let unsubscribe = (): void => undefined;
+	const output = createPrintOutput(options.mode, options.write);
 	let bindingGeneration = 0;
-	let headerPending = options.mode === "json";
 	let status = 0;
 	let latestAssistant: OneShotAssistantMessage | undefined;
-	const pendingPluginErrors: ProjectedPluginError[] = [];
-	const writePluginError = (event: ProjectedPluginError): void => {
-		void write(`${JSON.stringify(event)}\n`);
-	};
-
-	const reportPluginError = (failure: PluginError): void => {
-		const event = projectPluginError(failure);
-		if (options.mode === "json" && headerPending) pendingPluginErrors.push(event);
-		else if (options.mode === "json") writePluginError(event);
-		else console.error(formatPluginError(failure));
-	};
 
 	const bind = async (session: AgentSession): Promise<void> => {
 		const generation = ++bindingGeneration;
 		await session.bindPlugins({
 			mode: options.mode === "json" ? "json" : "print",
 			commandContextActions: createAgentSessionRuntimeCommandActions(runtime, session),
-			onError: reportPluginError,
-		}, outputAbort.signal);
+			onError: output.reportPluginError,
+		}, output.signal);
 		if (generation !== bindingGeneration) return;
-		unsubscribe();
-		unsubscribe = options.mode === "json"
-			? session.subscribe(async (event) => { await write(`${JSON.stringify(projectSessionWireEvent(event))}\n`); })
-			: (): void => undefined;
-		if (headerPending) {
-			headerPending = false;
-			const header = session.sessionManager.getHeader();
-			if (header !== null) await write(`${JSON.stringify(header)}\n`);
-			for (const event of pendingPluginErrors.splice(0)) writePluginError(event);
-			await outputTail;
-		}
+		await output.bind(session);
 		if (generation !== bindingGeneration) return;
-		await recoverNonInteractiveSession(session, outputAbort.signal);
+		await recoverNonInteractiveSession(session, output.signal);
 	};
 
 	runtime.setBeforeSessionInvalidate(() => {
 		bindingGeneration += 1;
-		unsubscribe();
-		unsubscribe = (): void => undefined;
+		output.unbind();
 	});
 	runtime.setRebindSession(bind);
 
@@ -128,10 +89,10 @@ export async function runPrintMode(
 				? undefined
 				: canonicalPublicImages(message.images, "initialImages");
 			await runtime.session.prompt(message.text, {
-				signal: outputAbort.signal,
+				signal: output.signal,
 				...optionalProperties(images === undefined ? undefined : { images }),
 			});
-			await outputTail;
+			await output.drain();
 			const assistant = latestOneShotAssistant(boundary, runtime.session);
 			latestAssistant = assistant;
 			const failure = assistantFailure(assistant);
@@ -143,14 +104,14 @@ export async function runPrintMode(
 
 		if (status === 0 && options.mode === "text") {
 			const text = finalAssistantText(latestAssistant);
-			if (text !== "") await write(`${text}\n`);
+			if (text !== "") await output.write(`${text}\n`);
 		}
 	} catch (error) {
 		status = 1;
 		console.error(safeDiagnostic(error));
 	} finally {
 		bindingGeneration += 1;
-		unsubscribe();
+		output.unbind();
 		runtime.setBeforeSessionInvalidate(undefined);
 		runtime.setRebindSession(undefined);
 		try {
@@ -160,7 +121,7 @@ export async function runPrintMode(
 			console.error(safeDiagnostic(error));
 		}
 		try {
-			await outputTail;
+			await output.close();
 		} catch (error) {
 			if (status === 0) console.error(safeDiagnostic(error));
 			status = 1;

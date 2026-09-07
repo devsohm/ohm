@@ -33,6 +33,7 @@ import {
 } from "./catalogs.js";
 import { createProvider, type CreateProviderOptions } from "./model-runtime.js";
 import { streamByApi } from "./protocol-transports.js";
+import { boundedResponseText } from "./http-engine.js";
 
 export interface ProviderFactoryOptions {
   baseUrl?: string;
@@ -159,8 +160,11 @@ async function refreshOpenCodeGo(
   };
   if (context.signal !== undefined) request.signal = context.signal;
   const response = await (context.fetch ?? globalThis.fetch)(baseUrl.replace(/\/+$/u, "") + "/models", request);
-  if (!response.ok) throw new Error("OpenCode Go model discovery failed with HTTP " + response.status);
-  const value: JsonValue = await response.json();
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new Error("OpenCode Go model discovery failed with HTTP " + response.status);
+  }
+  const value: JsonValue = JSON.parse(await boundedResponseText(response, 8 * 1024 * 1024, context.signal));
   const entries = isJsonObject(value) && Array.isArray(value.data) ? value.data : [];
   const live = new Set(entries.flatMap((item) => {
     const id = isJsonObject(item) ? jsonString(item.id) : undefined;
@@ -252,8 +256,11 @@ export function ollamaProvider(options: ProviderFactoryOptions = {}): Provider {
       if (key !== undefined && key !== "") request.headers = { authorization: "Bearer " + key };
       if (context.signal !== undefined) request.signal = context.signal;
       const response = await (context.fetch ?? globalThis.fetch)(base.replace(/\/+$/u, "") + "/api/tags", request);
-      if (!response.ok) throw new Error("Ollama discovery failed with HTTP " + response.status);
-      const value: JsonValue = await response.json();
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new Error("Ollama discovery failed with HTTP " + response.status);
+      }
+      const value: JsonValue = JSON.parse(await boundedResponseText(response, 8 * 1024 * 1024, context.signal));
       const entries = isJsonObject(value) && Array.isArray(value.models) ? value.models : [];
       catalog = entries.flatMap((entry) => {
         const name = isJsonObject(entry) ? jsonString(entry.name) : undefined;

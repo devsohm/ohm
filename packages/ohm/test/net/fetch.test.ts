@@ -5,7 +5,7 @@ import type { Duplex } from "node:stream";
 import test from "node:test";
 import { brotliCompressSync } from "node:zlib";
 import { Check } from "typebox/value";
-import { Agent } from "undici";
+import { Agent, MockAgent } from "undici";
 
 import { SecretRedactor } from "../../src/auth/redaction.js";
 import { STRING_VALUE } from "../../src/core/value-schemas.js";
@@ -167,6 +167,126 @@ test("network transport routes HTTP through a scoped proxy and honors a host-and
   assert.equal(proxyRequests.length, 1);
   await bypassed.close();
 });
+
+test("explicit protocol proxy opt-outs override ALL_PROXY during real requests", async () => {
+  const target = createServer((_request, response) => response.end("direct"));
+  let proxyRequests = 0;
+  const proxy = createServer((_request, response) => { proxyRequests += 1; response.end("proxied"); });
+  const targetPort = await listen(target);
+  const proxyPort = await listen(proxy);
+  const transport = createNetworkTransport({
+    environment: { ALL_PROXY: `http://127.0.0.1:${proxyPort}` },
+    proxy: { http: false, https: false },
+  });
+  try {
+    assert.equal(await (await transport.fetch(`http://127.0.0.1:${targetPort}/`)).text(), "direct");
+    assert.equal(proxyRequests, 0);
+    assert.equal(transport.info.proxied, false);
+  } finally { await transport.close(); await Promise.all([close(target), close(proxy)]); }
+});
+
+test("HTTPS proxy opt-out bypasses HTTP fallback without disabling HTTP proxying", async () => {
+  let directConnections = 0;
+  const target = createServer();
+  target.on("connection", (socket) => {
+    directConnections += 1;
+    socket.once("data", () => socket.destroy());
+  });
+  let proxyRequests = 0;
+  let tunnels = 0;
+  const proxy = createServer((_request, response) => { proxyRequests += 1; response.end("proxied"); });
+  proxy.on("connect", (_request, socket) => {
+    tunnels += 1;
+    socket.end("HTTP/1.1 502 Synthetic fixture\r\nContent-Length: 0\r\n\r\n");
+  });
+  const targetPort = await listen(target);
+  const proxyPort = await listen(proxy);
+  const transport = createNetworkTransport({ environment: {}, proxy: { http: `http://127.0.0.1:${proxyPort}`, https: false } });
+  try {
+    assert.equal(await (await transport.fetch(`http://127.0.0.1:${targetPort}/`)).text(), "proxied");
+    // The local target deliberately ends the TLS handshake. Routing is proven by
+    // which server accepted the connection; no trust settings are weakened.
+    await assert.rejects(transport.fetch(`https://127.0.0.1:${targetPort}/`, { signal: AbortSignal.timeout(2_000) }));
+    assert.deepEqual({ directConnections, proxyRequests, tunnels }, { directConnections: 1, proxyRequests: 1, tunnels: 0 });
+    assert.equal(transport.info.httpsProxy, undefined);
+  } finally { await transport.close(); await Promise.all([close(target), close(proxy)]); }
+});
+
+for (const direction of ["HTTP to HTTPS", "HTTPS to HTTP"] as const) {
+  test(`protocol proxy opt-outs survive ${direction} redirects`, async (context) => {
+    let directHttpRequests = 0;
+    const target = createServer((_request, response) => {
+      directHttpRequests += 1;
+      response.end("direct HTTP");
+    });
+    let directTlsConnections = 0;
+    if (direction === "HTTP to HTTPS") {
+      target.on("connection", (socket) => {
+        directTlsConnections += 1;
+        socket.once("data", () => socket.destroy());
+      });
+    }
+    const targetPort = await listen(target);
+    let proxyRequests = 0;
+    let tunnels = 0;
+    const secureUrl = direction === "HTTP to HTTPS"
+      ? `https://127.0.0.1:${targetPort}/resource`
+      : "https://redirect-fixture.invalid/resource";
+    const proxy = createServer((_request, response) => {
+      proxyRequests += 1;
+      if (direction === "HTTP to HTTPS") {
+        response.writeHead(302, { location: secureUrl });
+        response.end();
+      } else response.end("proxied HTTP");
+    });
+    proxy.on("connect", (_request, socket) => {
+      tunnels += 1;
+      socket.end("HTTP/1.1 502 Synthetic fixture\r\nContent-Length: 0\r\n\r\n");
+    });
+    const proxyPort = await listen(proxy);
+    const httpUrl = `http://127.0.0.1:${targetPort}/resource`;
+    // Only the initial HTTPS redirect response is synthetic. The other
+    // direction uses a real TLS connection that the local fixture ends.
+    const secureAgent = new Agent();
+    const secure = new MockAgent({ agent: secureAgent });
+    secure.disableNetConnect();
+    if (direction === "HTTPS to HTTP") {
+      secure.get(new URL(secureUrl).origin).intercept({ path: "/resource" })
+        .reply(302, "", { headers: { location: httpUrl } });
+    }
+    const dispatch = Agent.prototype.dispatch;
+    context.mock.method(Agent.prototype, "dispatch", function (
+      this: Agent,
+      options: Parameters<Agent["dispatch"]>[0],
+      handler: Parameters<Agent["dispatch"]>[1],
+    ) {
+      return direction === "HTTPS to HTTP" && this !== secureAgent && String(options.origin) === new URL(secureUrl).origin
+        ? secure.dispatch(options, handler)
+        : dispatch.call(this, options, handler);
+    });
+    const transport = createNetworkTransport({
+      environment: {},
+      proxy: { http: `http://127.0.0.1:${proxyPort}`, https: false },
+    });
+    try {
+      const response = transport.fetch(direction === "HTTP to HTTPS" ? httpUrl : secureUrl, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (direction === "HTTP to HTTPS") {
+        await assert.rejects(response);
+        assert.equal(directTlsConnections, 1);
+      } else assert.equal(await (await response).text(), "proxied HTTP");
+      assert.deepEqual({ directHttpRequests, proxyRequests, tunnels }, { directHttpRequests: 0, proxyRequests: 1, tunnels: 0 });
+      secure.assertNoPendingInterceptors();
+    } finally {
+      try { await transport.close(); }
+      finally {
+        await secure.close();
+        await Promise.all([close(target), close(proxy)]);
+      }
+    }
+  });
+}
 
 test("network transport accepts a Node-global Request without losing request init semantics", async (t) => {
   const received: Array<{ method: string; header: string | undefined; body: string }> = [];

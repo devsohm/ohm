@@ -104,6 +104,7 @@ export class TUI extends Container {
   #renderGeneration = 0;
   #forceFullRedraw = false;
   #lines: string[] = [];
+  #cursorPlaced = false;
   #renderedColumns: number | undefined;
   #restoredColumns: number | undefined;
   readonly #pointer: TerminalPointer;
@@ -172,9 +173,9 @@ export class TUI extends Container {
     this.#settleQueries();
     const preserveScreen = options.preserveScreen === true && this.mode === "regular";
     try {
+      if (this.#cursorPlaced) this.terminal.write("\x1b8");
       const pointerMode = this.#pointer.stop();
       if (pointerMode !== "") this.terminal.write(pointerMode);
-      if (!preserveScreen && this.#lines.some((line) => line.includes(CURSOR_MARKER))) this.terminal.write(" ");
       this.beforeTerminalStop(options);
       if (!preserveScreen && !(this instanceof Object && "setLayoutRoot" in this)) this.terminal.write("\r\n");
     } finally {
@@ -183,6 +184,7 @@ export class TUI extends Container {
       this.#renderGeneration += 1;
       this.#scheduled = false;
       this.#lines = [];
+      this.#cursorPlaced = false;
       this.#renderedColumns = undefined;
       this.#invalidateLayout();
     }
@@ -487,6 +489,11 @@ export class TUI extends Container {
     this.frameComposed(lines);
     const changed = lines.length !== this.#lines.length || lines.some((line, index) => line !== this.#lines[index]);
     if (!changed && !this.#forceFullRedraw) {
+      if (!this.#cursorPlaced) {
+        const cursor = this.#placeCursor(lines);
+        if (cursor !== "") this.terminal.write(cursor);
+        this.#cursorPlaced = cursor !== "";
+      }
       this.#renderedColumns = this.terminal.columns;
       this.#publishLayout(frame);
       return;
@@ -524,11 +531,29 @@ export class TUI extends Container {
       const restore = rows > Math.max(1, lines.length) ? `\x1b[${rows - Math.max(1, lines.length)}A` : "";
       body = `${up}${rewritten}${restore}`;
     }
-    this.terminal.write(`\x1b[?2026h${deleteImages}${body.replaceAll(CURSOR_MARKER, "")}\x1b[?2026l`);
+    const cursor = this.#placeCursor(lines);
+    // The main-screen append/rewrite paths start at the previous paint endpoint, not the editor caret.
+    const restore = this.#cursorPlaced ? "\x1b8" : "";
+    this.terminal.write(`\x1b[?2026h${restore}${deleteImages}${body.replaceAll(CURSOR_MARKER, "")}${cursor}\x1b[?2026l`);
+    this.#cursorPlaced = cursor !== "";
     this.#lines = [...lines];
     this.#renderedColumns = this.terminal.columns;
     this.#forceFullRedraw = false;
     this.#publishLayout(frame);
+  }
+
+  #placeCursor(lines: readonly string[]): string {
+    const firstVisibleRow = this.mode === "regular" ? Math.max(0, lines.length - this.terminal.rows) : 0;
+    for (let row = firstVisibleRow; row < lines.length; row += 1) {
+      const line = lines[row]!;
+      const marker = line.indexOf(CURSOR_MARKER);
+      if (marker < 0) continue;
+      const column = Math.min(this.terminal.columns - 1, visibleWidth(line.slice(0, marker)));
+      if (this.mode === "fullscreen") return `\x1b7\x1b[${row + 1};${column + 1}H`;
+      const up = lines.length - row - 1;
+      return `\x1b7${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[${column + 1}G`;
+    }
+    return "";
   }
 
   #renderFailure(cause: unknown): void {

@@ -88,6 +88,7 @@ export class TerminalController implements InteractiveTerminal {
   }
 
   question(prompt: string, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted === true) return Promise.reject(abortReason(signal, "Terminal question cancelled"));
     if (this.#closed) return Promise.reject(new Error("Terminal input is closed"));
     if (this.#pending !== undefined || this.#secretAbort !== undefined || this.#toggleAbort !== undefined) {
       return Promise.reject(new Error("Another terminal question is active"));

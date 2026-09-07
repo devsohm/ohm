@@ -339,6 +339,30 @@ test("terminal prompts propagate hostile abort reasons without inspecting them",
   assert.equal(traps, 0);
 });
 
+test("terminal questions reject pre-aborted signals without writing a prompt", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const terminal = new TerminalController(input, output);
+  const reason = new Error("question cancelled before admission");
+  let settled = false;
+  let rejection: unknown;
+  const question = terminal.question("Must not be printed: ", AbortSignal.abort(reason)).then(
+    () => { settled = true; },
+    (error) => { settled = true; rejection = error; },
+  );
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, true, "A pre-aborted question must not wait for terminal input");
+    assert.equal(rejection, reason);
+    assert.equal(output.readableLength, 0);
+  } finally {
+    terminal.close();
+    await question;
+    input.destroy();
+    output.destroy();
+  }
+});
+
 test("TTY secret input preserves UTF-8 and backspaces one complete character", async () => {
   const input = new TtyInput();
   const output = new PassThrough();

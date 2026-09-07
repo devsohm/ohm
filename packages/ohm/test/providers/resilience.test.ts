@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { AnthropicAdapter } from "../../src/providers/anthropic.js";
 import { BedrockAdapter } from "../../src/providers/bedrock.js";
 import { GeminiAdapter } from "../../src/providers/gemini.js";
 import { OpenAICompatibleAdapter } from "../../src/providers/openai-compatible.js";
 import { OpenAIResponsesAdapter } from "../../src/providers/openai-responses.js";
+import { ProviderWireInterceptorRegistry } from "../../src/providers/wire.js";
 import {
   type FetchLike,
+  assertResponseOk,
+  HttpResponseError,
+  MAX_PROVIDER_ERROR_BODY_BYTES,
   MAX_PERSISTED_PROVIDER_ERROR_BYTES,
+  ProtocolError,
   jsonValueOrString,
   normalizeError,
+  readJsonResponse,
 } from "../../src/providers/transport.js";
 import { byteChunks, collect, fakeFetch, request, streamResponse, terminalCount } from "./helpers.js";
 
@@ -19,6 +26,69 @@ interface CyclicFixture {
 
 interface AccessorFixture {
   value?: string;
+}
+
+test("Gemini bearer-only streams preserve authorization without transmitting a fabricated API key", async () => {
+  const requests: Request[] = [];
+  const hookHeaders: Readonly<Record<string, string>>[] = [];
+  const wire = new ProviderWireInterceptorRegistry();
+  wire.registerLifecycle({ beforeHeaders(value) { hookHeaders.push(value.headers); } });
+  const adapter = new GeminiAdapter({
+    accessToken: "offline-bearer-token",
+    fetch: wire.wrapFetch("gemini", fakeFetch((incoming) => {
+      requests.push(incoming);
+      return streamResponse(byteChunks(`data: ${JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "bearer response" }] }, finishReason: "STOP" }],
+      })}\n\n`));
+    })),
+  });
+  const events = await wire.withScope({ threadId: "bearer-thread", runId: "bearer-run", step: 0 }, () =>
+    collect(adapter.stream(request("gemini"), new AbortController().signal)));
+  assert.equal(requests.length, 1, "a configured bearer token must reach the host fetch");
+  const outgoing = requests[0]!;
+  assert.equal(outgoing.headers.get("authorization"), "Bearer offline-bearer-token");
+  assert.equal(outgoing.headers.has("x-goog-api-key"), false);
+  assert.equal(new URL(outgoing.url).searchParams.has("key"), false);
+  assert.equal(hookHeaders.length, 1);
+  assert.equal(hookHeaders[0]?.authorization, "Bearer offline-bearer-token");
+  assert.equal(hookHeaders[0]?.["x-goog-api-key"], undefined);
+  assert.equal(events.at(-1)?.type, "response_end");
+  assert.equal(terminalCount(events), 1);
+  assert.equal(events.filter((event) => event.type === "text_delta").map((event) => event.text).join(""), "bearer response");
+});
+
+for (const kind of ["error", "JSON"] as const) {
+  test(`bounded product ${kind} responses release ownership before custom cancellation settles`, async () => {
+    let release!: () => void;
+    const cleanup = new Promise<void>((resolve) => { release = resolve; });
+    let cancellations = 0;
+    const limit = kind === "error" ? MAX_PROVIDER_ERROR_BODY_BYTES : 16;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(limit + 1).fill(120)); },
+      cancel() { cancellations += 1; return cleanup; },
+    });
+    const response = new Response(body, { status: kind === "error" ? 400 : 200 });
+    let settled = false;
+    const pending = (kind === "error" ? assertResponseOk(response) : readJsonResponse(response, limit))
+      .then((value) => ({ value }), (error) => ({ error }))
+      .then((result) => { settled = true; return result; });
+    try {
+      await nextTurn();
+      assert.equal(settled, true, "bounded response reading must not await source cancellation");
+      assert.equal(cancellations, 1);
+      assert.equal(body.locked, false);
+      const result = await pending;
+      assert.ok("error" in result);
+      if (kind === "error") {
+        assert.ok(result.error instanceof HttpResponseError);
+        assert.equal(result.error.status, 400);
+        assert.match(String(result.error.body), /response body truncated at 65536 bytes/u);
+      } else {
+        assert.ok(result.error instanceof ProtocolError);
+        assert.match(result.error.message, /JSON response exceeded 16 bytes/u);
+      }
+    } finally { release(); await pending; }
+  });
 }
 
 test("provider transport safely falls back for hostile JSON candidates", () => {

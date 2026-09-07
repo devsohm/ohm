@@ -92,8 +92,11 @@ set -eu
 umask 077
 test -d "$HOME/.ohm"
 ohm_state_backup=$(mktemp -d "${TMPDIR:-/tmp}/ohm-state.XXXXXX")
-for name in AGENTS.md config.json auth.json models.json models-store.json sessions extensions skills prompts themes tools npm git extension-data; do
-  if [ -e "$HOME/.ohm/$name" ]; then cp -Rp "$HOME/.ohm/$name" "$ohm_state_backup/$name"; fi
+for name in AGENTS.md SYSTEM.md APPEND_SYSTEM.md config.json auth.json models.json models-store.json model-providers.json trusted-workspaces.json sessions plugins extensions skills prompts themes tools npm git extension-data state/extension-data; do
+  if [ -e "$HOME/.ohm/$name" ]; then
+    mkdir -p "$(dirname "$ohm_state_backup/$name")"
+    cp -Rp "$HOME/.ohm/$name" "$ohm_state_backup/$name"
+  fi
 done
 ohm uninstall --yes
 # Run the new installer, then restore the selected entries.
@@ -110,10 +113,12 @@ if (-not (Test-Path -LiteralPath $ohmHome -PathType Container)) {
 }
 $ohmStateBackup = Join-Path ([IO.Path]::GetTempPath()) ("ohm-state-" + [Guid]::NewGuid().ToString("N"))
 [void](New-Item -ItemType Directory -Path $ohmStateBackup)
-foreach ($name in @("AGENTS.md", "config.json", "auth.json", "models.json", "models-store.json", "sessions", "extensions", "skills", "prompts", "themes", "tools", "npm", "git", "extension-data")) {
+foreach ($name in @("AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md", "config.json", "auth.json", "models.json", "models-store.json", "model-providers.json", "trusted-workspaces.json", "sessions", "plugins", "extensions", "skills", "prompts", "themes", "tools", "npm", "git", "extension-data", "state/extension-data")) {
     $source = Join-Path $ohmHome $name
     if (Test-Path -LiteralPath $source) {
-        Copy-Item -LiteralPath $source -Destination (Join-Path $ohmStateBackup $name) -Recurse
+        $destination = Join-Path $ohmStateBackup $name
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force)
+        Copy-Item -LiteralPath $source -Destination $destination -Recurse
     }
 }
 ohm uninstall --yes
@@ -123,6 +128,10 @@ Copy-Item -Path "$ohmStateBackup\*" -Destination "$HOME\.ohm" -Recurse -Force
 
 Restore the selected entries only after the new installer succeeds. Keep the backup until `ohm` starts and your
 configuration, credentials, and sessions are present.
+
+The lists include legacy resource and plugin-data locations to preserve older installations. Only
+`state/extension-data` is backed up from `state`; do not restore process leases or lifecycle locks.
+Also back up any session or resource directories configured outside `~/.ohm` separately.
 
 ## Linux
 

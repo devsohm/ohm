@@ -314,6 +314,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     session: {
       sessionManager,
       get sessionFile() { return sessionManager.getSessionFile(); },
+      hasPluginHandlers() { return false; },
       async close() { runtimeClosed += 1; },
       createReplacedSessionContext() { return Object.freeze({}); },
     },

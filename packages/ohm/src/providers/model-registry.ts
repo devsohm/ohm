@@ -607,42 +607,46 @@ export class ModelRegistry {
   registerProvider(providerOrName: Provider | string, config?: ProviderConfigInput): void {
     const id = Value.Check(STRING_VALUE, providerOrName) ? providerOrName : providerOrName.id;
     if (id.trim() === "") throw new Error("Provider registration needs a non-empty id");
+    const base = this.#original.has(id) ? this.#original.get(id) : this.#models.getProvider(id);
+    let merged: ProviderConfigInput | undefined;
+    let provider: Provider;
+    if (!Value.Check(STRING_VALUE, providerOrName)) {
+      provider = providerOrName;
+    } else {
+      if (config === undefined) {
+        throw new Error("A provider object is required when registration uses a string name");
+      }
+      merged = {
+        ...this.#configs.get(id),
+        ...optionalProperties(config.name === undefined ? undefined : { name: config.name }),
+        ...optionalProperties(config.baseUrl === undefined ? undefined : { baseUrl: config.baseUrl }),
+        ...optionalProperties(config.apiKey === undefined ? undefined : { apiKey: config.apiKey }),
+        ...optionalProperties(config.api === undefined ? undefined : { api: config.api }),
+        ...optionalProperties(config.streamSimple === undefined ? undefined : { streamSimple: config.streamSimple }),
+        ...optionalProperties(config.headers === undefined ? undefined : { headers: config.headers }),
+        ...optionalProperties(config.authHeader === undefined ? undefined : { authHeader: config.authHeader }),
+        ...optionalProperties(config.oauth === undefined ? undefined : { oauth: config.oauth }),
+        ...optionalProperties(config.models === undefined ? undefined : { models: config.models }),
+        ...optionalProperties(config.refreshModels === undefined ? undefined : { refreshModels: config.refreshModels }),
+      };
+      provider = composeProvider(id, base, merged);
+    }
+    const available = this.#auth.has(id) || merged?.apiKey !== undefined ? [...provider.getModels()] : [];
+    this.#models.setProvider(provider);
     if (!this.#original.has(id)) {
-      this.#original.set(id, this.#models.getProvider(id));
+      this.#original.set(id, base);
       this.#originalAuth.set(id, this.#auth.get(id));
       this.#originalAvailable.set(id, this.#available.filter((model) => model.provider === id));
     }
-    if (!Value.Check(STRING_VALUE, providerOrName)) {
+    if (merged === undefined) {
       this.#configs.delete(id);
-      this.#native.set(id, providerOrName);
-      this.#models.setProvider(providerOrName);
-      this.#replaceAvailableProvider(id, this.#auth.has(id) ? providerOrName.getModels() : []);
-      return;
+      this.#native.set(id, provider);
+    } else {
+      this.#native.delete(id);
+      this.#configs.set(id, merged);
+      if (merged.apiKey !== undefined) this.#auth.set(id, { type: "api_key", source: "configuration" });
     }
-    if (config === undefined) {
-      throw new Error("A provider object is required when registration uses a string name");
-    }
-    this.#native.delete(id);
-    const previous = this.#configs.get(id);
-    const merged: ProviderConfigInput = {
-      ...previous,
-      ...optionalProperties(config.name === undefined ? undefined : { name: config.name }),
-      ...optionalProperties(config.baseUrl === undefined ? undefined : { baseUrl: config.baseUrl }),
-      ...optionalProperties(config.apiKey === undefined ? undefined : { apiKey: config.apiKey }),
-      ...optionalProperties(config.api === undefined ? undefined : { api: config.api }),
-      ...optionalProperties(config.streamSimple === undefined ? undefined : { streamSimple: config.streamSimple }),
-      ...optionalProperties(config.headers === undefined ? undefined : { headers: config.headers }),
-      ...optionalProperties(config.authHeader === undefined ? undefined : { authHeader: config.authHeader }),
-      ...optionalProperties(config.oauth === undefined ? undefined : { oauth: config.oauth }),
-      ...optionalProperties(config.models === undefined ? undefined : { models: config.models }),
-      ...optionalProperties(config.refreshModels === undefined ? undefined : { refreshModels: config.refreshModels }),
-    };
-    const base = this.#original.get(id);
-    const provider = composeProvider(id, base, merged);
-    this.#configs.set(id, merged);
-    this.#models.setProvider(provider);
-    if (merged.apiKey !== undefined) this.#auth.set(id, { type: "api_key", source: "configuration" });
-    this.#replaceAvailableProvider(id, this.#auth.has(id) ? provider.getModels() : []);
+    this.#replaceAvailableProvider(id, available);
   }
 
   unregisterProvider(providerName: string): void {

@@ -5,6 +5,7 @@ import type { JsonObject } from "../../src/core/json.js";
 import { GeminiAdapter } from "../../src/providers/gemini.js";
 import { OpenAICompatibleAdapter, OpenRouterAdapter } from "../../src/providers/openai-compatible.js";
 import { buildResponsesBody, OpenAIResponsesAdapter } from "../../src/providers/openai-responses.js";
+import { buildOpenAICodexResponsesBody } from "../../src/providers/openai-codex-responses.js";
 import {
   byteChunks,
   collect,
@@ -49,6 +50,25 @@ const grammarTool = {
     variants: { openai_lark: "start: /[a-z]+/" },
   } as const,
 };
+
+for (const provider of ["openai", "openai-codex"] as const) {
+  test(`${provider} forced grammar choices match the declared custom tool wire type`, () => {
+    for (const supportsGrammar of [false, true]) {
+      for (const tool of [strictTool, grammarTool]) {
+        const input = request(provider);
+        input.tools = [strictTool, grammarTool];
+        input.modelSettings = { compatibility: { supportsStrictMode: true, supportsOpenAIGrammarTools: supportsGrammar } };
+        input.toolChoice = { type: "function", function: { name: tool.name } };
+        const body = provider === "openai"
+          ? buildResponsesBody(input, false, false)
+          : buildOpenAICodexResponsesBody(input, false);
+        assert.deepEqual(body.tool_choice, {
+          type: supportsGrammar && tool === grammarTool ? "custom" : "function", name: tool.name,
+        });
+      }
+    }
+  });
+}
 
 test("configured Chat Completions constraints serialize strictly and reject unsupported requirements", async () => {
   let posted: JsonObject | undefined;

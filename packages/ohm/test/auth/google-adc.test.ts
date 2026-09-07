@@ -202,6 +202,9 @@ test("Google external-account resolver delegates AWS subject-token signing to th
       token_url: "https://sts.googleapis.com/v1/token",
       credential_source: {
         environment_id: "aws1",
+        region_url: "http://169.254.169.254/latest/meta-data/placement/availability-zone",
+        url: "http://169.254.169.254/latest/meta-data/iam/security-credentials",
+        imdsv2_session_token_url: "http://169.254.169.254/latest/api/token",
         regional_cred_verification_url:
           "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15",
       },
@@ -217,13 +220,17 @@ test("Google external-account resolver delegates AWS subject-token signing to th
       resolverCalls += 1;
       assert.deepEqual(credential.credential_source, {
         environment_id: "aws1",
+        region_url: "http://169.254.169.254/latest/meta-data/placement/availability-zone",
+        url: "http://169.254.169.254/latest/meta-data/iam/security-credentials",
+        imdsv2_session_token_url: "http://169.254.169.254/latest/api/token",
         regional_cred_verification_url:
           "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15",
       });
       assert.deepEqual(scopes, ["https://www.googleapis.com/auth/cloud-platform"]);
       return "serialized-signed-aws-request";
     },
-    fetch: async (_input, init) => {
+    fetch: async (input, init) => {
+      assert.equal(String(input), "https://sts.googleapis.com/v1/token");
       form = new URLSearchParams(String(init?.body));
       return Response.json({ access_token: "aws-federated-access", expires_in: 900 });
     },

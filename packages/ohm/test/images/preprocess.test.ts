@@ -8,6 +8,16 @@ import {
   sniffImageMediaType,
 } from "../../src/images/preprocess.js";
 import { inspectImage } from "../../src/tools/image-info.js";
+import { preprocessImageInProcess } from "../../src/images/preprocess-core.js";
+
+test("image preprocessing stops encoding after the first acceptable candidate", async (t) => {
+  const input = await sharp({ create: { width: 8, height: 8, channels: 3, background: "red" } }).png().toBuffer();
+  const encode = t.mock.method(sharp.prototype, "toBuffer");
+  const result = await preprocessImageInProcess(input, { maxWidth: 4, maxHeight: 4 });
+  assert.equal(result.mediaType, "image/png");
+  assert.deepEqual(inspectImage(result.bytes), { mediaType: "image/png", width: 4, height: 4 });
+  assert.equal(encode.mock.callCount(), 1);
+});
 
 function tinyBmp(): Buffer {
   const data = Buffer.alloc(58);

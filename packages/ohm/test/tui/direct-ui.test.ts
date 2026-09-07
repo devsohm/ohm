@@ -1031,6 +1031,49 @@ test("direct custom components receive raw input and clean up exactly once on co
   assert.match(output.text, terminalPattern("\\u001b\\[\\?25h", "u"));
 });
 
+for (const completion of ["early done", "callback abort"] as const) {
+  test(`late custom components are not retained for theme changes after ${completion}`, { timeout: 3_000 }, async () => {
+    const { controller } = fixture();
+    const generation = new AbortController();
+    const callback = new AbortController();
+    const owner = createInteractiveDirectUiContext(controller, "late-custom", process.cwd(), generation.signal);
+    const ui = createInteractiveDirectUiFacade(owner, callback.signal);
+    let releaseFactory!: () => void;
+    let markDisposed!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseFactory = resolve; });
+    const disposed = new Promise<void>((resolve) => { markDisposed = resolve; });
+    let disposals = 0;
+    let invalidations = 0;
+    const result = ui.custom<string>(async (_tui, _theme, _keys, done) => {
+      if (completion === "early done") done("finished");
+      await gate;
+      return {
+        render: () => ["late component"],
+        invalidate() { invalidations += 1; },
+        dispose() { disposals += 1; markDisposed(); },
+      };
+    });
+    try {
+      if (completion === "callback abort") callback.abort(new Error("callback ended"));
+      assert.equal(await result, completion === "early done" ? "finished" : undefined);
+      releaseFactory();
+      await disposed;
+      assert.equal(disposals, 1);
+      const before = invalidations;
+      controller.setTheme(controller.currentThemeObject().name === "mono" ? "signal" : "mono");
+      assert.equal(invalidations, before, "a disposed custom component must not receive theme invalidations");
+      assert.equal(disposals, 1);
+    } finally {
+      releaseFactory();
+      callback.abort();
+      generation.abort();
+      controller.close();
+      await result;
+      await disposed;
+    }
+  });
+}
+
 test("direct custom and editor factories receive the controller's live complete keybinding manager", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -1260,6 +1303,45 @@ test("raw editor reads, handoffs, unload and submission preserve expanded paste 
   assert.equal(controller.getEditorText(), paste);
   controller.close();
 });
+
+for (const method of ["getText", "getExpandedText"] as const) {
+  test(`removing a raw editor releases ownership when ${method} throws`, () => {
+    const { controller } = fixture();
+    const generation = new AbortController();
+    const failure = new Error("raw editor read failed");
+    let failRead = false;
+    let disposed = 0;
+    let text = "";
+    const read = (): string => {
+      if (failRead) throw failure;
+      return text;
+    };
+    const component: EditorComponent & { dispose(): void } = {
+      render: () => [CURSOR_MARKER], handleInput() {}, invalidate() {},
+      getText: method === "getText" ? read : () => text,
+      getExpandedText: read,
+      setText(value) { text = value; },
+      dispose() { disposed += 1; },
+    };
+    // JavaScript editors may omit the expanded-text method; exercise that fallback too.
+    if (method === "getText") Object.defineProperty(component, "getExpandedText", { value: undefined });
+    controller.setEditorText("preserved host draft");
+    const remove = controller.installRawEditor(component, generation.signal);
+    try {
+      assert.equal(controller.currentRawEditor(), component);
+      failRead = true;
+      assert.throws(remove, (cause) => cause === failure);
+      assert.equal(controller.currentRawEditor(), undefined);
+      assert.equal(controller.getEditorText(), "preserved host draft");
+      assert.equal(disposed, 1);
+      assert.doesNotThrow(remove);
+      assert.equal(disposed, 1);
+    } finally {
+      failRead = false;
+      controller.close();
+    }
+  });
+}
 
 test("removing a covered raw editor does not overwrite the active editor draft", () => {
   const { controller } = fixture();

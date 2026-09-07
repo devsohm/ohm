@@ -53,6 +53,19 @@ test("file activity retains prior summaries and successful built-in file operati
   });
 });
 
+test("file activity attributes reused provider call IDs to their own completed turn", () => {
+  const messages = [
+    message("first-call", "assistant", [{ type: "tool_call", callId: "reused", name: "write", arguments: { path: "src/first.ts", content: "first" } }]),
+    message("first-result", "tool", [{ type: "tool_result", callId: "reused", name: "write", content: "written", isError: false }]),
+    message("next-turn", "user", [{ type: "text", text: "write another file" }]),
+    message("second-call", "assistant", [{ type: "tool_call", callId: "reused", name: "write", arguments: { path: "src/second.ts", content: "second" } }]),
+    message("second-result", "tool", [{ type: "tool_result", callId: "reused", name: "write", content: "permission denied", isError: true }]),
+  ];
+  const before = structuredClone(messages);
+  assert.deepEqual(collectCompactionFileActivity(messages), { readFiles: [], modifiedFiles: ["src/first.ts"] });
+  assert.deepEqual(messages, before);
+});
+
 test("file activity notes are machine-readable, removable, and token-bounded", () => {
   const activity = {
     readFiles: Array.from({ length: 100 }, (_, index) => `src/read-${index}.ts`),

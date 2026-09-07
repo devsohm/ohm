@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { isJsonObject, type JsonObject } from "../../src/core/json.js";
+import { optionalProperties } from "../../src/core/optional-properties.js";
 
 interface RpcFixtureResult {
   records: JsonObject[];
@@ -13,7 +15,7 @@ interface RpcFixtureResult {
 async function runFixture(
   command: JsonObject | readonly JsonObject[],
   environment: NodeJS.ProcessEnv = {},
-  options: { imports?: readonly string[]; expectedCode?: number; timeoutMs?: number } = {},
+  options: { imports?: readonly string[]; expectedCode?: number; timeoutMs?: number; inputResponse?: string } = {},
 ): Promise<RpcFixtureResult> {
   const fixture = fileURLToPath(new URL("../fixtures/rpc-mode-host.mts", import.meta.url));
   const child = spawn(process.execPath, [
@@ -33,7 +35,18 @@ async function runFixture(
   child.stdout.on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.on("data", (chunk: string) => { stderr += chunk; });
   const commands = Array.isArray(command) ? command : [command];
-  child.stdin.end(commands.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const lines = commands.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+  if (options.inputResponse === undefined) child.stdin.end(lines);
+  else {
+    const reader = createInterface({ input: child.stdout });
+    reader.on("line", (line) => {
+      const record: unknown = JSON.parse(line);
+      if (!isJsonObject(record) || record.type !== "extension_ui_request" || record.method !== "input") return;
+      child.stdin.end(`${JSON.stringify({ type: "extension_ui_response", id: record.id, value: options.inputResponse })}\n`);
+      reader.close();
+    });
+    child.stdin.write(lines);
+  }
   const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -53,6 +66,46 @@ async function runFixture(
 
 function dataImport(source: string): string {
   return `data:text/javascript,${encodeURIComponent(source)}`;
+}
+
+for (const completion of ["EOF", "response"] as const) {
+  test(`public RPC startup accepts ${completion} while commands wait for startup`, async () => {
+    const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
+    const bridge = new URL("../../src/interfaces/rpc-plugin-ui.ts", import.meta.url).href;
+    const startupDialog = dataImport(`
+      import assert from "node:assert/strict";
+      const { RpcRuntimeDispatcher } = await import(${JSON.stringify(dispatcher)});
+      const { RpcPluginUiBridge } = await import(${JSON.stringify(bridge)});
+      const context = RpcPluginUiBridge.prototype.context;
+      let ui;
+      RpcPluginUiBridge.prototype.context = function(...args) {
+        ui = context.apply(this, args);
+        return ui;
+      };
+      const start = RpcRuntimeDispatcher.prototype.start;
+      let ready = false;
+      RpcRuntimeDispatcher.prototype.start = async function() {
+        await start.call(this);
+        assert.equal(await ui.input("Startup input"), ${completion === "response" ? '"accepted"' : "undefined"});
+        ready = true;
+      };
+      const dispatch = RpcRuntimeDispatcher.prototype.dispatch;
+      RpcRuntimeDispatcher.prototype.dispatch = async function(command) {
+        assert.equal(ready, true, "command ran before startup completed");
+        return await dispatch.call(this, command);
+      };
+    `);
+    const { records, stderr } = await runFixture([
+      { id: "state", type: "get_state" },
+      { id: "abort", type: "abort" },
+    ], {}, {
+      imports: [startupDialog],
+      ...optionalProperties(completion === "response" ? { inputResponse: "accepted" } : undefined),
+    });
+    assert.equal(stderr, "");
+    assert.equal(records.find((record) => record.id === "state")?.success, true);
+    assert.equal(records.find((record) => record.id === "abort")?.success, true);
+  });
 }
 
 test("public RPC mode owns an existing runtime and serves strict JSONL until stdin closes", async () => {
@@ -257,6 +310,84 @@ test("public RPC mode lets active commands finish after stdin closes", async () 
   assert.equal(records[0]?.["id"], "slow-state");
   assert.equal(records[0]?.["success"], true);
 });
+
+for (const behavior of ["healthy slow", "stalled"] as const) {
+  test(`public RPC clean EOF drains queued notifications through a ${behavior} writer`, async () => {
+    const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
+    const bridgeModule = new URL("../../src/interfaces/rpc-plugin-ui.ts", import.meta.url).href;
+    const slowNotifications = dataImport(`
+      const nativeSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = function(callback, delay, ...args) {
+        return nativeSetTimeout(callback, delay === 5_000 && ${JSON.stringify(behavior)} === "stalled" ? 100 : delay, ...args);
+      };
+      const write = process.stdout.write.bind(process.stdout);
+      let notifications = 0;
+      process.stdout.write = function(chunk, encodingOrCallback, callback) {
+        if (!String(chunk).includes('"method":"notify"')) return write(chunk, encodingOrCallback, callback);
+        const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+        notifications += 1;
+        if (${JSON.stringify(behavior)} === "stalled" && notifications === 2) return write(chunk);
+        return write(chunk, (error) => { nativeSetTimeout(() => done?.(error), 25); });
+      };
+      const { RpcRuntimeDispatcher } = await import(${JSON.stringify(dispatcher)});
+      const { RpcPluginUiBridge } = await import(${JSON.stringify(bridgeModule)});
+      let ui;
+      const context = RpcPluginUiBridge.prototype.context;
+      RpcPluginUiBridge.prototype.context = function(...args) {
+        ui = context.apply(this, args);
+        return ui;
+      };
+      const dispatch = RpcRuntimeDispatcher.prototype.dispatch;
+      RpcRuntimeDispatcher.prototype.dispatch = async function(command) {
+        for (let index = 0; index < 8; index += 1) ui.notify("queued-" + index);
+        return await dispatch.call(this, command);
+      };
+    `);
+    const { records, stderr } = await runFixture({ id: "state", type: "get_state" }, {}, {
+      imports: [slowNotifications],
+    });
+    assert.equal(stderr, "");
+    assert.equal(records.find((record) => record.id === "state")?.success, true);
+    assert.deepEqual(records.filter((record) => record.method === "notify").map((record) => record.message),
+      Array.from({ length: behavior === "stalled" ? 2 : 8 }, (_, index) => `queued-${index}`));
+  });
+}
+
+for (const timing of ["pending", "after EOF"] as const) {
+  test(`public RPC mode cancels ${timing} dialogs and drains their accepted commands`, async () => {
+    const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
+    const bridgeModule = new URL("../../src/interfaces/rpc-plugin-ui.ts", import.meta.url).href;
+    const dialogDispatcher = dataImport(`
+      const { RpcRuntimeDispatcher } = await import(${JSON.stringify(dispatcher)});
+      const { RpcPluginUiBridge } = await import(${JSON.stringify(bridgeModule)});
+      let ui;
+      let ended;
+      const inputEnded = new Promise((resolve) => { ended = resolve; });
+      const context = RpcPluginUiBridge.prototype.context;
+      RpcPluginUiBridge.prototype.context = function(...args) {
+        ui = context.apply(this, args);
+        return ui;
+      };
+      const endInput = RpcPluginUiBridge.prototype.endInput;
+      RpcPluginUiBridge.prototype.endInput = function() { endInput.call(this); ended(); };
+      RpcRuntimeDispatcher.prototype.dispatch = async function(command) {
+        if (${JSON.stringify(timing)} === "after EOF") await inputEnded;
+        const value = await ui.input("No remaining peer");
+        ui.notify("Accepted work finished");
+        return { id: command.id, type: "response", command: command.type, success: true, data: { cancelled: value === undefined } };
+      };
+    `);
+    const { records, stderr } = await runFixture({ id: "dialog", type: "prompt", message: "ask" }, {}, {
+      imports: [dialogDispatcher],
+    });
+    assert.equal(stderr, "");
+    assert.deepEqual(records.filter((record) => record.type === "response"), [{
+      id: "dialog", type: "response", command: "prompt", success: true, data: { cancelled: true },
+    }]);
+    assert.equal(records.filter((record) => record.method === "input").length, timing === "pending" ? 1 : 0);
+    assert.equal(records.filter((record) => record.method === "notify").length, 1);
+  });
+}
 
 test("RPC control responses bypass a saturated ordinary-command lane", async () => {
   const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;

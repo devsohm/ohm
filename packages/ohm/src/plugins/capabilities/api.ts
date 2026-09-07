@@ -20,7 +20,7 @@ import type {
   PendingProviderRegistration,
 } from "./internal/api/state.js";
 
-/** Registration and live-session capabilities exposed to one direct extension. */
+/** Registration and live-session capabilities exposed to one direct plugin. */
 export interface PluginAPI extends
   PluginLifecycleCapabilities,
   PluginRegistrationCapabilities,

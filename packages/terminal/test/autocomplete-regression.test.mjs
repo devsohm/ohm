@@ -49,6 +49,39 @@ describe("Windows-shaped autocomplete paths", () => {
     });
   });
 
+  it("replaces only the command argument prefix and preserves the suffix", async () => {
+    const provider = new CombinedAutocompleteProvider([{
+      name: "model",
+      getArgumentCompletions(prefix) {
+        assert.equal(prefix, "f");
+        return [{ value: "fast", label: "fast" }];
+      },
+    }], basePath);
+    const lines = ["previous line", "/model f--suffix"];
+    const cursorCol = "/model f".length;
+    const result = await provider.getSuggestions(lines, 1, cursorCol, { signal: new AbortController().signal });
+    assert.ok(result);
+    assert.equal(result.items.length, 1);
+    assert.deepEqual(provider.applyCompletion(lines, 1, cursorCol, result.items[0], result.prefix), {
+      lines: ["previous line", "/model fast --suffix"], cursorLine: 1, cursorCol: "/model fast ".length,
+    });
+    assert.deepEqual(lines, ["previous line", "/model f--suffix"]);
+  });
+
+  it("replaces only an embedded attachment prefix and preserves surrounding prose", async () => {
+    writeFixture(basePath, "src/file.ts");
+    const provider = new CombinedAutocompleteProvider([], basePath);
+    const lines = ["please open @src/fi--suffix"];
+    const cursorCol = "please open @src/fi".length;
+    const result = await provider.getSuggestions(lines, 0, cursorCol, { signal: new AbortController().signal });
+    assert.ok(result);
+    assert.deepEqual(result.items.map((item) => item.value), ["@src/file.ts"]);
+    assert.deepEqual(provider.applyCompletion(lines, 0, cursorCol, result.items[0], result.prefix), {
+      lines: ["please open @src/file.ts --suffix"], cursorLine: 0, cursorCol: "please open @src/file.ts ".length,
+    });
+    assert.deepEqual(lines, ["please open @src/fi--suffix"]);
+  });
+
   it("completes relative prefixes with either separator through the native filesystem", async () => {
     writeFixture(basePath, "src/components/Button.tsx");
     const provider = new CombinedAutocompleteProvider([], basePath);

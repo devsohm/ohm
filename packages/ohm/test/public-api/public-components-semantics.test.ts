@@ -1123,6 +1123,28 @@ test("login dialog cancellation completes only once", () => {
   assert.equal(dialog.signal.aborted, true);
 });
 
+for (const method of ["showPrompt", "showManualInput"] as const) {
+  test(`cancelled login dialog rejects late ${method} without installing input`, async () => {
+    const dialog = new LoginDialogComponent(fakeTui(), "provider", () => {});
+    dialog.handleInput("\u001b");
+    const before = text(dialog);
+    let outcome = "pending";
+    const pending = dialog[method]("late prompt").then(
+      () => { outcome = "resolved"; },
+      () => { outcome = "rejected"; },
+    );
+    try {
+      await Promise.resolve();
+      assert.deepEqual({ outcome, inputs: countComponents(dialog, (component) => component instanceof Input), text: text(dialog) }, {
+        outcome: "rejected", inputs: 0, text: before,
+      });
+    } finally {
+      dialog.showDetails([]);
+      await pending;
+    }
+  });
+}
+
 test("login dialog replaces an active prompt without duplicating or stranding its input", async () => {
   const dialog = new LoginDialogComponent(fakeTui(), "provider", () => {});
   const first = dialog.showPrompt("First");
@@ -1558,6 +1580,45 @@ test("bash preview keeps bounded tail output across noisy chunk streams", () => 
   assert.match(bash.getOutput(), /199:/u);
   assert.match(text(bash), /earlier output bytes omitted/u);
   bash.dispose();
+});
+
+test("public tool component releases both owned renderers when the first disposer throws", () => {
+  const failure = new Error("call renderer cleanup failed");
+  const disposed: string[] = [];
+  const call = { render: () => ["call"], invalidate() {}, dispose() { disposed.push("call"); throw failure; } };
+  const result = { render: () => ["result"], invalidate() {}, dispose() { disposed.push("result"); } };
+  const tool = new ToolExecutionComponent("owned", "call-owned", {}, {}, rendererTool({
+    renderCall: () => call, renderResult: () => result,
+  }), fakeTui());
+  tool.updateResult({ content: [] });
+  try {
+    assert.throws(() => tool.dispose(), (error) => error === failure);
+    assert.deepEqual([...disposed], ["call", "result"]);
+    assert.doesNotThrow(() => tool.dispose());
+    assert.deepEqual([...disposed], ["call", "result"]);
+  } finally {
+    tool.dispose();
+  }
+});
+
+test("public tool replacement retains a shared renderer when the previous disposer throws", () => {
+  const failure = new Error("previous call cleanup failed");
+  let sharedDisposals = 0;
+  let replace = false;
+  const prior = { render: () => ["prior"], invalidate() {}, dispose() { throw failure; } };
+  const shared = { render: () => ["shared"], invalidate() {}, dispose() { sharedDisposals += 1; } };
+  const tool = new ToolExecutionComponent("shared", "call-shared", {}, {}, rendererTool({
+    renderCall: () => replace ? shared : prior, renderResult: () => shared,
+  }), fakeTui());
+  tool.updateResult({ content: [] });
+  replace = true;
+  try {
+    assert.doesNotThrow(() => tool.updateArgs({ value: 2 }));
+    assert.equal(sharedDisposals, 0, "the result slot still owns the shared renderer");
+  } finally {
+    tool.dispose();
+  }
+  assert.equal(sharedDisposals, 1);
 });
 
 test("message presentation setters rebuild rendered content", () => {

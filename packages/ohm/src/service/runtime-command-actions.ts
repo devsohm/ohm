@@ -1,6 +1,6 @@
 import { optionalProperties } from "../core/optional-properties.js";
 import type { PluginCommandContextActions } from "../plugins/direct.js";
-import { pluginSessionManager } from "../plugins/session-contract.js";
+import { canonicalSessionEntryId, pluginSessionManager } from "../plugins/session-contract.js";
 import type { AgentSession } from "./agent-session.js";
 import type { AgentSessionRuntime } from "./agent-session-runtime.js";
 
@@ -40,7 +40,8 @@ export function createAgentSessionRuntimeCommandActions(
     },
     fork: async (entryId, commandOptions = {}, signal) => {
       assertOrigin(signal);
-      const result = await runtime.fork(entryId, {
+      const canonicalId = canonicalSessionEntryId(session.nativeSessionManager, entryId) ?? entryId;
+      const result = await runtime.fork(canonicalId, {
         ...optionalProperties(commandOptions.position === undefined ? undefined : { position: commandOptions.position }),
         ...optionalProperties(commandOptions.withSession === undefined ? undefined : {
           withSession: async (context) => await commandOptions.withSession?.(context),
@@ -51,7 +52,11 @@ export function createAgentSessionRuntimeCommandActions(
     },
     navigateTree: async (targetId, commandOptions = {}, signal) => {
       assertOrigin(signal);
-      const result = await session.navigateTree(targetId, commandOptions);
+      const canonicalId = canonicalSessionEntryId(session.nativeSessionManager, targetId) ?? targetId;
+      const result = await session.navigateTree(canonicalId, {
+        ...commandOptions,
+        ...optionalProperties(signal === undefined ? undefined : { signal }),
+      });
       assertOrigin(signal);
       return { cancelled: result.cancelled };
     },

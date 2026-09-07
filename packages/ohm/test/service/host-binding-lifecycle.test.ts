@@ -152,7 +152,12 @@ test("a cancelled first host binding quarantines its unstarted generation", asyn
   assert.equal(host.lifecycleSignal().aborted, true);
   assert.equal((await value.records()).some((entry) => entry.startsWith("start:")), false);
   assert.throws(() => session.pluginRunner, /generation did not finish starting/u);
-  await assert.rejects(value.runtime.dispose(), /generation did not finish starting/u);
+  const quarantined = await value.records();
+  assert.equal(quarantined.filter((entry) => entry === "facet-start:worker:worker").length, 1);
+  assert.equal(quarantined.filter((entry) => entry === "facet-stop:worker:worker").length, 1);
+  await value.runtime.dispose();
+  await value.runtime.dispose();
+  assert.deepEqual(await value.records(), quarantined);
 });
 
 test("same-mode rebinding is quiet but explicit refresh still restarts the session lifecycle", async (context) => {

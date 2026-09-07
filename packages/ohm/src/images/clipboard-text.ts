@@ -121,7 +121,7 @@ function writeCandidate(
     signal?.addEventListener("abort", abort, { once: true });
     child.once("error", () => finish(false));
     child.once("close", (code) => finish(code === 0));
-    child.stdin?.once("error", () => finish(false));
+    child.stdin?.once("error", abort);
     child.stdin?.end(text, "utf8");
     if (signal?.aborted === true) abort();
   });

@@ -6,7 +6,7 @@ import { errorMessage } from "../core/errors.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import type { ImageBlock } from "../core/types.js";
 import type { PluginCommandContextActions } from "../plugins/direct.js";
-import { pluginSessionManager } from "../plugins/session-contract.js";
+import { createAgentSessionRuntimeCommandActions } from "../service/runtime-command-actions.js";
 import {
   bindInteractiveSessionPresentation,
   interactiveTranscriptHistory,
@@ -733,36 +733,7 @@ export class InteractiveMode {
 
   #commandActions(session: AgentSession): PluginCommandContextActions {
     return {
-      waitForIdle: async () => await session.waitForIdle(),
-      newSession: async (options = {}, signal) => await this.#runtime.newSession({
-        ...optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
-        ...optionalProperties(options.setup === undefined ? undefined : {
-          setup: async (manager) => await options.setup?.(pluginSessionManager(manager)),
-        }),
-        ...optionalProperties(options.withSession === undefined ? undefined : {
-          withSession: async (context) => await options.withSession?.(context),
-        }),
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-      }),
-      fork: async (entryId, options = {}, signal) => await this.#runtime.fork(entryId, {
-        ...optionalProperties(options.position === undefined ? undefined : { position: options.position }),
-        ...optionalProperties(options.withSession === undefined ? undefined : {
-          withSession: async (context) => await options.withSession?.(context),
-        }),
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-      }),
-      navigateTree: async (targetId, options = {}, signal) => {
-        signal?.throwIfAborted();
-        const result = await session.navigateTree(targetId, options);
-        signal?.throwIfAborted();
-        return { cancelled: result.cancelled };
-      },
-      switchSession: async (sessionPath, options = {}, signal) => await this.#runtime.switchSession(sessionPath, {
-        ...optionalProperties(options.withSession === undefined ? undefined : {
-          withSession: async (context) => await options.withSession?.(context),
-        }),
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-      }),
+      ...createAgentSessionRuntimeCommandActions(this.#runtime, session),
       refresh: async (signal) => await this.#refresh(signal),
     };
   }

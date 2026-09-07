@@ -7,6 +7,8 @@ const ESCAPE = 0x1b;
 const CSI = 0x5b;
 const SGR_MOUSE = 0x3c;
 const LEGACY_MOUSE = 0x4d;
+const PASTE_START = Buffer.from("\u001b[200~");
+const PASTE_END = Buffer.from("\u001b[201~");
 const MAX_MOUSE_SEQUENCE_BYTES = 64;
 const DEFAULT_SELECTION_BYTES = 75_000;
 const MAX_SELECTION_HISTORY_ROWS = 4_096;
@@ -159,6 +161,7 @@ function decodedMouse(
  */
 export class AlternateScreenInputParser {
   #pending = Buffer.alloc(0);
+  #inPaste = false;
 
   get pendingSequence(): boolean {
     return this.#pending.length > 0;
@@ -183,6 +186,23 @@ export class AlternateScreenInputParser {
         continue;
       }
       const remaining = source.length - index;
+      const pasteMarker = this.#inPaste ? PASTE_END : PASTE_START;
+      const markerBytes = Math.min(remaining, pasteMarker.length);
+      if (source.subarray(index, index + markerBytes).equals(pasteMarker.subarray(0, markerBytes))) {
+        if (remaining < pasteMarker.length) {
+          flushPlain(index);
+          this.#pending = Buffer.from(source.subarray(index));
+          plainStart = source.length;
+          break;
+        }
+        this.#inPaste = !this.#inPaste;
+        index += pasteMarker.length;
+        continue;
+      }
+      if (this.#inPaste) {
+        index += 1;
+        continue;
+      }
       if (remaining < 2) {
         flushPlain(index);
         this.#pending = Buffer.from(source.subarray(index));
@@ -292,6 +312,7 @@ export class AlternateScreenInputParser {
 
   clear(): void {
     this.#pending = Buffer.alloc(0);
+    this.#inPaste = false;
   }
 }
 

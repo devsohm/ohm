@@ -4,7 +4,6 @@ import type { FetchLike } from "./transport.js";
 
 const activeFetch = new AsyncLocalStorage<FetchLike>();
 let proxy: FetchLike | undefined;
-let fallback: FetchLike | undefined;
 
 /** Runs SDK code that only supports global fetch without cross-request transport leakage. */
 export function withScopedGlobalFetch<T>(fetchImplementation: FetchLike, operation: () => T): T {
@@ -14,7 +13,7 @@ export function withScopedGlobalFetch<T>(fetchImplementation: FetchLike, operati
 
 function installProxy(): void {
   if (proxy !== undefined && globalThis.fetch === proxy) return;
-  fallback = globalThis.fetch;
+  const fallback = globalThis.fetch;
   const scopedFetch: FetchLike = (resource, init) => {
     const selected = activeFetch.getStore() ?? fallback;
     if (selected === undefined) throw new TypeError("fetch is unavailable");

@@ -24,7 +24,8 @@ function sequenceLength(value: string): number | undefined {
     return Number.isFinite(end) ? end : undefined;
   }
   if (value.startsWith("\x1b")) return value.length >= 2 ? 2 : undefined;
-  return [...value][0]?.length;
+  const first = value.codePointAt(0);
+  return first === undefined ? undefined : first > 0xffff ? 2 : 1;
 }
 
 export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
@@ -70,8 +71,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
   #drain(): void {
     while (this.#buffer !== "") {
-      const paste = this.#buffer.indexOf("\x1b[200~");
-      if (paste === 0) {
+      if (this.#buffer.startsWith("\x1b[200~")) {
         const end = this.#buffer.indexOf("\x1b[201~", 6);
         if (end < 0) {
           if (Buffer.byteLength(this.#buffer.slice(6), "utf8") > PASTE_LIMIT) throw new Error("Bracketed paste exceeds the supported size");

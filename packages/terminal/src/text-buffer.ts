@@ -575,9 +575,32 @@ export class MultilineEditor implements TuiEditorImplementation {
     if (!coalesces) this.#recordUndo();
     if (this.#lastAction !== "insert-word" && this.#lastAction !== "insert-boundary" && this.#lastAction !== "insert-newline") this.#breakAction();
     this.#lastYank = undefined;
-    this.#shiftPastes(this.#cursor, inserted.length);
-    this.#graphemes.splice(this.#cursor, 0, ...inserted);
-    this.#cursor += inserted.length;
+    const adjacent = `${this.#graphemes[this.#cursor - 1] ?? ""}${selected}${this.#graphemes[this.#cursor] ?? ""}`;
+    if (/^[\t\n -~]*$/u.test(adjacent)) {
+      this.#shiftPastes(this.#cursor, inserted.length);
+      this.#graphemes.splice(this.#cursor, 0, ...inserted);
+      this.#cursor += inserted.length;
+    } else {
+      // Paste markers remain atomic; ordinary text can join across either edit boundary.
+      let start = 0;
+      let end = this.#graphemes.length;
+      for (const paste of this.#pastes) {
+        if (paste.end <= this.#cursor) start = paste.end;
+        else if (paste.start >= this.#cursor) { end = paste.start; break; }
+      }
+      const before = this.#graphemes.slice(start, this.#cursor).join("");
+      const after = this.#graphemes.slice(this.#cursor, end).join("");
+      const replacement = splitGraphemes(`${before}${selected}${after}`);
+      this.#shiftPastes(this.#cursor, replacement.length - (end - start));
+      this.#graphemes = [...this.#graphemes.slice(0, start), ...replacement, ...this.#graphemes.slice(end)];
+      this.#cursor = start;
+      let codeUnits = 0;
+      for (const grapheme of replacement) {
+        if (codeUnits >= before.length + selected.length) break;
+        codeUnits += grapheme.length;
+        this.#cursor += 1;
+      }
+    }
     this.#finishMutation();
     this.#lastAction = single ? insertionAction : undefined;
   }

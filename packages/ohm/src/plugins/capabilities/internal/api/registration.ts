@@ -14,7 +14,7 @@ import type {
 } from "../../rendering.js";
 import type { ToolDefinition } from "../../tools.js";
 
-/** One exact extension registration. Calling either form removes it at most once. */
+/** One exact plugin registration. Calling either form removes it at most once. */
 export interface PluginRegistrationHandle {
   (): void | Promise<void>;
   readonly disposed: boolean;

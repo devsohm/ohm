@@ -300,7 +300,7 @@ async function readTextBounded(response: Response, maxBytes: number): Promise<st
         if (remaining > 0) chunks.push(value.subarray(0, remaining));
         bytes = maxBytes;
         truncated = true;
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         break;
       }
       chunks.push(value);
@@ -325,7 +325,7 @@ async function readTextStrict(response: Response, maxBytes: number): Promise<str
       if (done) break;
       bytes += value.byteLength;
       if (bytes > maxBytes) {
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         throw new ProtocolError(`JSON response exceeded ${maxBytes} bytes`);
       }
       chunks.push(value);

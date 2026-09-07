@@ -238,6 +238,10 @@ keep its original WAL with it and restore the original path before closing the
 owner. Do not delete either file or treat the moved main file alone as a complete
 backup. Explicit symlink paths resolve to the canonical file and share its writer
 lease; directory discovery does not follow symlink entries.
+Hard links are not supported for live session databases, including read-only
+snapshot opens. Adding a hard link to an open database stops further commits.
+Close the owner and remove the extra link before reopening; preserve its WAL.
+Use JSONL export or a closed-file copy when you need an independent copy.
 
 For legacy JSONL input, only a complete JSON object followed by LF is committed.
 
@@ -259,6 +263,11 @@ session with an interrupted run. Safe repeatable work can run again. A tool
 with a reconciliation handler can check external state. Any remaining
 uncertain effect stays blocked. Reopening after a crash never treats the
 interruption itself as permission to abandon an effect.
+
+Aborting or closing during reconciliation stops the host's wait, even if a plugin
+ignores cancellation. Late callback results cannot overwrite a later explicit
+resolution. The unfinished recovery claim remains durable and blocks new work;
+cancellation alone does not establish whether the external effect happened.
 
 An intentional Escape cancellation in the same interactive process has a
 narrower rule. After cancellation settles, the next submitted prompt records

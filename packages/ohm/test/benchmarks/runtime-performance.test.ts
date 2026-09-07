@@ -50,7 +50,7 @@ test("runtime performance benchmark covers startup, refresh, resume, and paged R
     { id: "rpc-replay-100-events", fixture: { eventCount: 100, pageLimit: 16 }, samples: 1, passed: true },
     { id: "resume-10000-events", fixture: { eventCount: 10_000 }, samples: 1, passed: true },
     { id: "rpc-replay-10000-events", fixture: { eventCount: 10_000, pageLimit: 1 }, samples: 1, passed: true },
-  ]);
+  ], JSON.stringify(report.scenarios.filter((scenario) => !scenario.passed)));
   for (const scenario of report.scenarios.filter((entry) => entry.operation === "event-page")) {
     assert.deepEqual(scenario.materializedRows, [1]);
     assert.equal(scenario.maximumMaterializedRows, 1);

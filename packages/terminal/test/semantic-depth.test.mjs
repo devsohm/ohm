@@ -245,20 +245,29 @@ describe("deep terminal semantics", () => {
     }
   });
 
-  it("clears the inverted software cursor before restoring the hardware cursor on shutdown", async () => {
+  it("restores the hardware cursor below the frame without erasing editor text on shutdown", () => {
     const { editor, terminal, tui } = editorFixture(18, 5);
-    editor.setText("software cursor");
+    editor.setText("retained text");
+    editor.handleInput("\x01");
+    editor.handleInput("\x1b[C");
     tui.addChild(editor);
+    tui.addChild({ render: () => ["retained footer"], invalidate() {} });
     tui.setFocus(editor);
-    tui.start();
-    await terminal.waitForRender();
-    terminal.writes.length = 0;
-
-    tui.stop();
-
-    const output = terminal.writes.join("");
-    assert.ok(output.indexOf(" ") >= 0);
-    assert.ok(output.indexOf(" ") < output.indexOf("\x1b[?25h"));
+    try {
+      tui.start();
+      tui.renderNow();
+      const frame = terminal.getViewport();
+      assert.equal(terminal.cursorVisible, false);
+      assert.deepEqual(terminal.getCursorPosition(), { x: 2, y: 1 });
+      assert.equal(frame[1], "│retained text   │");
+      assert.equal(frame[3], "retained footer");
+      tui.stop();
+      assert.deepEqual(terminal.getViewport(), frame);
+      assert.deepEqual(terminal.getCursorPosition(), { x: 0, y: 4 });
+      assert.equal(terminal.cursorVisible, true);
+    } finally {
+      tui.stop();
+    }
   });
 
   it("wraps CRLF and CR lines without losing active ANSI styles", () => {

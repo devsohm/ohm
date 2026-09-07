@@ -251,7 +251,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 }
 
 export function loadSkillsFromDir(path: string, options: LoadSkillsFromDirOptions = {}): LoadSkillsResult {
-  return loadSkills({
+  const result = loadSkills({
     cwd: process.cwd(),
     agentDir: process.cwd(),
     skillPaths: [path],
@@ -259,6 +259,10 @@ export function loadSkillsFromDir(path: string, options: LoadSkillsFromDirOption
     ...optionalProperties(options.maxFileBytes === undefined ? undefined : { maxFileBytes: options.maxFileBytes }),
     ...optionalProperties(options.strictSkillRoots === undefined ? undefined : { strictSkillRoots: options.strictSkillRoots }),
   });
+  if (options.scope !== undefined) {
+    for (const skill of result.skills) skill.sourceInfo.scope = options.scope;
+  }
+  return result;
 }
 
 export function formatSkillsForPrompt(skills: readonly Skill[]): string {

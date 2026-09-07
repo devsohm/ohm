@@ -21,7 +21,7 @@ import {
   strictToolValue,
 } from "../src/index.ts";
 import type { Tool } from "../src/index.ts";
-import { fetchEventStream, parseEventStream } from "../src/http-engine.ts";
+import { fetchEventStream, fetchJson, parseEventStream } from "../src/http-engine.ts";
 import { collect, userContext } from "./black-box-helpers.ts";
 
 test("context overflow matchers are bounded, fresh, and isolated from caller mutation", () => {
@@ -124,6 +124,131 @@ test("HTTP retry and timer options reject unsafe bounds before a request", async
     body: {},
     options: { timeoutMs: -1, fetch: async () => new Response() },
   }), /timeoutMs/u);
+});
+
+test("a failed HTTP response hook cancels the unread body without retrying or hiding the error", async () => {
+  for (const fetchResponse of [fetchEventStream, fetchJson]) {
+    for (const cleanupFails of [false, true]) {
+      const failure = new Error("response hook failed");
+      let cancellations = 0;
+      let requests = 0;
+      const body = new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          assert.equal(reason, failure);
+          cancellations += 1;
+          if (cleanupFails) throw new Error("body cleanup failed");
+        },
+      });
+      try {
+        await assert.rejects(fetchResponse({
+          url: "https://unused.invalid",
+          model: fauxModel,
+          body: {},
+          options: {
+            fetch: async () => { requests += 1; return new Response(body); },
+            onResponse: async () => { throw failure; },
+          },
+        }), (error) => error === failure);
+        assert.equal(requests, 1);
+        assert.equal(cancellations, 1);
+        assert.equal(body.locked, false);
+      } finally { await body.cancel().catch(() => undefined); }
+    }
+  }
+});
+
+test("buffered HTTP responses release readers after success, invalid JSON and HTTP failure", async () => {
+  for (const scenario of ["success", "invalid-json", "json-error", "stream-error"] as const) {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(scenario === "invalid-json" ? "{" : '{"ok":true}'));
+        controller.close();
+      },
+    });
+    const read = scenario === "stream-error" ? fetchEventStream : fetchJson;
+    const pending = read({
+      url: "https://unused.invalid",
+      body: {},
+      options: { fetch: async () => new Response(body, { status: scenario.endsWith("error") ? 400 : 200 }) },
+    });
+    if (scenario === "success") assert.deepEqual(await pending, { ok: true });
+    else await assert.rejects(pending, scenario === "invalid-json" ? /Invalid JSON response/u : /HTTP 400/u);
+    assert.equal(body.locked, false, scenario);
+  }
+});
+
+test("buffered HTTP success rejects oversized JSON without awaiting or masking body cancellation", async () => {
+  for (const cleanup of ["resolved", "rejected", "pending"] as const) {
+    let completeCleanup: () => void = () => undefined;
+    const cleanupPending = new Promise<void>((resolve) => { completeCleanup = resolve; });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1)); },
+      cancel() {
+        cancellations += 1;
+        if (cleanup === "pending") return cleanupPending;
+        if (cleanup === "rejected") throw new Error("cleanup failed");
+      },
+    });
+    try {
+      await assert.rejects(Promise.race([
+        fetchJson({ url: "https://unused.invalid", body: {}, options: { fetch: async () => new Response(body) } }),
+        new Promise<never>((_, reject) => setImmediate(() => reject(new Error("body read did not settle")))),
+      ]), /Response body exceeded/u);
+      assert.equal(cancellations, 1, cleanup);
+      assert.equal(body.locked, false, cleanup);
+    } finally { completeCleanup(); }
+  }
+});
+
+test("buffered HTTP errors retain bounded diagnostics without awaiting cancellation", async () => {
+  for (const read of [fetchEventStream, fetchJson]) {
+    let completeCleanup: () => void = () => undefined;
+    const cleanupPending = new Promise<void>((resolve) => { completeCleanup = resolve; });
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(64 * 1024 + 1)); },
+      cancel() { cancellations += 1; return cleanupPending; },
+    });
+    try {
+      await assert.rejects(Promise.race([
+        read({ url: "https://unused.invalid", body: {}, options: { fetch: async () => new Response(body, { status: 400 }) } }),
+        new Promise<never>((_, reject) => setImmediate(() => reject(new Error("body read did not settle")))),
+      ]), /HTTP 400.*Response body exceeded limit/u);
+      assert.equal(cancellations, 1);
+      assert.equal(body.locked, false);
+    } finally { completeCleanup(); }
+  }
+});
+
+test("buffered HTTP reads cancel and unlock custom response streams on caller abort", async () => {
+  for (const read of [fetchJson, fetchEventStream]) {
+    const abort = new AbortController();
+    const failure = new Error("caller cancelled body read");
+    let entered: () => void = () => undefined;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    let endStream: () => void = () => undefined;
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { endStream = () => controller.close(); },
+      pull() { entered(); },
+      cancel() { cancellations += 1; },
+    }, { highWaterMark: 0 });
+    const pending = read({
+      url: "https://unused.invalid", body: {},
+      options: { signal: abort.signal, fetch: async () => new Response(body, { status: read === fetchJson ? 200 : 400 }) },
+    });
+    try {
+      await reading;
+      abort.abort(failure);
+      await assert.rejects(Promise.race([
+        pending,
+        new Promise<never>((_, reject) => setImmediate(() => reject(new Error("body read did not settle")))),
+      ]), (error) => error === failure);
+      assert.equal(cancellations, 1);
+      assert.equal(body.locked, false);
+    } finally { if (cancellations === 0) endStream(); }
+  }
 });
 
 test("SSE parsing rejects an unbounded single event", async () => {

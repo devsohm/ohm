@@ -17,6 +17,7 @@ import { INTERNAL_TUI_FRAME_PROJECTOR } from "../../src/tui/frame-projector.js";
 import type { PickerItem } from "../../src/tui/types.js";
 import type { CommandResult, CommandSpec, ProcessRunner } from "../../src/process/types.js";
 import type { SessionInfo } from "../../src/storage/types.js";
+import { SessionManager } from "../../src/storage/session-manager.js";
 import { createFixtureFrameProjector, envelope, FakeInput, FakeOutput, tick } from "../tui/helpers.js";
 import { FocusedVirtualTerminal } from "../tui/virtual-terminal.js";
 
@@ -718,6 +719,54 @@ test("Atlas checkout can summarize, restore the editor, and refresh the active p
   assert.equal(contexts, 1);
   assert.deepEqual(blockedStates, ["Summarizing branch… Esc to cancel", undefined]);
   assert.deepEqual(notifications, ["Checked out the selected Atlas point"]);
+});
+
+test("Atlas checkout forwards caller cancellation before navigation commits", async (context) => {
+  const controller = new AbortController();
+  const reason = new Error("Atlas checkout cancelled before commit");
+  const manager = SessionManager.inMemory(process.cwd());
+  context.after(() => manager.closeV4Store());
+  const createdAt = "2026-07-20T00:00:00.000Z";
+  for (const id of ["root", "target", "leaf"]) {
+    manager.appendMessage({ id, role: "user", content: [{ type: "text", text: id }], createdAt }, { nodeId: id });
+  }
+  let committed = false;
+  let summaryAborts = 0;
+  let navigationSignal: AbortSignal | undefined;
+  const session = treeSession({
+    nativeSessionManager: manager,
+    abortBranchSummary() { summaryAborts += 1; },
+    async navigateTree(_target, options = {}) {
+      navigationSignal = options.signal;
+      controller.abort(reason);
+      await Promise.resolve();
+      options.signal?.throwIfAborted();
+      committed = true;
+      return { cancelled: false };
+    },
+  });
+  const operations = new InteractiveSessionOperations({
+    runtime: treeRuntime(session),
+    terminal: terminalFixture({
+      async chooseSessionTree(_prompt, items) {
+        const selected = items.find((item) => item.id === "target");
+        assert.ok(selected);
+        return selected.value;
+      },
+      async choose(_prompt, choices) {
+        const selected = choices.find((choice) => choice.value === "checkout");
+        assert.ok(selected);
+        return selected.value;
+      },
+    }),
+    refreshTranscript() { throw new Error("Cancelled checkout must not refresh the transcript"); },
+    updateContext() { throw new Error("Cancelled checkout must not update the context"); },
+  });
+
+  await assert.rejects(operations.atlas("", controller.signal), (error) => error === reason);
+  assert.equal(committed, false, "The host must cancel native navigation before its commit");
+  assert.equal(navigationSignal, controller.signal);
+  assert.equal(summaryAborts, 1);
 });
 
 test("/share uploads one temporary redacted HTML export as a secret Gist and removes it", async (context) => {

@@ -72,7 +72,7 @@ interface PluginContextOperations {
   shutdown(): void;
 }
 
-/** Services that are valid for every direct extension callback. */
+/** Services that are valid for every direct plugin callback. */
 export interface PluginContext extends PluginContextOperations {
   readonly ui: PluginUIContext;
   readonly mode: PluginMode;
@@ -120,7 +120,7 @@ export interface UserMessageDeliveryOptions {
  * Acknowledged message delivery captured from one live session binding.
  *
  * The handle remains tied to `sessionId`; it never follows a later host binding.
- * Calls reject after that session or extension generation becomes stale.
+ * Calls reject after that session or plugin generation becomes stale.
  */
 export interface PluginSessionDelivery {
   readonly sessionId: string;

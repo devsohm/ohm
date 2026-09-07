@@ -54,15 +54,19 @@ export function deferAgentSessionSelection(
     try {
       if (pendingModel !== undefined) {
         const requestedModel = pendingModel;
-        const entryCount = session.nativeSessionManager.getEntries().length;
+        const manager = session.nativeSessionManager;
+        const entryCount = manager.getEntryCount();
         try {
           await session.setModel(requestedModel);
           pendingModel = undefined;
         } catch (error) {
-          if (session.nativeSessionManager.getEntries().slice(entryCount).some((entry) =>
-            entry.type === "model_change" &&
-            entry.provider === requestedModel.provider &&
-            entry.modelId === requestedModel.id)) pendingModel = undefined;
+          const appended = manager.getEntryProjectionMetadataPage(entryCount, manager.getEntryCount() - entryCount);
+          if (appended.some(({ id }) => {
+            const entry = manager.getEntry(id);
+            return entry?.type === "model_change"
+              && entry.provider === requestedModel.provider
+              && entry.modelId === requestedModel.id;
+          })) pendingModel = undefined;
           throw error;
         }
       }

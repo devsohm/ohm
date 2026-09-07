@@ -31,7 +31,7 @@ export interface InteractiveRuntimeCommandUiOptions {
   readonly assertCurrent?: () => void;
 }
 
-/** @internal Create the shared interactive extension command UI. */
+/** @internal Create the shared interactive plugin command UI. */
 export function createInteractiveRuntimeCommandUi(
   terminal: TuiController,
   extensionId: string,
@@ -108,7 +108,7 @@ export function createInteractiveRuntimeCommandUi(
   };
 }
 
-/** @internal Create the generation-bound interactive extension command UI. */
+/** @internal Create the generation-bound interactive plugin command UI. */
 export function interactiveRuntimeCommandUi(
   terminal: TuiController,
   extensionId: string,
@@ -176,7 +176,7 @@ function applyAdvancedUi(
   }
 }
 
-/** Binds one extension generation to the embedded interactive terminal. */
+/** Binds one plugin generation to the embedded interactive terminal. */
 export interface InteractiveRuntimeUiBinding {
   readonly signal: AbortSignal;
   readonly uiContext: ReturnType<typeof createInteractiveDirectUiContext>;
@@ -186,11 +186,11 @@ export interface InteractiveRuntimeUiBinding {
 }
 
 export interface InteractiveRuntimeUiBindOptions {
-  /** Publish extension commands and shortcuts to the active terminal presentation. */
+  /** Publish plugin commands and shortcuts to the active terminal presentation. */
   readonly publishCommandInputs?: boolean;
   /** Skip the initial clear when the caller just released the previous owned binding. */
   readonly clearUi?: boolean;
-  /** Observe the same theme transition dispatched to extensions. */
+  /** Observe the same theme transition dispatched to plugins. */
   readonly onThemeChange?: (change: TuiThemeChange) => void;
 }
 
@@ -353,7 +353,7 @@ export function bindInteractiveRuntimeUi(
     if (signal.aborted) {
       const reason = signal.reason instanceof Error
         ? signal.reason
-        : new Error("Interactive extension host closed during UI binding", { cause: signal.reason });
+        : new Error("Interactive plugin host closed during UI binding", { cause: signal.reason });
       release(reason);
       signal.throwIfAborted();
     }

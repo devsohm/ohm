@@ -92,6 +92,33 @@ test("find applies filename and directory-aware globs to nested paths", async (t
   ]);
 });
 
+for (const [path, pattern] of [
+  ["src", "*.ts"], ["src", "nested/*.ts"],
+  ["src[1]", "*.ts"], ["src[1]", "nested/*.ts"],
+] as const) {
+  test(`find fallback uses the selected search root ${path} for ${pattern}`, async (t) => {
+    const { root, context } = await toolFixture(t);
+    const previous = { PATH: process.env.PATH, OHM_HOME: process.env.OHM_HOME, OHM_OFFLINE: process.env.OHM_OFFLINE };
+    t.after(() => {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    });
+    process.env.PATH = "";
+    process.env.OHM_HOME = join(root, "agent");
+    process.env.OHM_OFFLINE = "1";
+    await mkdir(join(root, path, "nested"), { recursive: true });
+    await writeFile(join(root, path, "nested", "a.ts"), "fixture");
+    await writeFile(join(root, path, "nested", "ignored.ts"), "ignored fixture");
+    await writeFile(join(root, ".gitignore"), "ignored.ts\n");
+
+    const result = await new FindTool().execute({ path, pattern }, context);
+    assert.equal(result.content, "nested/a.ts");
+    assert.equal(result.isError, false);
+  });
+}
+
 test("ignore files affect only their directory and descendants", async (t) => {
   const { root, context } = await toolFixture(t);
   await mkdir(join(root, "private", "generated"), { recursive: true });

@@ -15,6 +15,7 @@ import {
   type RuntimeDirectCommandContext,
   type RuntimeCommandContext,
   type RuntimeSessionBeforeCompactEvent,
+  type RuntimeSessionBeforeTreeEvent,
 } from "../../src/plugins/runtime.js";
 import type {
   PluginAPI,
@@ -895,6 +896,7 @@ test("listener model completion follows callback and generation lifetime without
     Reflect.deleteProperty(globalThis, "__capturedModelComplete");
     Reflect.deleteProperty(globalThis, "__modelCompleteErrors");
   });
+  assert.deepEqual(host.diagnostics(), []);
   globalThis.__modelCompleteErrors = [];
   const model: Model<Api> = {
     id: "completion-model",
@@ -956,7 +958,10 @@ test("listener model completion follows callback and generation lifetime without
     { reason: "startup", threadId: "completion-generation" },
     callbackAbort.signal,
   );
-  await started;
+  await within(Promise.race([
+    started,
+    firstDispatch.then(() => { throw new Error("Dispatch completed before the model callback started"); }),
+  ]));
   callbackAbort.abort(new Error("callback completion cancelled"));
   await assert.rejects(firstDispatch, /callback completion cancelled/u);
   assert.equal(observedSignals[0]?.aborted, true);
@@ -975,7 +980,10 @@ test("listener model completion follows callback and generation lifetime without
     "session_start",
     { reason: "resume", threadId: "completion-generation" },
   );
-  await started;
+  await within(Promise.race([
+    started,
+    secondDispatch.then(() => { throw new Error("Dispatch completed before the model callback started"); }),
+  ]));
   const close = host.close();
   const [dispatchResult, closeResult] = await Promise.allSettled([secondDispatch, close]);
   assert.equal(dispatchResult.status, "rejected");
@@ -1138,7 +1146,7 @@ test("a shortcut reports its replacement failure after its extension generation 
   try {
     assert.deepEqual(await host.runShortcut("ctrl+r", commandContext()), { handled: true });
     assert.ok(host.diagnostics().some((entry) => entry.message.includes("replacement factory rejected")));
-    assert.ok(host.diagnostics().every((entry) => !entry.message.includes("Runtime extension host closed")));
+    assert.ok(host.diagnostics().every((entry) => !entry.message.includes("Runtime plugin host closed")));
   } finally {
     await host.close();
     Reflect.deleteProperty(globalThis, "__authoringCloseForReplacement");
@@ -1743,7 +1751,7 @@ test("runtime flags are typed, first-registration configured, scoped, and mutabl
   ]);
   assert.deepEqual([...host.flagValues()], [["plan", true], ["mode", "safe"], ["foreign", "owned"]]);
   assert.throws(() => host.setFlagValue("plan", "yes"), /requires a boolean/u);
-  assert.throws(() => host.setFlagValue("missing", true), /Unknown runtime extension flag/u);
+  assert.throws(() => host.setFlagValue("missing", true), /Unknown runtime plugin flag/u);
   host.setFlagValue("plan", false);
   host.setFlagValue("mode", "fast");
   await host.dispatch("session_start", { reason: "startup", threadId: "thread-1" });
@@ -2376,7 +2384,7 @@ test("session and compaction reducers cancel deterministically and accept bounde
     cancel: true,
     reason: "extension fork policy",
   });
-  assert.deepEqual(await host.reduceSessionBeforeTree({
+  const treeEvent = {
     preparation: {
       targetId: "event-2",
       oldLeafId: "event-1",
@@ -2385,13 +2393,15 @@ test("session and compaction reducers cancel deterministically and accept bounde
       userWantsSummary: true,
     },
     signal: new AbortController().signal,
-  }), {
+  } satisfies RuntimeSessionBeforeTreeEvent;
+  assert.deepEqual(await host.reduceSessionBeforeTree(treeEvent), {
     summary: { summary: "tree summary", details: { count: 1 } },
     customInstructions: "extension focus",
     replaceInstructions: true,
     label: "extension label",
   });
-  assert.equal(globalThis.__authoringTreeCloneLength, 1);
+  assert.equal(globalThis.__authoringTreeCloneLength, 0, "preparation mutations are local; hooks communicate through returned overrides");
+  assert.deepEqual(treeEvent.preparation.entriesToSummarize, [], "listener mutation must not reach the native input");
   globalThis.__authoringTreeLabelOnly = true;
   assert.deepEqual(await host.reduceSessionBeforeTree({
     preparation: {

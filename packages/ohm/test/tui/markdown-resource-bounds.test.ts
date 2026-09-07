@@ -17,6 +17,54 @@ function exactPathologicalLine(head: string, tail: string, fill = "x"): string {
   return value;
 }
 
+test("unmatched Markdown link openers do not repeatedly search the full remaining suffix", () => {
+  const source = "[".repeat(256);
+  const descriptor = Object.getOwnPropertyDescriptor(String.prototype, "indexOf");
+  assert.ok(descriptor);
+  const original = String.prototype.indexOf;
+  let searchedUnits = 0;
+  let lines: ReturnType<typeof renderMarkdownMessageLines>;
+  try {
+    Object.defineProperty(String.prototype, "indexOf", {
+      ...descriptor,
+      value: function (this: string, needle: string, position?: number): number {
+        if (this === source && needle === "](") searchedUnits += Math.max(0, source.length - (position ?? 0));
+        return original.call(this, needle, position);
+      },
+    });
+    lines = renderMarkdownMessageLines("", source, source.length + 1, "assistant");
+  } finally {
+    Object.defineProperty(String.prototype, "indexOf", descriptor);
+  }
+  assert.equal(String.prototype.indexOf, original);
+  assert.equal(lines.map((line) => line.text).join("\n"), source);
+  assert.ok(searchedUnits <= source.length * 4, `searched ${searchedUnits} suffix units for ${source.length} literal characters`);
+});
+
+test("unmatched Markdown emphasis openers do not repeatedly traverse the full remaining suffix", () => {
+  const source = `${"*a ".repeat(128)}tail`;
+  const descriptor = Object.getOwnPropertyDescriptor(String.prototype, "startsWith");
+  assert.ok(descriptor);
+  const original = String.prototype.startsWith;
+  let markerChecks = 0;
+  let lines: ReturnType<typeof renderMarkdownMessageLines>;
+  try {
+    Object.defineProperty(String.prototype, "startsWith", {
+      ...descriptor,
+      value: function (this: string, needle: string, position?: number): boolean {
+        if (this === source && needle === "*") markerChecks += 1;
+        return original.call(this, needle, position);
+      },
+    });
+    lines = renderMarkdownMessageLines("", source, source.length + 1, "assistant");
+  } finally {
+    Object.defineProperty(String.prototype, "startsWith", descriptor);
+  }
+  assert.equal(String.prototype.startsWith, original);
+  assert.equal(lines.map((line) => line.text).join("\n"), source);
+  assert.ok(markerChecks <= source.length * 4, `checked ${markerChecks} delimiter positions for ${source.length} literal characters`);
+});
+
 test("a pathological single Markdown line is sampled before parsing and wrapping", () => {
   const source = exactPathologicalLine(
     "discarded-head ",

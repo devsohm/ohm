@@ -56,6 +56,8 @@ interface QueueWaiter {
 }
 
 class ProxyEventQueue implements AsyncIterable<AssistantMessageEvent> {
+  readonly #model: Model;
+  readonly #controller = new AbortController();
   readonly #events: Array<{ event: AssistantMessageEvent; bytes: number }> = [];
   readonly #waiters: QueueWaiter[] = [];
   readonly #resultPromise: Promise<AssistantMessage>;
@@ -64,12 +66,34 @@ class ProxyEventQueue implements AsyncIterable<AssistantMessageEvent> {
   #queuedBytes = 0;
   #reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
-  constructor() {
+  constructor(model: Model) {
+    this.#model = model;
     this.#resultPromise = new Promise<AssistantMessage>((accept) => { this.#resolveResult = accept; });
   }
 
-  attachReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  get signal(): AbortSignal { return this.#controller.signal; }
+
+  attachReader(reader: ReadableStreamDefaultReader<Uint8Array>): boolean {
+    if (this.signal.aborted) {
+      void reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+      return false;
+    }
     this.#reader = reader;
+    return true;
+  }
+
+  detachReader(): void {
+    this.#reader = undefined;
+  }
+
+  #cancel(): void {
+    if (this.signal.aborted) return;
+    this.#events.length = 0;
+    this.#queuedBytes = 0;
+    this.#controller.abort();
+    this.finish({ ...partialMessage(this.#model, []), stopReason: "aborted" });
+    void this.#reader?.cancel().catch(() => undefined);
   }
 
   emit(event: AssistantMessageEvent, retainedBytes?: number): void {
@@ -132,7 +156,7 @@ class ProxyEventQueue implements AsyncIterable<AssistantMessageEvent> {
         return new Promise<IteratorResult<AssistantMessageEvent>>((accept) => this.#waiters.push({ accept }));
       },
       return: async () => {
-        await this.#reader?.cancel().catch(() => undefined);
+        this.#cancel();
         return { done: true as const, value: undefined };
       },
     };
@@ -481,29 +505,33 @@ function parsePartialArguments(value: string): JsonObject {
   return {};
 }
 
-async function boundedHttpError(response: Response, token: string): Promise<string> {
+async function boundedHttpError(response: Response, token: string, queue: ProxyEventQueue): Promise<string> {
   if (response.body === null) return `Proxy request failed (${response.status})`;
   const reader = response.body.getReader();
+  if (!queue.attachReader(reader)) return `Proxy request failed (${response.status})`;
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     while (true) {
+      queue.signal.throwIfAborted();
       const selected = await reader.read();
+      queue.signal.throwIfAborted();
       if (selected.done) {
         break;
       }
       const next = total + selected.value.byteLength;
       if (!Number.isSafeInteger(next) || next > ERROR_BODY_LIMIT) {
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         return `Proxy request failed (${response.status})`;
       }
       chunks.push(selected.value);
       total = next;
     }
   } catch {
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel().catch(() => undefined);
     return `Proxy request failed (${response.status})`;
   } finally {
+    queue.detachReader();
     reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
@@ -524,6 +552,7 @@ async function boundedHttpError(response: Response, token: string): Promise<stri
 }
 
 async function pump(model: Model, context: Context, options: ProxyStreamOptions, queue: ProxyEventQueue): Promise<void> {
+  if (queue.signal.aborted) return;
   let request: ReturnType<typeof requestSnapshot>;
   try { request = requestSnapshot(model, context, options); } catch (error) {
     const message = errorMessage(model, error instanceof Error ? error.message : "Invalid proxy request");
@@ -539,7 +568,7 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
       headers: { authorization: `Bearer ${request.token}`, "content-type": "application/json" },
       body: request.body,
       redirect: "error",
-      ...optionalProperty("signal", request.signal),
+      signal: request.signal === undefined ? queue.signal : AbortSignal.any([request.signal, queue.signal]),
     });
   } catch (error) {
     const message = errorMessage(model, redactedFailureMessage(
@@ -551,8 +580,12 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
     queue.finish(message);
     return;
   }
+  if (queue.signal.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    return;
+  }
   if (!response.ok) {
-    const message = errorMessage(model, await boundedHttpError(response, request.token));
+    const message = errorMessage(model, await boundedHttpError(response, request.token, queue));
     queue.emit({ type: "error", reason: "error", error: message });
     queue.finish(message);
     return;
@@ -565,7 +598,7 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
   }
 
   const reader = response.body.getReader();
-  queue.attachReader(reader);
+  if (!queue.attachReader(reader)) return;
   const content: AssistantMessage["content"] = [];
   const state = new Map<number, "text" | "text-ended" | "thinking" | "thinking-ended" | "tool" | "tool-ended">();
   const toolBuffers = new Map<number, string>();
@@ -852,7 +885,9 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
 
   try {
     while (true) {
+      queue.signal.throwIfAborted();
       const selected = await reader.read();
+      queue.signal.throwIfAborted();
       if (selected.done) break;
       const chunk = selected.value;
       const lengthValue = chunk.byteLength;
@@ -867,6 +902,7 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
       }
       let start = 0;
       while (true) {
+        queue.signal.throwIfAborted();
         const newline = selected.value.indexOf(10, start);
         if (newline < 0) break;
         appendPending(selected.value.subarray(start, newline));
@@ -886,12 +922,15 @@ async function pump(model: Model, context: Context, options: ProxyStreamOptions,
       "Proxy response failed",
     ));
     queue.fail(failed);
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel().catch(() => undefined);
+  } finally {
+    queue.detachReader();
+    reader.releaseLock();
   }
 }
 
 export function streamProxy(model: Model, context: Context, options: ProxyStreamOptions): AssistantMessageEventStream {
-  const queue = new ProxyEventQueue();
+  const queue = new ProxyEventQueue(model);
   queueMicrotask(() => { void pump(model, context, options, queue); });
   return queue;
 }

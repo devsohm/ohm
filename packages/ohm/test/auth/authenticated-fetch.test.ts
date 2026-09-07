@@ -148,6 +148,60 @@ test("brokered provider fetch cannot forward session or profile selectors", asyn
   assert.equal("profile" in (forwarded ?? {}), false);
 });
 
+test("brokered fetch retains caller and host cancellation across a fresh authorized request", async () => {
+  for (const inputKind of ["url", "request"] as const) {
+    for (const cancelled of ["caller", "host"] as const) {
+      const caller = new AbortController();
+      const host = new AbortController();
+      let outgoing: Request | undefined;
+      const url = "https://api.example.test/v1";
+      const response = await authenticatedProviderFetch(
+        policy(),
+        (request) => new Request(request.url),
+        async (input, init) => { outgoing = new Request(input, init); return new Response(); },
+        inputKind === "request" ? new Request(url) : url,
+        { signal: caller.signal },
+        host.signal,
+      );
+      assert.equal(response.body, null);
+      assert.ok(outgoing);
+      const reason = new Error(`${inputKind} ${cancelled} cancelled`);
+      (cancelled === "caller" ? caller : host).abort(reason);
+      assert.equal(outgoing.signal.aborted, true);
+      assert.equal(outgoing.signal.reason, reason);
+    }
+  }
+});
+
+test("brokered fetch honors RequestInit signal precedence and cancellation during authorization", async () => {
+  const url = "https://api.example.test/v1";
+  const abandoned = AbortSignal.abort(new Error("replaced input signal"));
+  const caller = new AbortController();
+  const reason = new Error("caller cancelled during authorization");
+  let authorizations = 0;
+  await assert.rejects(authenticatedProviderFetch(
+    policy(),
+    (request) => {
+      authorizations += 1;
+      assert.equal(request.signal.aborted, false);
+      caller.abort(reason);
+      return new Request(request.url);
+    },
+    async () => assert.fail("cancelled authorization must not dispatch"),
+    new Request(url, { signal: abandoned }),
+    { signal: caller.signal },
+  ), (error) => error === reason);
+  assert.equal(authorizations, 1);
+
+  await assert.rejects(authenticatedProviderFetch(
+    policy(),
+    () => assert.fail("pre-cancelled caller must not authorize"),
+    async () => assert.fail("pre-cancelled caller must not dispatch"),
+    url,
+    { signal: caller.signal },
+  ), (error) => error === reason);
+});
+
 test("brokered provider fetch preserves an exact-limit streamed body across authorization", async () => {
   const controller = new AbortController();
   let authorizedSignal: AbortSignal | undefined;

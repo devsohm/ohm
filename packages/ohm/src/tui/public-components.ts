@@ -156,7 +156,7 @@ function transformMessageMarkdown(
       const transformed = transformer(selected, context);
       if (isStringValue(transformed)) selected = transformed;
     } catch {
-      // Presentation extensions are isolated from the readable source message.
+      // Presentation plugins are isolated from the readable source message.
     }
   }
   return selected;
@@ -2120,10 +2120,18 @@ export class ToolExecutionComponent extends Container {
   setImageWidthCells(width: number): void { this.#imageWidthCells = Math.max(1, Math.floor(width)); this.#render(); }
   override invalidate(): void { this.#render(); super.invalidate(); }
   dispose(): void {
-    this.#replaceRendererComponent("call", undefined);
-    this.#replaceRendererComponent("result", undefined);
+    const failures: unknown[] = [];
+    for (const slot of ["call", "result"] as const) {
+      try {
+        this.#replaceRendererComponent(slot, undefined);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     this.#lastCallView = undefined;
     this.#lastResultView = undefined;
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Tool renderer cleanup failed");
   }
   #replaceRendererComponent(
     slot: "call" | "result",
@@ -2133,6 +2141,9 @@ export class ToolExecutionComponent extends Container {
     if (prior === next) return;
     if (slot === "call") this.#callRendererComponent = next;
     else this.#resultRendererComponent = next;
+    if (next !== undefined) {
+      this.#rendererReferences.set(next, (this.#rendererReferences.get(next) ?? 0) + 1);
+    }
     if (prior !== undefined) {
       const remaining = (this.#rendererReferences.get(prior) ?? 1) - 1;
       if (remaining > 0) this.#rendererReferences.set(prior, remaining);
@@ -2143,9 +2154,6 @@ export class ToolExecutionComponent extends Container {
           prior.dispose?.();
         }
       }
-    }
-    if (next !== undefined) {
-      this.#rendererReferences.set(next, (this.#rendererReferences.get(next) ?? 0) + 1);
     }
   }
   #context(lastComponent: Component | undefined): ToolRenderContext<ToolRenderState> {
@@ -2546,8 +2554,9 @@ export class LoginDialogComponent extends Container implements Focusable {
     this.#content.addChild(new Text(`Enter code: ${info.userCode}`, 1, 0));
     this.tui.requestRender();
   }
-  showManualInput(prompt: string): Promise<string> { return this.#appendPrompt(prompt); }
+  showManualInput(prompt: string): Promise<string> { return this.showPrompt(prompt); }
   showPrompt(message: string, placeholder?: string): Promise<string> {
+    if (this.#cancelled) return Promise.reject(new Error("Login cancelled"));
     this.#content.addChild(new Text(message, 1, 0));
     if (placeholder !== undefined && placeholder !== "") this.#content.addChild(new Text(`e.g., ${placeholder}`, 1, 0));
     return this.#appendInput();
@@ -2570,7 +2579,6 @@ export class LoginDialogComponent extends Container implements Focusable {
     if (getKeybindings().matches(data, "tui.select.cancel")) this.#cancel();
     else this.#input.handleInput(data);
   }
-  #appendPrompt(prompt: string): Promise<string> { this.#content.addChild(new Text(prompt, 1, 0)); return this.#appendInput(); }
   #appendInput(): Promise<string> {
     this.#replacePrompt();
     this.#input.setValue("");

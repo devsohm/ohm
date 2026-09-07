@@ -68,7 +68,7 @@ test("risk coverage evaluates each configured module independently", () => {
   });
 });
 
-test("risk coverage configuration targets only the six high-risk modules", async () => {
+test("risk coverage configuration retains the high-risk module baselines", async () => {
   const config = parseJsonObject(await readFile(
     new URL("../../benchmarks/risk-coverage.config.json", import.meta.url),
     "utf8",
@@ -80,6 +80,7 @@ test("risk coverage configuration targets only the six high-risk modules", async
     { file: "src/tui/controller.ts", minimum: { lines: 91, branches: 78, functions: 85 } },
     { file: "src/service/agent-session.ts", minimum: { lines: 94, branches: 85, functions: 90 } },
     { file: "src/storage/session-manager.ts", minimum: { lines: 97, branches: 88, functions: 97 } },
+    { file: "src/storage/session-entry-projection.ts", minimum: { lines: 97, branches: 88, functions: 97 } },
     { file: "src/serve/server.ts", minimum: { lines: 99, branches: 84, functions: 98 } },
   ]);
   assert.deepEqual(config.groups, [
@@ -103,7 +104,7 @@ test("risk coverage configuration targets only the six high-risk modules", async
     },
     {
       id: "session-storage",
-      targets: ["src/storage/session-manager.ts"],
+      targets: ["src/storage/session-manager.ts", "src/storage/session-entry-projection.ts"],
       testPrefixes: ["test/storage/", "test/service/"],
       testExcludes: [],
     },

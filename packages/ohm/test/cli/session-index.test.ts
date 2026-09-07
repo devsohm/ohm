@@ -15,10 +15,15 @@ import {
 
 test("session catalog pagination is stable and rejects a stale cursor", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-catalog-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  context.after(async () => {
+    await Promise.all(managers.map(async (manager) => manager.closeV4Store()));
+    await rm(root, { recursive: true, force: true });
+  });
   const timestamp = "2026-07-21T00:00:00.000Z";
   for (const id of ["bravo", "alpha"]) {
     const manager = SessionManager.create(root, root, { id });
+    managers.push(manager);
     manager.appendMessage({ id: `${id}-assistant`, role: "assistant", content: [], createdAt: timestamp, timestamp: 1_700_000_000_000 });
   }
 
@@ -46,8 +51,12 @@ test("session catalog pagination is stable and rejects a stale cursor", async (c
 
 test("session catalog search shares fuzzy, phrase, and regex behavior with the picker", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-search-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, root, { id: "search-session" });
+  let manager: SessionManager | undefined;
+  context.after(async () => {
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, root, { id: "search-session" });
   manager.appendMessage({
     id: "search-message",
     role: "user",
@@ -96,8 +105,13 @@ test("session catalog search ranks relevance before truncating a page", async (c
 
 test("real fork metadata renders as a thread while ambiguous parent IDs remain roots", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-thread-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  context.after(async () => {
+    await Promise.all(managers.map(async (manager) => manager.closeV4Store()));
+    await rm(root, { recursive: true, force: true });
+  });
   const parent = SessionManager.create(root, root, { id: "parent" });
+  managers.push(parent);
   parent.appendMessage({
     id: "parent-message",
     role: "user",
@@ -106,6 +120,7 @@ test("real fork metadata renders as a thread while ambiguous parent IDs remain r
     timestamp: 1_700_000_000_000,
   });
   const child = SessionManager.forkFrom(parent.getSessionFile()!, root, root, { id: "child" });
+  managers.push(child);
   child.appendMessage({
     id: "child-message",
     role: "assistant",

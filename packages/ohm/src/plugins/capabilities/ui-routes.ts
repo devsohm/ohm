@@ -5,14 +5,14 @@ import type {
   RuntimeUiComponentHost,
 } from "../../tui/components.js";
 
-/** Route-aware component host supplied whenever an extension route is mounted. */
+/** Route-aware component host supplied whenever a plugin route is mounted. */
 export interface PluginUIRouteHost extends RuntimeUiComponentHost<void> {
   readonly name: string;
   /** Detached, deeply frozen data supplied by the caller opening this route. */
   readonly data?: JsonValue;
 }
 
-/** One named rich-TUI route owned by an extension generation. */
+/** One named rich-TUI route owned by a plugin generation. */
 export interface PluginUIRouteDefinition {
   /** Plain terminal-safe title rendered by the host. */
   readonly title: string;
@@ -20,7 +20,7 @@ export interface PluginUIRouteDefinition {
 }
 
 export interface PluginUIRouteOpenOptions {
-  /** Detached and deeply frozen before extension or host code can observe it. */
+  /** Detached and deeply frozen before plugin or host code can observe it. */
   readonly data?: JsonValue;
 }
 

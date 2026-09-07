@@ -644,7 +644,10 @@ export class InteractiveSessionOperations {
         this.#terminal.setInputBlocked("Summarizing branch… Esc to cancel", "summary");
         release = this.#registerSummaryCancelHandler(cancel);
       }
-      const result = await session.navigateTree(entryId, { summarize });
+      const result = await session.navigateTree(entryId, {
+        summarize,
+        ...optionalProperties(signal === undefined ? undefined : { signal }),
+      });
       signal?.throwIfAborted();
       if (result.cancelled) {
         this.#terminal.notify(result.aborted === true ? "Atlas summary cancelled" : "Atlas checkout cancelled");

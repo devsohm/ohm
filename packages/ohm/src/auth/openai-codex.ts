@@ -170,6 +170,9 @@ function manualAuthorization(
 }
 
 function manualOnlyBrowserSession(oauthClientId: string, port: number): LoopbackAuthorizationSession {
+  let rejectCallback!: LoopbackAuthorizationSession["cancel"];
+  const callback = new Promise<AuthorizationCodeCallback>((_resolve, reject) => { rejectCallback = reject; });
+  void callback.catch(() => undefined);
   const state = createOAuthState();
   const pkce = createPkcePair();
   const redirectUri = `http://localhost:${port}${OPENAI_CODEX_CALLBACK_PATH}`;
@@ -186,8 +189,8 @@ function manualOnlyBrowserSession(oauthClientId: string, port: number): Loopback
     redirectUri,
     verifier: pkce.verifier,
     state,
-    waitForCallback: () => new Promise<never>(() => undefined),
-    cancel: () => undefined,
+    waitForCallback: () => callback,
+    cancel: (reason = new Error("OpenAI Codex login cancelled")) => rejectCallback(reason),
   };
 }
 
@@ -214,6 +217,7 @@ async function browserAuthorization(options: OpenAICodexAuthorizationOptions, oa
   }
   const abort = (): void => session.cancel(authAbortError(options.signal!, "OpenAI Codex login cancelled"));
   options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted === true) abort();
   try {
     await options.showAuthorization({ url: session.authorizationUrl });
     await options.openUrl?.(session.authorizationUrl);
@@ -376,6 +380,8 @@ async function deviceAuthorization(options: OpenAICodexAuthorizationOptions, oau
         : response.value.error,
       "device_authorization_failed",
     );
+    if (error === "access_denied") throw new Error("OpenAI Codex device authorization was denied");
+    if (error === "expired_token") throw new Error("OpenAI Codex device authorization expired");
     if (response.status === 403 || response.status === 404 || error === "deviceauth_authorization_pending" || error === "authorization_pending") {
       continue;
     }
@@ -383,8 +389,6 @@ async function deviceAuthorization(options: OpenAICodexAuthorizationOptions, oau
       intervalMs = Math.min(300_000, intervalMs + 5_000);
       continue;
     }
-    if (error === "access_denied") throw new Error("OpenAI Codex device authorization was denied");
-    if (error === "expired_token") throw new Error("OpenAI Codex device authorization expired");
     throw new Error(`OpenAI Codex device authorization failed (${response.status} ${error})`);
   }
   throw new Error("OpenAI Codex device authorization timed out");

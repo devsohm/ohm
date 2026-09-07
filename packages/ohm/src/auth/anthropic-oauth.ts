@@ -86,6 +86,9 @@ function manualCallback(value: string, expected: { state: string; redirectUri: s
 }
 
 function manualSession(oauthClientId: string): LoopbackAuthorizationSession {
+  let rejectCallback!: LoopbackAuthorizationSession["cancel"];
+  const callback = new Promise<AuthorizationCodeCallback>((_resolve, reject) => { rejectCallback = reject; });
+  void callback.catch(() => undefined);
   const state = createOAuthState();
   const pkce = createPkcePair();
   const redirectUri = `http://localhost:${ANTHROPIC_OAUTH_CALLBACK_PORT}${ANTHROPIC_OAUTH_CALLBACK_PATH}`;
@@ -103,8 +106,8 @@ function manualSession(oauthClientId: string): LoopbackAuthorizationSession {
     redirectUri,
     state,
     verifier: pkce.verifier,
-    waitForCallback: () => new Promise<never>(() => undefined),
-    cancel: () => undefined,
+    waitForCallback: () => callback,
+    cancel: (reason = new Error("Anthropic OAuth login cancelled")) => rejectCallback(reason),
   };
 }
 
@@ -180,6 +183,7 @@ export async function authorizeAnthropic(options: AnthropicAuthorizationOptions)
     authAbortError(options.signal!, "Anthropic OAuth login cancelled"),
   );
   options.signal?.addEventListener("abort", cancel, { once: true });
+  if (options.signal?.aborted === true) cancel();
   try {
     await options.showAuthorization({ url: session.authorizationUrl });
     await options.openUrl?.(session.authorizationUrl);

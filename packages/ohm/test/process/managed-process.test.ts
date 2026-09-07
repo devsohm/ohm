@@ -163,6 +163,53 @@ test("managed process pipe mode provides bounded lossless reads and serialized w
   assert.equal((await processes.wait(id)).state, "succeeded");
 });
 
+test("managed process closeInput drains already admitted writes", async (context) => {
+  const received: string[] = [];
+  let release!: () => void;
+  let entered!: () => void;
+  const firstWrite = new Promise<void>((resolve) => { entered = resolve; });
+  const stdin = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      received.push(chunk.toString());
+      if (received.length === 1) { release = callback; entered(); }
+      else callback();
+    },
+    final(callback) { received.push("end"); callback(); },
+  });
+  const fixture = fakeManagedChild(stdin);
+  const supervisor = new ManagedProcessSupervisor({ cwd: process.cwd(), spawnProcess: fixtureSpawn(fixture.child) });
+  context.after(async () => await supervisor.close());
+  const selected = owner();
+  const processes = supervisor.service(selected.owner);
+  const id = processes.spawn({ argv: [process.execPath], stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+  fixture.child.emit("spawn");
+  const first = processes.write(id, "first");
+  await firstWrite;
+  const second = processes.write(id, "second");
+  const settled = Promise.allSettled([first, second]);
+  const closing = processes.closeInput(id);
+  await assert.rejects(processes.write(id, "late"), /input is closed/u);
+  release();
+  assert.deepEqual((await settled).map((result) => result.status), ["fulfilled", "fulfilled"]);
+  await closing;
+  assert.deepEqual(received, ["first", "second", "end"]);
+  fixture.child.emit("close", 0, null);
+});
+
+test("managed process wait deduplicates identical caller and owner abort signals", async (context) => {
+  const supervisor = new ManagedProcessSupervisor({ cwd: process.cwd() });
+  context.after(async () => await supervisor.close());
+  const selected = owner();
+  const processes = supervisor.service(selected.owner);
+  const id = processes.spawn({ argv: [process.execPath, "--eval", "process.exit(0)"] });
+  await processes.wait(id);
+  const baseline = getEventListeners(selected.controller.signal, "abort").length;
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    await processes.wait(id, { signal: selected.controller.signal });
+    assert.equal(getEventListeners(selected.controller.signal, "abort").length, baseline);
+  }
+});
+
 test("an aborted write is not admitted while a managed process write is still queued", async (context) => {
   const supervisor = new ManagedProcessSupervisor({ cwd: process.cwd() });
   context.after(async () => await supervisor.close());

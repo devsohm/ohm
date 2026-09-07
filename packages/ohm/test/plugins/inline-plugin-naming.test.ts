@@ -136,7 +136,7 @@ export default function activate() {}
           { name: "duplicate", factory() { activations += 1; } },
         ],
       });
-    }, /duplicate inline extension name/iu);
+    }, /duplicate inline plugin name/iu);
   } finally {
     await host?.close();
   }

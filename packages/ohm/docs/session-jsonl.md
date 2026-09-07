@@ -208,6 +208,11 @@ the parent directory on creation when the platform supports it.
 
 The product owns a writer lease. A second live writer for the same session is
 rejected. A read-only snapshot can inspect the file without taking that lease.
+Hard-linked live session files are rejected, including across separate profiles:
+SQLite sidecars and ownership must refer to one file name. Use a copy or JSONL
+export for another independently writable session, or a symbolic link to the
+canonical path. Import publication removes its private staging link before
+opening the published database.
 
 ## Context reconstruction
 

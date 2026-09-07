@@ -47,6 +47,7 @@ import {
   type SessionV4ToolManualOutcome,
 } from "@ohm/kernel/session-v4";
 import { snapshotAdapterEvent } from "@ohm/kernel/runtime/core/adapter-event";
+import { ASSISTANT_CONTENT_LIMITS } from "@ohm/kernel/runtime/core/assistant-content-limits";
 import { boundedJsonSnapshot } from "@ohm/kernel/runtime/core/bounded-json";
 
 import { defaultSecretRedactor } from "../auth/redaction.js";
@@ -265,6 +266,7 @@ import {
   canonicalContent,
   canonicalInputContent,
   canonicalAgentMessages,
+  canonicalSessionEntryId,
   canonicalUsage,
   extensionContent,
   extensionAssistantEventFromMessage,
@@ -276,6 +278,7 @@ import {
   extensionMessages,
   extensionSessionEntriesForCanonicalEntry,
   pluginSessionManager,
+  publicSessionEntryId,
   extensionToolResultBlock,
   extensionUsage,
   type ContextMessageProjection,
@@ -998,7 +1001,7 @@ export interface AgentSessionOptions {
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
   imageAutoResize?: boolean;
-  /** Event emitted when extensions are first bound to this session. */
+  /** Event emitted when plugins are first bound to this session. */
   sessionStartEvent?: SessionStartEvent;
   refresh?: (options?: {
     beforeSessionStart?: () => void | Promise<void>;
@@ -4026,6 +4029,7 @@ export class AgentSession {
     preflight: AbortController;
   }>();
   readonly #promptPreflights = new Map<AbortController, AgentSessionDeliveryTarget | undefined>();
+  readonly #recoveryControllers = new Set<AbortController>();
   #sessionDeliveryBinding: object = Object.freeze({});
   readonly #bashAbortControllers = new Set<AbortController>();
   readonly #bashSettlements = new Set<Promise<void>>();
@@ -4058,7 +4062,6 @@ export class AgentSession {
   #streamingMessage: AgentMessage | undefined;
   #pendingToolCalls = new Set<string>();
   #errorMessage: string | undefined;
-  #closed = false;
   #closeOperation?: Promise<void>;
 
   private constructor(construction: NativeAgentSessionConstruction) {
@@ -4423,7 +4426,7 @@ export class AgentSession {
           "This AgentSession extension generation did not finish starting; refresh must publish a fresh generation",
         );
       }
-      throw new Error("This AgentSession has no extension runner");
+      throw new Error("This AgentSession has no plugin runner");
     }
     return this.#pluginRunner;
   }
@@ -5162,8 +5165,9 @@ export class AgentSession {
               "A run is in progress. Set streamingBehavior to 'steer' or 'followUp' to enqueue this prompt.",
             );
           }
-          if (normalizedOptions.streamingBehavior === "steer") this.#queueSteer(prepared.text, prepared.images);
-          else this.#queueFollowUp(prepared.text, prepared.images);
+          this.#queueUserMessage(
+            normalizedOptions.streamingBehavior === "steer" ? "steer" : "follow_up", prepared.text, prepared.images,
+          );
           reportPreflight(true);
           admitted = { result: { sessionId: this.sessionId, results: [] } };
         } else {
@@ -5248,14 +5252,14 @@ export class AgentSession {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
     this.#throwIfPluginCommand(text);
-    this.#queueSteer(this.#expandPrompt(text), canonicalAgentSessionImages(images, "steer.images"));
+    this.#queueUserMessage("steer", this.#expandPrompt(text), canonicalAgentSessionImages(images, "steer.images"));
   }
 
   async followUp(text: string, images?: readonly AgentSessionInputImage[]): Promise<void> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
     this.#throwIfPluginCommand(text);
-    this.#queueFollowUp(this.#expandPrompt(text), canonicalAgentSessionImages(images, "followUp.images"));
+    this.#queueUserMessage("follow_up", this.#expandPrompt(text), canonicalAgentSessionImages(images, "followUp.images"));
   }
 
   async sendUserMessage(
@@ -5380,6 +5384,7 @@ export class AgentSession {
     const cancellationReason = this.#recordRunCancellation(reason ?? "AgentSession aborted");
     const abortReason = new Error(cancellationReason);
     for (const preflight of this.#promptPreflights.keys()) preflight.abort(abortReason);
+    for (const recovery of this.#recoveryControllers) recovery.abort(abortReason);
     this.cancelRetry();
     this.#control?.cancel(cancellationReason);
     this.abortCompaction();
@@ -5391,11 +5396,16 @@ export class AgentSession {
     options: AgentSessionRecoveryOptions = {},
   ): Promise<AgentSessionRecoveryResult> {
     this.#assertOpen();
-    const signal = options.signal === undefined
-      ? this.#lifecycle.signal
-      : AbortSignal.any([this.#lifecycle.signal, options.signal]);
-    const releaseAdmission = await this.#acquirePromptAdmission({ textBytes: 0, imageBytes: 0 }, signal);
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      this.#lifecycle.signal,
+      controller.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    this.#recoveryControllers.add(controller);
+    let releaseAdmission: (() => void) | undefined;
     try {
+      releaseAdmission = await this.#acquirePromptAdmission({ textBytes: 0, imageBytes: 0 }, signal);
       if (this.#active !== undefined || this.#branchSummaryOperation !== undefined) {
         throw new Error("AgentSession must finish its active work before recovery");
       }
@@ -5681,16 +5691,32 @@ export class AgentSession {
         } as const;
         this.#session.commitChanges([recoveryStarted]);
         try {
-          const result: unknown = await recovery.recover({
-            operationId,
-            threadId: this.sessionId,
-            callId: effect.callId,
-            name: effect.toolName,
-            input: structuredClone(effect.effectiveInput),
-          }, {
-            signal,
-            workspaceRoot: this.#workspace,
-          });
+          let onAbort: (() => void) | undefined;
+          let result: unknown;
+          try {
+            result = await new Promise<unknown>((resolve, reject) => {
+              onAbort = (): void => reject(signal.reason);
+              signal.addEventListener("abort", onAbort, { once: true });
+              signal.throwIfAborted();
+              Promise.resolve().then(() => {
+                signal.throwIfAborted();
+                return recovery.recover({
+                  operationId,
+                  threadId: this.sessionId,
+                  callId: effect.callId,
+                  name: effect.toolName,
+                  input: structuredClone(effect.effectiveInput),
+                }, {
+                  signal,
+                  workspaceRoot: this.#workspace,
+                });
+              }).then(resolve, reject);
+            });
+          } finally {
+            if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+          }
+          // Cancellation leaves recovery_started durable; a late callback cannot
+          // settle it or race a later explicit resolution after admission releases.
           signal.throwIfAborted();
           if (!isJsonObject(result)) {
             throw new TypeError("Tool reconciliation result must be an object");
@@ -5818,7 +5844,8 @@ export class AgentSession {
       await runAgentSessionRecoveryFinalizer(this);
       return { recovered: true, operationId, blocked: [] };
     } finally {
-      releaseAdmission();
+      this.#recoveryControllers.delete(controller);
+      releaseAdmission?.();
     }
   }
 
@@ -6025,25 +6052,10 @@ export class AgentSession {
   }
 
   async waitForIdle(): Promise<void> {
-    if (this.#hasPluginCommandPermit()) {
-      for (;;) {
-        const active = this.#active;
-        await active?.then(() => undefined, () => undefined);
-        const manualCompaction = this.#manualCompactionCompletion;
-        await manualCompaction;
-        const branchSummary = this.#branchSummaryOperation;
-        await branchSummary?.then(() => undefined, () => undefined);
-        if (
-          this.#active === undefined &&
-          this.#manualCompactionCompletion === undefined &&
-          this.#compactionAbortController === undefined &&
-          this.#branchSummaryOperation === undefined
-        ) return;
-      }
-    }
+    const waitForAdmission = !this.#hasPluginCommandPermit();
     for (;;) {
       const admission = this.#promptAdmission;
-      await admission;
+      if (waitForAdmission) await admission;
       const active = this.#active;
       await active?.then(() => undefined, () => undefined);
       const manualCompaction = this.#manualCompactionCompletion;
@@ -6051,9 +6063,8 @@ export class AgentSession {
       const branchSummary = this.#branchSummaryOperation;
       await branchSummary?.then(() => undefined, () => undefined);
       if (
-        admission === this.#promptAdmission &&
+        (!waitForAdmission || (admission === this.#promptAdmission && this.#preparingPromptCount === 0)) &&
         this.#active === undefined &&
-        this.#preparingPromptCount === 0 &&
         this.#manualCompactionCompletion === undefined &&
         this.#compactionAbortController === undefined &&
         this.#branchSummaryOperation === undefined
@@ -6674,7 +6685,7 @@ export class AgentSession {
 
   #clearAllQueues(): void {
     this.clearQueue();
-    const remaining = this.#pendingQueuedMessages.splice(0);
+    const remaining = [...this.#pendingQueuedMessages.splice(0), ...(this.#control?.dequeue() ?? [])];
     for (const message of remaining) this.#cancelQueuedMessage(message);
     this.#pendingNextTurnMessages = [];
     this.#undeliveredNextTurnMessages.clear();
@@ -6771,11 +6782,18 @@ export class AgentSession {
     customInstructions?: string;
     replaceInstructions?: boolean;
     label?: string;
+    signal?: AbortSignal;
   } = {}): Promise<AgentSessionTreeNavigationResult> {
+    options.signal?.throwIfAborted();
     this.#assertIdle();
     const controller = new AbortController();
+    const signal = AbortSignal.any([
+      controller.signal,
+      this.#lifecycle.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
     this.#branchSummaryAbortController = controller;
-    const operation = this.#navigateTree(targetId, options, controller).finally(() => {
+    const operation = this.#navigateTree(targetId, options, signal).finally(() => {
       if (this.#branchSummaryAbortController === controller) this.#branchSummaryAbortController = undefined;
       if (this.#branchSummaryOperation === operation) this.#branchSummaryOperation = undefined;
     });
@@ -6788,7 +6806,7 @@ export class AgentSession {
   async #navigateTree(
     targetId: string,
     options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
-    controller: AbortController,
+    signal: AbortSignal,
   ): Promise<AgentSessionTreeNavigationResult> {
     const oldLeafId = this.#session.getLeafId();
     if (targetId === oldLeafId) return { cancelled: false };
@@ -6835,13 +6853,13 @@ export class AgentSession {
         } satisfies RuntimeSessionBeforeTreeEvent["preparation"];
         const directEvent = {
           preparation,
-          signal: controller.signal,
+          signal,
         } satisfies RuntimeSessionBeforeTreeEvent;
         const result = await extensions.reduceSessionBeforeTree(
           directEvent,
-          controller.signal,
+          signal,
         );
-        if (controller.signal.aborted || result.cancel === true) {
+        if (signal.aborted || result.cancel === true) {
           return cancelledTreeNavigation();
         }
         extensionSummary = result.summary === undefined
@@ -6871,6 +6889,7 @@ export class AgentSession {
       }
 
       let summaryEntry: Extract<SessionEntry, { type: "branch_summary" }> | undefined;
+      if (signal.aborted) return cancelledTreeNavigation();
       if (options.summarize === true) {
         if (this.#model === undefined && extensionSummary === undefined) {
           throw new Error("No model is selected for branch summarization");
@@ -6879,9 +6898,9 @@ export class AgentSession {
           ? await this.#summarizeAbandonedBranch(targetId, {
               ...optionalProperties(customInstructions === undefined ? undefined : { customInstructions }),
               ...optionalProperties(replaceInstructions === undefined ? undefined : { replaceInstructions }),
-            }, controller.signal, summaryEvents)
+            }, signal, summaryEvents)
           : extensionSummary;
-        if (controller.signal.aborted) return cancelledTreeNavigation();
+        if (signal.aborted) return cancelledTreeNavigation();
         if (generated !== undefined) {
           if (extensionSummary === undefined && generated.usage === undefined) {
             summaryEvents.observeUsage({}, "final");
@@ -6903,6 +6922,7 @@ export class AgentSession {
             throw new Error("Secret redaction changed the branch summary event discriminant");
           }
           const safeEvent = prepared.durable;
+          // The synchronous journal mutation is the irreversible commit boundary.
           const id = this.#session.branchWithSummary(
             newLeafId,
             messageText(safeEvent.summary),
@@ -6937,7 +6957,7 @@ export class AgentSession {
           ...optionalProperties(summaryEntry === undefined ? undefined : { summaryEntry }),
           ...optionalProperties(extensionSummary === undefined ? undefined : { fromExtension: true }),
         };
-        await dispatchDirectPluginEvent(extensions, "session_tree", directEvent, controller.signal);
+        await dispatchDirectPluginEvent(extensions, "session_tree", directEvent, signal);
       }
 
       return {
@@ -6946,7 +6966,7 @@ export class AgentSession {
         ...optionalProperties(summaryEntry === undefined ? undefined : { summaryEntry }),
       };
     } catch (error) {
-      if (!controller.signal.aborted && !isBranchSummaryCancelledError(error)) throw error;
+      if (!signal.aborted && !isBranchSummaryCancelledError(error)) throw error;
       return cancelledTreeNavigation();
     } finally {
       this.#observability?.releaseCorrelation(summaryCorrelationId);
@@ -7016,7 +7036,6 @@ export class AgentSession {
   async #performClose(waitForPromptAdmission: boolean): Promise<void> {
     const active = this.#active;
     const branchSummary = this.#branchSummaryOperation;
-    this.#closed = true;
     const closeReason = new Error("AgentSession closed");
     this.#lifecycle.abort(closeReason);
     const commandScope = this.#extensionCommandScope.getStore();
@@ -7388,7 +7407,7 @@ export class AgentSession {
 
   createReplacedSessionContext(): AgentSessionReplacedContext {
     const runner = this.#pluginRunner;
-    if (runner === undefined) throw new Error("This AgentSession has no extension runner");
+    if (runner === undefined) throw new Error("This AgentSession has no plugin runner");
     const context = Object.defineProperties(
       {},
       Object.getOwnPropertyDescriptors(runner.createCommandContext()),
@@ -7964,7 +7983,7 @@ export class AgentSession {
               if (previousRunner === undefined || previousHost === undefined
                 || result.plugins.length !== previousResult.plugins.length
                 || result.plugins.some((plugin, index) => plugin !== previousResult.plugins[index])) {
-                throw new Error("A refresh cannot change the extension projection without a new runtime generation");
+                throw new Error("A refresh cannot change the plugin projection without a new runtime generation");
               }
               return;
             }
@@ -8031,7 +8050,7 @@ export class AgentSession {
         && nextResult?.runtime === this.#incompletePluginRuntime
         && this.#pluginHost === undefined
       ) {
-        throw new Error("An incomplete extension generation cannot be restarted; refresh must publish a fresh generation");
+        throw new Error("An incomplete plugin generation cannot be restarted; refresh must publish a fresh generation");
       }
       if (this.#pluginRunner !== undefined && this.#pluginHost !== undefined) {
         this.#applyPluginBindings(this.#pluginRunner, this.#pluginHost);
@@ -8307,9 +8326,10 @@ export class AgentSession {
           signal,
         } satisfies RuntimeSessionBeforeCompactEvent;
         const result = await extensions.reduceSessionBeforeCompact(directEvent);
-        const selectedEntry = result.compaction === undefined
+        const selectedEntryId = result.compaction === undefined
           ? undefined
-          : branchEntries.find((entry) => entry.id === result.compaction?.firstKeptEntryId);
+          : canonicalSessionEntryId(this.#session, result.compaction.firstKeptEntryId) ?? result.compaction.firstKeptEntryId;
+        const selectedEntry = selectedEntryId === undefined ? undefined : branchEntries.find((entry) => entry.id === selectedEntryId);
         if (result.compaction !== undefined && selectedEntry?.type !== "message") {
           throw new Error("Plugin compaction firstKeptEntryId must identify a message on the active branch");
         }
@@ -8627,7 +8647,7 @@ export class AgentSession {
     const turn = this.#extensionTurns.get(runId);
     if (turn === undefined) return;
     if (event.type !== "tool_call_delta") turn.publicToolDeltaMessage = undefined;
-    let assistantMessageEvent: unknown;
+    let assistantMessageEvent: RuntimeEvent | undefined;
     if (event.type === "text_started") {
       if (!turn.snapshot.text.some((entry) => entry.part === event.part)) {
         turn.snapshot.text.push({ part: event.part, text: "" });
@@ -8692,7 +8712,7 @@ export class AgentSession {
         };
         turn.snapshot.toolCalls.push(call);
       } else call.rawArguments += event.jsonFragment;
-      assistantMessageEvent = structuredClone(event);
+      assistantMessageEvent = { ...event };
     } else if (event.type === "tool_call_completed") {
       const completed = {
         ...optionalProperties(event.id === undefined ? undefined : { id: event.id }),
@@ -8844,14 +8864,14 @@ export class AgentSession {
       },
       setSessionName: (name) => { this.setSessionName(name); },
       getSessionName: () => this.sessionName,
-      setLabel: (entryId, label) => { this.setLabel(entryId, label); },
+      setLabel: (entryId, label) => { this.setLabel(canonicalSessionEntryId(this.#session, entryId) ?? entryId, label); },
       exec: async (command, args, options = {}) => {
         if (command.trim() === "" || command.includes("\0") || args.some((argument) => argument.includes("\0"))) {
-          throw new Error("Direct extension command is invalid");
+          throw new Error("Direct plugin command is invalid");
         }
         const timeoutMs = options.timeout ?? 600_000;
         if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000) {
-          throw new Error("Direct extension timeout must be between 1 and 3600000 milliseconds");
+          throw new Error("Direct plugin timeout must be between 1 and 3600000 milliseconds");
         }
         const result = await runProcess({
           argv: [command, ...args],
@@ -8902,7 +8922,7 @@ export class AgentSession {
         owner?: RuntimeDirectProviderOwner,
       ) => {
         if (this.#activeDirectProviderHost !== extensions) {
-          throw new Error("Direct provider registration belongs to an inactive extension generation");
+          throw new Error("Direct provider registration belongs to an inactive plugin generation");
         }
         const providerOwner = owner ?? {
           key: "<compatibility>",
@@ -8930,7 +8950,7 @@ export class AgentSession {
       },
       unregisterProvider: (name, owner) => {
         if (this.#activeDirectProviderHost !== extensions) {
-          throw new Error("Direct provider unregistration belongs to an inactive extension generation");
+          throw new Error("Direct provider unregistration belongs to an inactive plugin generation");
         }
         const providerOwner = owner ?? {
           key: "<compatibility>",
@@ -8968,9 +8988,10 @@ export class AgentSession {
       fork: commandActions === undefined ? (async (entryId, options = {}, signal) => {
         signal?.throwIfAborted();
         if (!this.isIdle) return { cancelled: true };
+        const canonicalId = canonicalSessionEntryId(this.#session, entryId) ?? entryId;
         const target = options.position === "before"
-          ? this.#session.getEntry(entryId)?.parentId ?? null
-          : entryId;
+          ? this.#session.getEntry(canonicalId)?.parentId ?? null
+          : canonicalId;
         if (target === null) throw new Error("Cannot fork before the first session entry");
         const path = this.createBranchedSession(target);
         if (path === undefined) return { cancelled: true };
@@ -8987,7 +9008,10 @@ export class AgentSession {
       navigateTree: commandActions?.navigateTree ?? (async (targetId, options = {}, signal) => {
         signal?.throwIfAborted();
         if (!this.isIdle) return { cancelled: true };
-        const result = await this.navigateTree(targetId, options);
+        const result = await this.navigateTree(canonicalSessionEntryId(this.#session, targetId) ?? targetId, {
+          ...options,
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+        });
         signal?.throwIfAborted();
         return { cancelled: result.cancelled };
       }),
@@ -9035,7 +9059,7 @@ export class AgentSession {
         appendEntry: (customType, data) => { this.appendCustomEntry(customType, data); },
         setSessionName: (name) => { this.setSessionName(name); },
         getSessionName: () => this.sessionName,
-        setLabel: (entryId, label) => { this.setLabel(entryId, label); },
+        setLabel: (entryId, label) => { this.setLabel(canonicalSessionEntryId(this.#session, entryId) ?? entryId, label); },
         getActiveTools: () => this.getActiveTools(),
         getAllTools: () => actions.getAllTools().map((tool) => {
           const projected = projectedTools.get(tool.name);
@@ -9080,7 +9104,7 @@ export class AgentSession {
         isIdle: () => this.isIdle,
         isProjectTrusted: () => this.#settings.isProjectTrusted(),
         getSignal: () => this.#control?.abortController.signal,
-        abort: this.#extensionBindings.abortHandler ?? (() => { void this.abort("Cancelled by extension"); }),
+        abort: this.#extensionBindings.abortHandler ?? (() => { void this.abort("Cancelled by plugin"); }),
         hasPendingMessages: () => this.hasPendingMessages,
         shutdown: this.#extensionBindings.shutdownHandler ?? (() => { void this.close(); }),
         getContextUsage: () => this.getContextUsage(),
@@ -9112,9 +9136,10 @@ export class AgentSession {
       },
       fork: async (entryId, options = {}) => {
         if (!this.isIdle) return { cancelled: true };
+        const canonicalId = canonicalSessionEntryId(this.#session, entryId) ?? entryId;
         const target = options.position === "before"
-          ? this.#session.getEntry(entryId)?.parentId ?? null
-          : entryId;
+          ? this.#session.getEntry(canonicalId)?.parentId ?? null
+          : canonicalId;
         if (target === null) throw new Error("Cannot fork before the first session entry");
         const path = this.createBranchedSession(target);
         if (path === undefined) return { cancelled: true };
@@ -9122,9 +9147,14 @@ export class AgentSession {
         await options.withSession?.(this.createReplacedSessionContext());
         return { cancelled: false };
       },
-      navigateTree: async (targetId, options = {}) => {
+      navigateTree: async (targetId, options = {}, signal) => {
+        signal?.throwIfAborted();
         if (!this.isIdle) return { cancelled: true };
-        const result = await this.navigateTree(targetId, options);
+        const result = await this.navigateTree(canonicalSessionEntryId(this.#session, targetId) ?? targetId, {
+          ...options,
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+        });
+        signal?.throwIfAborted();
         return { cancelled: result.cancelled };
       },
       switchSession: async (sessionPath, options = {}) => {
@@ -9140,7 +9170,7 @@ export class AgentSession {
     extensions.setDirectContextHandler((target, signal) => {
       signal.throwIfAborted();
       if (target !== undefined && target.threadId !== this.sessionId) {
-        throw new Error("Direct extension context only exposes the current session");
+        throw new Error("Direct plugin context only exposes the current session");
       }
       // Run-scoped events retain their source leaf while the durable head advances.
       if (
@@ -9148,7 +9178,7 @@ export class AgentSession {
         target.branch !== this.#extensionBranch() &&
         target.branch !== this.#activePluginRunBranch
       ) {
-        throw new Error("Direct extension context only exposes the current branch");
+        throw new Error("Direct plugin context only exposes the current branch");
       }
       const selected = this.#model;
       const directModel = selected === undefined
@@ -9169,7 +9199,7 @@ export class AgentSession {
         thinkingLevel: this.thinkingLevel,
         isIdle: () => this.isIdle,
         hasPendingMessages: () => this.hasPendingMessages,
-        abort: this.#extensionBindings.abortHandler ?? (() => { void this.abort("Cancelled by extension"); }),
+        abort: this.#extensionBindings.abortHandler ?? (() => { void this.abort("Cancelled by plugin"); }),
         shutdown: this.#extensionBindings.shutdownHandler ?? (() => { void this.close(); }),
         getContextUsage: () => this.getContextUsage(),
         compact: (options = {}) => {
@@ -9352,7 +9382,7 @@ export class AgentSession {
     const command = this.#extensionCommand(text);
     if (command === undefined || this.#pluginHost?.hasCommand(command.name) !== true) return;
     throw new Error(
-      `Queued input cannot invoke extension command "/${command.name}"; submit it with prompt() or run it while the session is idle.`,
+      `Queued input cannot invoke plugin command "/${command.name}"; submit it with prompt() or run it while the session is idle.`,
     );
   }
 
@@ -9392,9 +9422,9 @@ export class AgentSession {
     }
   }
 
-  #queueSteer(text: string, images?: ImageBlock[]): void {
+  #queueUserMessage(mode: "steer" | "follow_up", text: string, images?: ImageBlock[]): void {
     const queued = this.#durableQueuedMessage({
-      mode: "steer",
+      mode,
       text,
       ...optionalProperties(images === undefined ? undefined : { images }),
     });
@@ -9405,31 +9435,8 @@ export class AgentSession {
           ...this.#pendingQueuedMessages,
           queued,
         ]);
-        this.#control.enqueue(queued);
-      } catch (error) {
-        this.#cancelQueuedMessage(queued);
-        throw error;
-      }
-      this.#emitQueueUpdate();
-      return;
-    }
-    this.#queueWhileIdle(queued);
-  }
-
-  #queueFollowUp(text: string, images?: ImageBlock[]): void {
-    const queued = this.#durableQueuedMessage({
-      mode: "follow_up",
-      text,
-      ...optionalProperties(images === undefined ? undefined : { images }),
-    });
-    if (this.#control !== undefined) {
-      try {
-        assertQueuedRunMessages([
-          ...this.#control.queuedMessages(),
-          ...this.#pendingQueuedMessages,
-          queued,
-        ]);
-        this.#pendingQueuedMessages = [...this.#pendingQueuedMessages, cloneQueuedRunMessage(queued)];
+        if (mode === "steer") this.#control.enqueue(queued);
+        else this.#pendingQueuedMessages = [...this.#pendingQueuedMessages, cloneQueuedRunMessage(queued)];
       } catch (error) {
         this.#cancelQueuedMessage(queued);
         throw error;
@@ -10705,7 +10712,7 @@ export class AgentSession {
     }
     const publicSession = pluginSessionManager(this.#session);
     const sourcePath = publicSession.getBranch();
-    const targetIds = new Set(publicSession.getBranch(targetId).map((entry) => entry.id));
+    const targetIds = new Set(publicSession.getBranch(publicSessionEntryId(this.#session, targetId)).map((entry) => entry.id));
     const commonIndex = sourcePath.findLastIndex((entry) => targetIds.has(entry.id));
     const preparation = prepareBranchEntries(
       sourcePath.slice(commonIndex + 1),
@@ -10800,6 +10807,9 @@ export class AgentSession {
         bodyStarted,
       });
       const setOutputPart = (parts: Map<number, string>, part: number, value: string): void => {
+        if (!parts.has(part) && textParts.size + reasoningParts.size >= ASSISTANT_CONTENT_LIMITS.blocks) {
+          throw protocolFailure(`Branch summary exceeded ${ASSISTANT_CONTENT_LIMITS.blocks} content parts`);
+        }
         const previous = parts.get(part) ?? "";
         const nextOutputBytes = outputBytes - Buffer.byteLength(previous, "utf8") + Buffer.byteLength(value, "utf8");
         if (nextOutputBytes > BRANCH_SUMMARY_LIMITS.maxOutputBytes) {
@@ -11226,7 +11236,7 @@ export class AgentSession {
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new Error("AgentSession is closed");
+    if (this.#lifecycle.signal.aborted) throw new Error("AgentSession is closed");
   }
 
   #assertNoSuspendedRun(): void {

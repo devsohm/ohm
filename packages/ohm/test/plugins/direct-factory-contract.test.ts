@@ -9,6 +9,7 @@ import { Value } from "typebox/value";
 
 import { FUNCTION_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
 import {
+  directToolRendererBinding,
   loadDirectPlugins,
   type RuntimeCommandContext,
   type RuntimeDiscoveryView,
@@ -123,7 +124,7 @@ test("direct extension source snapshots enforce the inclusive 16 MiB boundary", 
   ));
   await assert.rejects(
     loadDirectPlugins([oversizedPath], { workspace: root, activationFailure: "throw" }),
-    new RegExp(`Direct extension source exceeds ${MAX_TRUSTED_RESOURCE_FILE_BYTES} bytes`),
+    new RegExp(`Direct plugin source exceeds ${MAX_TRUSTED_RESOURCE_FILE_BYTES} bytes`),
   );
 });
 
@@ -135,7 +136,7 @@ test("direct extension source discovery rejects nonregular entry paths", async (
 
   await assert.rejects(
     loadDirectPlugins([directoryPath], { workspace: root, activationFailure: "throw" }),
-    /Direct extension directory has no supported index file/,
+    /Direct plugin directory has no supported index file/,
   );
 });
 
@@ -734,6 +735,62 @@ test("direct tool renderers retain shell, component state, result details, and l
   assert.equal(lifecycle.aborted, true);
   await rm(root, { recursive: true, force: true });
 });
+
+for (const slot of ["call", "result"] as const) {
+  test(`direct ${slot} renderer retains its replacement when the old component disposer throws`, () => {
+    const disposals: string[] = [];
+    const diagnostics: string[] = [];
+    const prior = {
+      render: () => ["prior"],
+      invalidate() {},
+      dispose(): void { disposals.push("prior"); throw new Error("prior disposal failed"); },
+    };
+    const next = {
+      render: () => ["next"],
+      invalidate() {},
+      dispose() { disposals.push("next"); },
+    };
+    let output = prior;
+    const binding = directToolRendererBinding([defineTool({
+      name: "replacement",
+      label: "Replacement",
+      description: "Own renderer replacements",
+      parameters: Type.Object({}),
+      async execute() { return { content: [], details: {} }; },
+      ...(slot === "call" ? { renderCall: () => output } : { renderResult: () => output }),
+    })], "/tmp", (diagnostic) => { diagnostics.push(diagnostic.message); });
+    assert.ok(binding);
+    const invoke = () => binding[slot === "call" ? "renderCall" : "renderResult"]("replacement", {
+      callId: "replace-1",
+      name: "replacement",
+      input: {},
+      result: { content: "result", isError: false },
+      argsComplete: true,
+      executionStarted: true,
+      status: "completed",
+      expanded: false,
+    }, {
+      width: 80,
+      height: 24,
+      focused: false,
+      expanded: false,
+      theme: { name: "mono", color: false, unicode: true },
+    });
+    try {
+      assert.equal(invoke()?.lines[0]?.spans[0]?.text, "prior");
+      output = next;
+      assert.equal(invoke(), undefined);
+      assert.equal(diagnostics.length, 1);
+      assert.match(diagnostics[0]!, /prior disposal failed/u);
+      binding.reconcile?.(new Set());
+      binding.dispose?.();
+      assert.deepEqual(disposals, ["prior", "next"]);
+    } finally {
+      binding.dispose?.();
+    }
+    assert.deepEqual(disposals, ["prior", "next"]);
+  });
+}
 
 test("named and anonymous inline factories share the direct contract and become stale on close", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-inline-factory-"));

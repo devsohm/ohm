@@ -417,6 +417,41 @@ test("public cut selection moves earlier instead of splitting a tool call from i
   });
 });
 
+for (const operation of ["branch pairs", "compaction activity", "cut boundaries"] as const) {
+  test(`public compaction owns repeated tool call IDs by occurrence for ${operation}`, () => {
+    const entries: SessionMessageEntry[] = [
+      messageEntry("first-user", { role: "user", content: "first turn", timestamp: 1 }),
+      messageEntry("first-call", assistant([{ type: "toolCall", id: "reused", name: "write", arguments: { path: "first.txt" } }])),
+      messageEntry("first-result", { role: "toolResult", toolCallId: "reused", toolName: "write", content: [{ type: "text", text: "first write succeeded" }], isError: false, timestamp: 2 }),
+      messageEntry("second-user", { role: "user", content: "second turn", timestamp: 3 }),
+      messageEntry("second-call", assistant([{ type: "toolCall", id: "reused", name: "write", arguments: { path: "second.txt" } }])),
+      messageEntry("second-result", { role: "toolResult", toolCallId: "reused", toolName: "write", content: [{ type: "text", text: "second write failed" }], isError: true, timestamp: 4 }),
+    ];
+    const original = structuredClone(entries);
+    if (operation === "branch pairs") {
+      const prepared = prepareBranchEntries(entries);
+      assert.deepEqual(prepared.messages, entries.map((entry) => entry.message));
+      assert.deepEqual([...prepared.fileOps.written], ["first.txt"]);
+    } else if (operation === "compaction activity") {
+      const prepared = prepareCompaction([
+        ...entries,
+        messageEntry("retained-user", { role: "user", content: "next", timestamp: 5 }),
+      ], { enabled: true, reserveTokens: 1_000, recentTokens: 1 });
+      assert.ok(prepared);
+      assert.equal(prepared.firstKeptEntryId, "retained-user");
+      assert.deepEqual([...prepared.fileOps.written], ["first.txt"]);
+    } else {
+      const recentTokens = entries.slice(3).reduce((sum, entry) => sum + estimateTokens(entry.message), 0);
+      assert.deepEqual(findCutPoint(entries, 0, entries.length, recentTokens), {
+        firstKeptEntryIndex: 3,
+        turnStartIndex: -1,
+        isSplitTurn: false,
+      });
+    }
+    assert.deepEqual(entries, original);
+  });
+}
+
 test("branch preparation retains complete tool pairs and records only successful matched file operations", () => {
   const nested: BranchSummaryEntry = {
     type: "branch_summary",
@@ -474,6 +509,19 @@ test("branch preparation retains complete tool pairs and records only successful
   assert.deepEqual([...prepared.fileOps.written], []);
   assert.deepEqual([...prepared.fileOps.edited], ["/nested/changed"]);
 });
+
+for (const duplicate of ["calls", "results"] as const) {
+  test(`branch preparation still excludes ambiguous duplicate tool ${duplicate}`, () => {
+    const request = messageEntry("request", { role: "user", content: "inspect", timestamp: 1 });
+    const call = { type: "toolCall" as const, id: "duplicate", name: "read", arguments: { path: "file.txt" } };
+    const calls = messageEntry("call", assistant(duplicate === "calls" ? [call, call] : [call]));
+    const result = messageEntry("result", { role: "toolResult", toolCallId: "duplicate", toolName: "read", content: [{ type: "text", text: "contents" }], isError: false, timestamp: 2 });
+    const entries = [request, calls, result, ...(duplicate === "results" ? [{ ...result, id: "duplicate-result" }] : [])];
+    const original = structuredClone(entries);
+    assert.deepEqual(prepareBranchEntries(entries).messages, [request.message]);
+    assert.deepEqual(entries, original);
+  });
+}
 
 test("branch preparation rejects an oversized newest message and treats non-positive budgets as empty", () => {
   const entry = messageEntry("large", { role: "user", content: "x".repeat(20_000), timestamp: 1 });

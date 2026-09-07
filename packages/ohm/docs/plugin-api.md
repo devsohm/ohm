@@ -830,6 +830,16 @@ ohm.registerTool(defineTool({
 
 `AgentToolResult` is `{ content, details, usage?, addedToolNames?, terminate? }`. Content is an array of text or image blocks. Keep content, update snapshots, details, and usage bounded and serializable. `onUpdate` reports a partial result; the terminal result remains authoritative.
 
+Registration validates execution and rendering callbacks before publishing a
+tool. A rejected replacement leaves the prior registration and its disposal
+handle intact. Optional callbacks may be omitted or `undefined`.
+
+Reconciliation callbacks should honor their supplied `AbortSignal`. Caller
+cancellation, session abort and close stop awaiting recovery and ignore its late
+result. They cannot forcibly stop trusted JavaScript or an external effect. An
+unfinished reconciliation remains uncertain in the journal and blocks new work
+until explicitly resolved; it is not automatically repeated.
+
 Throw from `execute` to mark a tool call as failed. Returning text that looks
 like an error is still a successful result. Tool calls run in source-ordered,
 resource-compatible waves. Read claims may overlap; a write claim conflicts
@@ -880,6 +890,14 @@ Discovered relative paths resolve from the package resource root and remain subj
 | `session_shutdown` | `reason: "quit" \| "refresh" \| "new" \| "resume" \| "fork"`, `targetSessionFile?` | none |
 | `session_before_tree` | `preparation`, `signal` | `{ cancel?, summary?, customInstructions?, replaceInstructions?, label? }` |
 | `session_tree` | `newLeafId`, `oldLeafId`, `summaryEntry?`, `fromExtension?` | none |
+
+Fork, tree, and compaction event entry IDs use the same public projection as
+`ctx.sessionManager`, including `firstKeptEntryId` in compaction overrides and
+entry references such as summary `fromId` and label `targetId`. Pass these IDs
+unchanged to plugin fork, navigation, and label operations; tool batches can
+expose multiple public entries for one journal record. Direct SDK session
+methods and lifecycle callbacks retain canonical journal IDs. Message and
+provider IDs are separate from session-entry IDs.
 
 Compaction preparation contains `firstKeptEntryId`, `messagesToSummarize`, `turnPrefixMessages`, `isSplitTurn`, `tokensBefore`, optional `previousSummary`, file-operation sets, and `{ enabled, reserveTokens, recentTokens, maxInputTokens }`. The last value is the effective input ceiling for that exact plan. A supplied complete compaction result contains `summary`, `firstKeptEntryId`, `tokensBefore`, and optional `usage` and `details`. After applying the summary and retained boundary, the host computes the authoritative `estimatedTokensAfter` output used by events, statistics, and the returned result.
 

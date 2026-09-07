@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+### Breaking
+
+- Live session databases with multiple hard links are rejected, including
+  read-only opens. Use canonical paths or symlinks to access one session, and
+  supported copy/export operations for independent sessions. This preserves
+  single-writer ownership across data directories.
+
+### Fixed
+
+- Compaction attributes repeated tool-call IDs to their own occurrences, keeps
+  valid call/result pairs, and includes opaque signatures in retained-byte limits.
+- Plugin refresh keeps a published generation when retired cleanup fails.
+  Trust-resolution failures close unpublished hosts; self-removing listeners no
+  longer skip later hooks. Editor and presentation cleanup releases every owner
+  even when a callback throws.
+- Git plugin installs check out the default branch, tags, and commit IDs.
+  Failed publication restores the previous checkout or preserves its recoverable
+  backup if restoration also fails.
+- Provider replacement cannot publish a retired catalog. Caller-owned model
+  collections do not acquire ignored credential storage. OAuth cancellation
+  settles manual input waits and respects explicit device denial or expiry.
+- Standalone provider history preserves opaque reasoning and signatures only
+  for the matching model. Grammar tools retain their declared argument property,
+  Unicode fragments, result type, and forced-choice wire format.
+- Configured bearer-only Gemini requests reach the SDK transport without sending
+  a fabricated API key. Disabling Kimi session caching also removes its body key.
+- HTTP and binary-stream cleanup releases response ownership without waiting on
+  uncooperative cancellation. Redirects apply the target protocol's proxy policy.
+- Autocomplete preserves command and prose prefixes, cancels stale work after
+  cursor movement, and keeps fragmented grapheme insertion intact. Pasted mouse
+  sequences remain text; unmatched Markdown delimiters avoid repeated scans.
+- Process input closure drains accepted writes. Shared abort signals retain one
+  listener, and shell capture bounds pending output without splitting Unicode.
+- Skill discovery bounds deep directory walks; truncated instruction reads avoid
+  repeated decoding. Image resizing stops encoding once a preferred output fits.
+- Public clipboard copying shares native helper cleanup and honors its supplied
+  environment while preserving the bounded terminal fallback.
+- Tree navigation honors cancellation before committing a branch change.
+  Cancelled recovery leaves uncertain effects unresolved; late reconciliation
+  results cannot overwrite subsequent manual resolution.
+- Public context entry IDs remain consistent with history pages and branches.
+  Compatibility context projection and deferred model selection avoid repeated
+  history scans.
+- Plugin fork/navigation, labels, lifecycle entry references and RPC fork
+  selections resolve projected entry IDs without confusing them with colliding
+  journal IDs. Compaction events identify their committed entries and public
+  retained boundaries. Malformed optional custom message metadata remains
+  readable as raw stored content.
+- Plugin registration validates callbacks before publication. Cancelled facet
+  setup releases returned cleanup exactly once, and cleanup failures remain
+  visible even when a plugin throws `undefined`.
+- Individual facet disposal aborts pending setup and shares cleanup completion.
+  Worker activation survives registration removal, synchronous tool cleanup has
+  one owner, and throwing renderer disposal does not leak its replacement.
+  Already-aborted callback waits still observe rejected work.
+- SDK startup rejects when a plugin requests shutdown. Session replacement works
+  without plugins and restores the selected session's workspace consistently.
+- Installed and embedded RPC hosts process startup dialog responses and settle
+  dialogs on input closure. Clean EOF gives queued UI output a bounded drain
+  before closing the bridge. Both JSON hosts share compact, bounded output with
+  consistent header and plugin-error ordering.
+- Proxy fetch composition no longer recursively re-enters newer wrappers.
+  Authenticated requests preserve caller cancellation, and failed response hooks
+  release response bodies without masking the original error.
+- Standalone HTTP JSON reads release reader locks, honor cancellation and reject
+  oversized successful bodies without awaiting uncooperative stream cleanup.
+- Streaming line readers retain transport failures and release their readers on
+  early return. Fragmented lines avoid rescanning retained text, and split CRLF
+  delimiters do not count against content limits. WebSocket receive limits cover
+  pending binary decoding, and closed streams discard late decoding results.
+  Cloud/OAuth body reads honor timeout and cancellation even with
+  custom fetch streams. Concurrent lazy stream reads share one source iterator.
+- Typed RPC client methods reject negative server responses consistently,
+  including prompt submission and settings changes.
+- Writes to missing files serialize across symlinked parent paths, including
+  while an earlier write creates the target.
+- HTML tool rendering distinguishes repeated provider call IDs across turns and
+  branches without changing the embedded journal or renderer call IDs.
+- Ordinary terminal input and Alt text avoid repeated whole-suffix traversal
+  while preserving grapheme and control framing. Restarted terminals discard
+  prior partial input and release input ownership after an output-write failure.
+  Late custom components leave theme tracking, and abort callback failures stop
+  loader timers.
+- Session writer locks canonicalize symlinks across profiles. Staged imports
+  synchronize publication and alias removal, with recoverable rollback on failure.
+- Standalone terminal rendering places the hardware cursor at the editor marker
+  without corrupting subsequent redraws, scrolling, or shutdown output.
+
 ## [0.2.0] - 2026-09-06
 
 ### Breaking

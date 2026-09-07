@@ -184,6 +184,75 @@ test("file mutation tools commit atomically and settle success at the commit poi
   assert.equal(await readFile(join(root, "target.txt"), "utf8"), "after\n");
 });
 
+test("settled file mutations release their path queue entries", async (t) => {
+  const root = await temp(t, "ohm-agent-mutation-release-");
+  const path = join(root, "target.txt");
+  const originalSet = Map.prototype.set;
+  let retained: (() => boolean) | undefined;
+  const observer = t.mock.method(Map.prototype, "set", function<Key, Value>(this: Map<Key, Value>, key: Key, value: Value) {
+    if (key === path) retained = () => this.has(key);
+    return originalSet.call(this, key, value);
+  });
+  try {
+    await createWriteTool().execute("write", { path, content: "value" }, undefined, undefined, { env: new NodeExecutionEnv({ cwd: root }) });
+    assert.ok(retained, "the fixture observed its mutation queue owner");
+    assert.equal(retained(), false, "settled mutation paths must not remain retained");
+  } finally {
+    observer.mock.restore();
+  }
+});
+
+test("same-file relative aliases serialize exact edits", async (t) => {
+  const root = await temp(t, "ohm-agent-mutation-alias-");
+  const base = new NodeExecutionEnv({ cwd: root });
+  await writeFile(join(root, "target.txt"), "first second");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let reads = 0;
+  const env = fixtureExecutionEnv(root, {
+    async readTextFile(path, signal, maxBytes) {
+      reads += 1;
+      const firstRead = reads === 1;
+      const value = await base.readTextFile(path, signal, maxBytes);
+      if (firstRead) { entered(); await gate; }
+      return value;
+    },
+  });
+  const edit = createEditTool();
+  const first = edit.execute("first", { path: "target.txt", edits: [{ oldText: "first", newText: "FIRST" }] }, undefined, undefined, { env });
+  const firstSettled = Promise.allSettled([first]);
+  await started;
+  const second = edit.execute("second", { path: "./target.txt", edits: [{ oldText: "second", newText: "SECOND" }] }, undefined, undefined, { env });
+  const secondSettled = Promise.allSettled([second]);
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reads, 1, "the alias must wait before reading the same file");
+  } finally {
+    release();
+    await Promise.all([firstSettled, secondSettled]);
+  }
+  await Promise.all([first, second]);
+  assert.equal(await readFile(join(root, "target.txt"), "utf8"), "FIRST SECOND");
+});
+
+test("prepared bash commands honor their selected working directory", async (t) => {
+  const root = await temp(t, "ohm-agent-prepared-cwd-");
+  const selected = join(root, "selected");
+  let observed: ShellExecOptions | undefined;
+  const env = fixtureExecutionEnv(root, {
+    async exec(_command, options) {
+      observed = options;
+      return { ok: true, value: { stdout: "", stderr: "", exitCode: 0 } };
+    },
+  });
+  await createBashTool({ prepare(execution) { execution.cwd = selected; } }).execute(
+    "prepared", { command: "fixture" }, undefined, undefined, { env },
+  );
+  assert.equal(observed?.cwd, selected);
+});
+
 test("edit tool rejects a source above its bounded read limit", async (t) => {
   const root = await temp(t, "ohm-agent-edit-bound-");
   const path = join(root, "large.txt");
@@ -234,6 +303,54 @@ test("shell capture preserves a bounded tail and spills complete output", async 
   await rm(dirname(captured.value.fullOutputPath!), { recursive: true, force: true });
 });
 
+test("shell capture spills during execution without repeatedly joining full history", async (t) => {
+  const root = await temp(t, "ohm-agent-shell-live-spool-");
+  const base = new NodeExecutionEnv({ cwd: root });
+  const chunk = `capture-history:${"x".repeat(1007)}\n`;
+  let joinedChunks = 0;
+  let writeStarted = false;
+  let spoolStartedBeforeExit = false;
+  const originalJoin = Array.prototype.join;
+  const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, "join");
+  assert.ok(descriptor);
+  Object.defineProperty(Array.prototype, "join", {
+    ...descriptor,
+    value: function<Value>(this: Value[], separator?: string) {
+      if (this[0] === chunk) joinedChunks += this.length;
+      return originalJoin.call(this, separator);
+    },
+  });
+  const env = fixtureExecutionEnv(root, {
+    async exec(_command, options = {}) {
+      for (let index = 0; index < 128; index += 1) {
+        options.onStdout?.(chunk);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      spoolStartedBeforeExit = writeStarted;
+      return { ok: true, value: { stdout: "", stderr: "", exitCode: 0 } };
+    },
+    async createTempFile() {
+      return { ok: true, value: { path: join(root, "capture.log") } };
+    },
+    async writeFile(path, content, signal) {
+      writeStarted = true;
+      return await base.writeFile(path, content, signal);
+    },
+  });
+  let captured: Awaited<ReturnType<typeof executeShellWithCapture>>;
+  try {
+    captured = await executeShellWithCapture(env, "fixture");
+  } finally {
+    Object.defineProperty(Array.prototype, "join", descriptor);
+  }
+  assert.equal(captured.ok, true);
+  if (!captured.ok) return;
+  assert.equal(await readFile(captured.value.fullOutputPath!, "utf8"), chunk.repeat(128));
+  assert.equal(captured.value.truncation.totalBytes, Buffer.byteLength(chunk) * 128);
+  assert.equal(spoolStartedBeforeExit, true, "overflow must spill before the command exits");
+  assert.ok(joinedChunks <= 128 * 4, `full-history joining revisited ${joinedChunks} chunks`);
+});
+
 test("shell capture serializes delayed spool creation and preserves every chunk once", async (t) => {
   const root = await temp(t, "ohm-agent-shell-spool-race-");
   const base = new NodeExecutionEnv({ cwd: root });
@@ -260,6 +377,56 @@ test("shell capture serializes delayed spool creation and preserves every chunk 
   assert.equal(await readFile(captured.value.fullOutputPath!, "utf8"), chunks.join(""));
   await rm(dirname(captured.value.fullOutputPath!), { recursive: true, force: true });
 });
+
+test("shell capture reports backlog overflow and drains every accepted chunk", async (t) => {
+  const root = await temp(t, "ohm-agent-shell-backlog-");
+  const base = new NodeExecutionEnv({ cwd: root });
+  const chunk = "x".repeat(1024 * 1024);
+  let aborted = false;
+  const env = fixtureExecutionEnv(root, {
+    async exec(_command, options = {}) {
+      for (let index = 0; index < 9; index += 1) options.onStdout?.(chunk);
+      aborted = options.abortSignal?.aborted ?? false;
+      return { ok: true, value: { stdout: "", stderr: "", exitCode: 0 } };
+    },
+    async createTempFile() {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return { ok: true, value: { path: join(root, "capture.log") } };
+    },
+    async writeFile(path, content, signal) { return await base.writeFile(path, content, signal); },
+  });
+  const captured = await executeShellWithCapture(env, "fixture", { returnExecutionErrors: true });
+  assert.equal(aborted, true);
+  assert.equal(captured.ok, true);
+  if (!captured.ok) return;
+  assert.equal(captured.value.executionError?.code, "output_limit");
+  assert.match(captured.value.executionError?.message ?? "", /further output was not captured/u);
+  assert.equal(captured.value.truncation.totalBytes, 8 * 1024 * 1024);
+  assert.equal(await readFile(captured.value.fullOutputPath!, "utf8"), chunk.repeat(8));
+});
+
+for (const chunks of [
+  ["x".repeat(60 * 1024), "\ud83d", "\ude00tail\n"],
+  ["line\n".repeat(3_000), "tail\n"],
+  ["x".repeat(60 * 1024), "\ud83d"],
+]) {
+  test(`incremental shell capture matches complete-tail projection for ${chunks.length} chunks ending ${JSON.stringify(chunks.at(-1))}`, async (t) => {
+    const root = await temp(t, "ohm-agent-shell-tail-parity-");
+    const env = fixtureExecutionEnv(root, {
+      async exec(_command, options = {}) {
+        for (const chunk of chunks) options.onStdout?.(chunk);
+        return { ok: true, value: { stdout: "", stderr: "", exitCode: 0 } };
+      },
+      async createTempFile() { return { ok: true, value: { path: join(root, "capture.log") } }; },
+    });
+    const complete = chunks.join("");
+    const captured = await executeShellWithCapture(env, "fixture");
+    assert.equal(captured.ok, true);
+    if (!captured.ok) return;
+    assert.deepEqual(captured.value.truncation, truncateTail(complete, { maxBytes: 50 * 1024, maxLines: 2_000 }));
+    assert.deepEqual(await readFile(captured.value.fullOutputPath!), Buffer.from(complete, "utf8"));
+  });
+}
 
 test("shell failures can retain captured progress and complete spooled output", async (t) => {
   const root = await temp(t, "ohm-agent-shell-failure-output-");
@@ -334,7 +501,8 @@ test("shell capture does not leak capture-only options to the execution backend"
   });
 
   assert.equal(captured.ok, true);
-  assert.deepEqual(Object.keys(observed ?? {}).sort(), ["onStderr", "onStdout"]);
+  assert.deepEqual(Object.keys(observed ?? {}).sort(), ["abortSignal", "onStderr", "onStdout"]);
+  assert.equal(observed?.abortSignal?.aborted, false);
 });
 
 test("cancelled shell capture drains spooled output without reusing the command signal", async (t) => {

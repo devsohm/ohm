@@ -54,6 +54,7 @@ export async function oauthTokenRequest(
   options: OAuthTokenRequestOptions = {},
 ): Promise<OAuthTokenResponse> {
   validateOAuthEndpoint(url);
+  options.signal?.throwIfAborted();
   const headers = {
     accept: "application/json",
     "content-type": "application/x-www-form-urlencoded",
@@ -66,7 +67,7 @@ export async function oauthTokenRequest(
   };
   if (options.signal !== undefined) request.signal = options.signal;
   const response = await (options.fetch ?? globalThis.fetch)(url, request);
-  const text = await boundedText(response, TOKEN_RESPONSE_LIMIT);
+  const text = await boundedText(response, TOKEN_RESPONSE_LIMIT, options.signal);
   let parsed: JsonValue | undefined;
   try { parsed = JSON.parse(text); } catch { parsed = undefined; }
   if (!response.ok) throw new Error(oauthError(parsed, "OAuth token request failed with HTTP " + response.status));
@@ -84,20 +85,36 @@ function validateOAuthEndpoint(value: string): void {
   }
 }
 
-async function boundedText(response: Response, limit: number): Promise<string> {
-  if (!response.body) return "";
+async function boundedText(response: Response, limit: number, signal?: AbortSignal): Promise<string> {
+  if (!response.body) {
+    signal?.throwIfAborted();
+    return "";
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      throw new Error("OAuth response exceeded 64 KiB");
+  let finished = false;
+  let cancelled = false;
+  const cancel = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    void reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    signal?.throwIfAborted();
+    while (true) {
+      const { value, done } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) { finished = true; break; }
+      total += value.byteLength;
+      if (total > limit) throw new Error("OAuth response exceeded 64 KiB");
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    if (!finished) cancel();
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -320,12 +337,13 @@ export function deviceOAuthMethod(config: DeviceOAuthConfig): OAuthAuth {
     name: config.name,
     async login(interaction) {
       const fetcher = config.fetch ?? globalThis.fetch;
+      interaction.signal?.throwIfAborted();
       const response = await fetcher(config.deviceUrl, formRequest(
         { client_id: config.clientId, scope: config.scopes.join(" ") },
         config.headers,
         interaction.signal,
       ));
-      const parsed = await boundedText(response, TOKEN_RESPONSE_LIMIT);
+      const parsed = await boundedText(response, TOKEN_RESPONSE_LIMIT, interaction.signal);
       let deviceValue: JsonValue;
       try { deviceValue = JSON.parse(parsed); } catch { throw new Error("OAuth device authorization returned invalid JSON"); }
       const device = parseDeviceAuthorization(deviceValue);
@@ -354,11 +372,11 @@ export function deviceOAuthMethod(config: DeviceOAuthConfig): OAuthAuth {
           config.headers,
           interaction.signal,
         ));
-        const tokenText = await boundedText(tokenResponse, TOKEN_RESPONSE_LIMIT);
+        const tokenText = await boundedText(tokenResponse, TOKEN_RESPONSE_LIMIT, interaction.signal);
         let tokenValue: JsonValue;
         try { tokenValue = JSON.parse(tokenText); } catch { throw new Error("OAuth device token response returned invalid JSON"); }
         const token = parseOAuthTokenResponse(tokenValue);
-        if (token !== undefined) return tokenCredential(token, undefined, config.now);
+        if (token !== undefined && tokenResponse.ok) return tokenCredential(token, undefined, config.now);
         const tokenError = isJsonObject(tokenValue) ? jsonString(tokenValue.error) : undefined;
         if (tokenError === "slow_down") intervalMs += 5000;
         else if (tokenError !== "authorization_pending") throw new Error(oauthError(tokenValue, "OAuth device flow failed"));
@@ -387,11 +405,15 @@ export function deviceOAuthMethod(config: DeviceOAuthConfig): OAuthAuth {
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    const abort = () => {
       clearTimeout(timer);
-      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-    }, { once: true });
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
   });
 }
 

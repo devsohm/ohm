@@ -906,6 +906,117 @@ test("cancelling proxy iteration cancels the active response reader", async (t) 
   await cancellation;
 });
 
+test("returning a proxy before fetch settles closes its owned result and ignores late output", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let release!: () => void;
+  const fetchGate = new Promise<void>((resolve) => { release = resolve; });
+  let requestSignal: AbortSignal | null | undefined;
+  globalThis.fetch = async (_input, init) => {
+    requestSignal = init?.signal;
+    await fetchGate;
+    return new Response(`data: ${JSON.stringify({ type: "done", reason: "stop", usage: usage(1, 1) })}\n`);
+  };
+  const proxy = streamProxy(model, { messages: [] }, { authToken: "token", proxyUrl: "https://proxy.invalid" });
+  const iterator = proxy[Symbol.asyncIterator]();
+  let resultSettled = false;
+  const result = proxy.result().then((message) => { resultSettled = true; return message; });
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await iterator.return?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(resultSettled, true, "iterator return must not wait for an uncooperative fetch");
+    assert.ok(requestSignal);
+    assert.equal(requestSignal.aborted, true);
+    assert.equal((await result).stopReason, "aborted");
+  } finally {
+    release();
+    await result;
+  }
+  assert.equal((await iterator.next()).done, true, "late fetch output must not reopen the returned iterator");
+});
+
+test("returning a proxy detaches an uncooperative reader cancellation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let release!: () => void;
+  const cancelGate = new Promise<void>((resolve) => { release = resolve; });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n`)); },
+    async cancel() { await cancelGate; },
+  });
+  globalThis.fetch = async () => new Response(body);
+  const proxy = streamProxy(model, { messages: [] }, { authToken: "token", proxyUrl: "https://proxy.invalid" });
+  const iterator = proxy[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.type, "start");
+  let returned = false;
+  const returning = iterator.return?.().then(() => { returned = true; });
+  let resultSettled = false;
+  const result = proxy.result().then((message) => { resultSettled = true; return message; });
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(returned, true, "source cancellation cannot hold iterator return open");
+    assert.equal(resultSettled, true);
+    assert.equal((await result).stopReason, "aborted");
+    assert.equal(body.locked, false);
+  } finally {
+    release();
+    await returning;
+    await result;
+  }
+});
+
+test("returning a proxy cancels and releases an uncooperative HTTP error body", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let release!: () => void;
+  const cancelGate = new Promise<void>((resolve) => { release = resolve; });
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { source = controller; },
+    async cancel() { cancelled = true; await cancelGate; },
+  });
+  globalThis.fetch = async () => new Response(body, { status: 401 });
+  const proxy = streamProxy(model, { messages: [] }, { authToken: "token", proxyUrl: "https://proxy.invalid" });
+  const iterator = proxy[Symbol.asyncIterator]();
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(body.locked, true, "the failed response reader is active before cancellation");
+    await iterator.return?.();
+    assert.equal((await proxy.result()).stopReason, "aborted");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(cancelled, true);
+    assert.equal(body.locked, false);
+  } finally {
+    release();
+    if (!cancelled) source.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+});
+
+for (const terminal of ["success", "failure"] as const) {
+  test(`proxy releases its response reader after ${terminal}`, async (t) => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(terminal === "success"
+          ? { type: "done", reason: "stop", usage: usage(1, 1) }
+          : { type: "not-an-event" })}\n`));
+        controller.close();
+      },
+    });
+    globalThis.fetch = async () => new Response(body);
+    const proxy = streamProxy(model, { messages: [] }, { authToken: "token", proxyUrl: "https://proxy.invalid" });
+    const result = await proxy.result();
+    assert.equal(result.stopReason, terminal === "success" ? "stop" : "error");
+    if (terminal === "failure") assert.match(result.errorMessage ?? "", /Unsupported proxy event type: not-an-event/u);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(body.locked, false);
+  });
+}
+
 test("proxy cooperatively drains one-chunk event bursts without overflowing the consumer queue", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });

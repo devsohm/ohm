@@ -15,11 +15,14 @@ import { loadDirectPlugins } from "../../src/plugins/runtime.js";
 import {
   canonicalAgentMessages,
   canonicalMessage,
+  canonicalSessionEntryId,
   canonicalUsage,
   extensionAssistantEventFromMessage,
   extensionAssistantKernelStreamMessage,
   extensionContextMessages,
   extensionMessage,
+  extensionSessionEntries,
+  extensionSessionEntriesForCanonicalEntry,
   pluginSessionManager,
   extensionToolResult,
   extensionUsage,
@@ -29,6 +32,7 @@ import {
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { AgentSession, type AgentSessionEvent } from "../../src/service/agent-session.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
+import type { SessionEntry as CanonicalSessionEntry } from "../../src/storage/types.js";
 
 const SESSION_PAGE_VALUE = Type.Object({
   entries: Type.Array(Type.Object({
@@ -525,8 +529,14 @@ test("assistant diagnostics are redacted before public extension projection", ()
 
 test("signed assistant content survives JSONL persistence and public session projection", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-signed-session-"));
-  context.after(async () => await rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "signed" });
+  let manager: SessionManager | undefined;
+  let reopened: SessionManager | undefined;
+  context.after(async () => {
+    reopened?.closeV4Store();
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, join(root, "sessions"), { id: "signed" });
   manager.appendMessage({
     id: "signed-assistant",
     role: "assistant",
@@ -549,8 +559,7 @@ test("signed assistant content survives JSONL persistence and public session pro
   });
 
   manager.closeV4Store();
-  const reopened = SessionManager.open(manager.getSessionFile()!);
-  context.after(() => reopened.closeV4Store());
+  reopened = SessionManager.open(manager.getSessionFile()!);
   const entry = pluginSessionManager(reopened).getEntries()[0];
   assert.equal(entry?.type, "message");
   assert.deepEqual(entry?.type === "message" ? entry.message : undefined, {
@@ -577,8 +586,14 @@ test("signed assistant content survives JSONL persistence and public session pro
 
 test("extension provenance survives durable custom entry and message replay", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-extension-provenance-"));
-  context.after(async () => await rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "extension-provenance" });
+  let manager: SessionManager | undefined;
+  let reopened: SessionManager | undefined;
+  context.after(async () => {
+    reopened?.closeV4Store();
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, join(root, "sessions"), { id: "extension-provenance" });
   const provenance: PluginSessionProvenance = {
     schemaVersion: 1,
     extensionId: "review-notes",
@@ -599,8 +614,7 @@ test("extension provenance survives durable custom entry and message replay", as
   ]);
 
   manager.closeV4Store();
-  const reopened = SessionManager.open(manager.getSessionFile()!);
-  context.after(() => reopened.closeV4Store());
+  reopened = SessionManager.open(manager.getSessionFile()!);
   const entries = pluginSessionManager(reopened).getEntries();
   assert.deepEqual(entries.slice(0, 2).map((entry) =>
     entry.type === "custom" || entry.type === "custom_message" ? entry.provenance : undefined), [
@@ -702,6 +716,66 @@ test("extension session facade projects a canonical tool batch as individual pub
   assert.deepEqual(leaf?.type === "message" ? leaf.message : undefined, publicMessage);
 });
 
+for (const storage of ["memory", "saved", "compatibility"] as const) {
+  for (const omitted of ["branch", "compaction"] as const) {
+    test(`context projection preserves global entry identities after ${omitted} in ${storage} sessions`, async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "ohm-context-identities-"));
+      let manager: SessionManager | undefined;
+      t.after(async () => {
+        manager?.closeV4Store();
+        await rm(directory, { recursive: true, force: true });
+      });
+      manager = storage === "saved"
+        ? SessionManager.create(directory, directory, { id: "context-identities" })
+        : SessionManager.inMemory(directory, { id: "context-identities" });
+      const createdAt = "2026-07-29T12:00:00.000Z";
+      const root = manager.appendMessage({
+        id: "root-message", role: "user", content: [{ type: "text", text: "root" }], createdAt,
+      }, { nodeId: "root" });
+      manager.appendMessage({ id: "tool-message", role: "tool", content: [
+        { type: "tool_result", callId: "one", name: "one", content: "one", isError: false },
+        { type: "tool_result", callId: "two", name: "two", content: "two", isError: false },
+      ], createdAt }, { nodeId: "tool" });
+      if (omitted === "branch") manager.branch(root);
+      const retained = manager.appendMessage({
+        id: "retained-message", role: "user", content: [{ type: "text", text: "retained" }], createdAt,
+      }, { nodeId: "tool~1" });
+      const compaction = omitted === "compaction" ? manager.appendCompaction("summary", retained, 100) : undefined;
+      if (storage === "saved") {
+        const file = manager.getSessionFile()!;
+        manager.closeV4Store();
+        manager = SessionManager.open(file);
+      }
+      if (storage === "compatibility") {
+        // Older managers expose full entries but neither metadata paging nor revisions.
+        Object.defineProperty(manager, "getEntryProjectionMetadataPage", { value: undefined });
+        Object.defineProperty(manager, "getTreeRevision", { value: undefined });
+      }
+      const facade = pluginSessionManager(manager);
+      const fullReads = t.mock.method(manager, "getEntries");
+      const ordinalReads = t.mock.method(manager, "getEntrySequence");
+      const context = facade.buildContextEntries();
+      assert.equal(fullReads.mock.callCount(), storage === "compatibility" ? 1 : 0,
+        "context identity mapping must build the compatibility projection at most once");
+      assert.equal(ordinalReads.mock.callCount(), 0, "context identity mapping must not build the cold history index");
+      fullReads.mock.restore();
+      ordinalReads.mock.restore();
+      assert.deepEqual(context.map((entry) => entry.id), compaction === undefined
+        ? ["root", "tool~1~0"]
+        : [compaction, "tool~1~0"]);
+      assert.equal(facade.getLeafId(), compaction ?? "tool~1~0");
+      const branch = new Map(facade.getBranch().map((entry) => [entry.id, entry]));
+      for (const entry of context) {
+        assert.deepEqual(facade.getEntry(entry.id), entry);
+        assert.deepEqual(branch.get(entry.id), entry);
+      }
+      const expected = structuredClone(context);
+      context[0]!.parentId = "mutated caller result";
+      assert.deepEqual(facade.buildContextEntries(), expected);
+    });
+  }
+}
+
 test("extension session pages bound payload materialization across projection spans and live appends", () => {
   const manager = SessionManager.inMemory("/tmp", { id: "session-contract-pages" });
   const root = manager.appendMessage({
@@ -732,7 +806,7 @@ test("extension session pages bound payload materialization across projection sp
   }
 
   const nativeGetEntries = manager.getEntries.bind(manager);
-  const nativeGetEntriesPage = manager.getEntriesPage.bind(manager);
+  const nativeGetEntry = manager.getEntry.bind(manager);
   let fullMaterializations = 0;
   let pageMaterializations = 0;
   manager.getEntries = () => {
@@ -740,14 +814,17 @@ test("extension session pages bound payload materialization across projection sp
     fullMaterializations += entries.length;
     return entries;
   };
-  manager.getEntriesPage = (offset, limit) => {
-    const entries = nativeGetEntriesPage(offset, limit);
-    pageMaterializations += entries.length;
-    return entries;
+  manager.getEntry = (id) => {
+    const entry = nativeGetEntry(id);
+    if (entry !== undefined) pageMaterializations += 1;
+    return entry;
   };
 
   const session = pluginSessionManager(manager);
   if (!Value.Check(PAGED_SESSION_VALUE, session)) assert.fail("Expected the bounded session-page interface");
+  assert.equal(canonicalSessionEntryId(manager, `${tools}~1`), tools);
+  assert.equal(canonicalSessionEntryId(manager, "missing"), undefined);
+  assert.equal(fullMaterializations, 0, "public mutation IDs must resolve without full payload projection");
   const coldTail = session.getEntriesPage(131, 1);
   assert.equal(coldTail.entries.length, 1);
   assert.equal(coldTail.totalEntries, 132);
@@ -848,6 +925,65 @@ test("extension session pages preserve projected ID collisions and cursor order"
   }
   assert.deepEqual(replayed, expected);
 });
+
+for (const [kind, field] of [
+  ["compaction", "firstKeptEntryId"],
+  ["branch_summary", "fromId"],
+  ["label", "targetId"],
+] as const) {
+  test(`plugin session ${kind}.${field} references preserve projected ID collisions`, (t) => {
+    const manager = SessionManager.inMemory("/tmp", { id: `session-reference-${kind}` });
+    t.after(() => manager.closeV4Store());
+    const createdAt = "2026-07-21T00:00:00.000Z";
+    manager.appendMessage({
+      id: "tool-message", role: "tool", createdAt,
+      content: [
+        { type: "tool_result", callId: "one", name: "one", content: "one", isError: false },
+        { type: "tool_result", callId: "two", name: "two", content: "two", isError: false },
+      ],
+    }, { nodeId: "tool" });
+    manager.appendMessage({
+      id: "user-message", role: "user", createdAt,
+      content: [{ type: "text", text: "referenced user" }],
+    }, { nodeId: "tool~1" });
+    const reference: CanonicalSessionEntry = kind === "compaction"
+      ? manager.getEntry(manager.appendCompaction("summary", "tool~1", 100))!
+      : kind === "branch_summary"
+        ? manager.getEntry(manager.branchWithSummary("tool~1", "summary"))!
+        : { type: "label", id: "label", parentId: "tool~1", timestamp: createdAt, targetId: "tool~1", label: "selected" };
+    const readStoredEntries = manager.getEntries.bind(manager);
+    const storedBefore = readStoredEntries();
+    const nativeEntries = structuredClone(storedBefore);
+    if (kind === "label") {
+      // V4 labels are state; older managers can expose legacy label entries.
+      nativeEntries.push(reference);
+      t.mock.method(manager, "getEntries", () => structuredClone(nativeEntries));
+      t.mock.method(manager, "getEntry", (id: string) => structuredClone(nativeEntries.find((entry) => entry.id === id)));
+      t.mock.method(manager, "buildContextEntries", () => structuredClone(nativeEntries));
+      Object.defineProperty(manager, "getEntryProjectionMetadataPage", { value: undefined });
+      Object.defineProperty(manager, "getTreeRevision", { value: undefined });
+    }
+    const nativeBefore = structuredClone(nativeEntries);
+    const facade = pluginSessionManager(manager);
+    const expected = { ...reference, parentId: "tool~1~0", [field]: "tool~1~0" };
+    const pages = Array.from({ length: 4 }, (_, offset) => facade.getEntriesPage(offset, 1).entries).flat();
+    for (const [projection, entries] of [
+      ["pure", extensionSessionEntries(nativeEntries)],
+      ["full", facade.getEntries()],
+      ["pages", pages],
+      ["single", [facade.getEntry(reference.id)]],
+      ["context", facade.buildContextEntries()],
+      ["committed", extensionSessionEntriesForCanonicalEntry(manager, reference)],
+    ] as const) {
+      assert.deepEqual(entries.find((entry) => entry?.id === reference.id), expected, projection);
+    }
+    assert.equal(canonicalSessionEntryId(manager, "tool~1~0"), "tool~1");
+    assert.equal(sessionMessage(facade.getEntry("tool~1~0"))?.role, "user");
+    assert.equal(sessionMessage(facade.getEntry("tool~1"))?.role, "toolResult");
+    assert.deepEqual(nativeEntries, nativeBefore, "public projection must not rewrite canonical references");
+    assert.deepEqual(readStoredEntries(), storedBefore, "public reads must not change native storage");
+  });
+}
 
 test("extension branch queries apply bounds and limits to projected entries", () => {
   const manager = SessionManager.inMemory("/tmp", { id: "extension-branch-queries" });

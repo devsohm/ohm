@@ -690,19 +690,6 @@ function boundedMarkdownToolDetailLines(
   if (complete.count <= maximum) {
     return { rows: complete.head.slice(0, complete.count), collapseChanges };
   }
-  const sourceBytes = Buffer.byteLength(detail.value, "utf8");
-  const smallEnough = sourceBytes + complete.count * selectedWidth <= maximum * selectedWidth;
-  if (smallEnough) {
-    const marker = truncateCells(`${ellipsis} ${complete.count - available} rows omitted`, selectedWidth, ellipsis);
-    return {
-      rows: [
-        ...complete.head.slice(0, headRows),
-        { text: marker, role: "muted", spans: [{ text: marker, role: "muted" }] },
-        ...(tailRows === 0 ? [] : complete.tail.slice(-tailRows)),
-      ],
-      collapseChanges,
-    };
-  }
   const head = render(byteTruncate(
     leadingPhysicalRows(detail.value, headRows),
     Math.max(1, selectedWidth * Math.max(1, headRows)),

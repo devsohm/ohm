@@ -1045,6 +1045,90 @@ test("native public providers execute through the internal run-loop boundary", a
   assert.equal(registry.find("native-provider", "native-model")?.api, "native-custom-api");
 });
 
+for (const [replacing, phase] of [[false, "catalog"], [true, "catalog"], [false, "auth"], [true, "auth"]] as const) {
+  test(`failed public provider registration preserves ${replacing ? "the existing provider" : "an empty registry"} after ${phase} validation`, () => {
+    const internal = new ModelRegistry(createModels());
+    const registry = pluginModelRegistry(internal);
+    const model = publicModel("native-custom-api", "atomic-provider", "atomic-model");
+    const original: Provider = {
+      id: model.provider,
+      name: "Original provider",
+      auth: { apiKey: { name: "Test key", resolve: async () => ({ auth: { apiKey: "test-key" } }) } },
+      getModels: () => [model],
+      stream: () => responseStream(model, "original"),
+      streamSimple: () => responseStream(model, "original"),
+    };
+    if (replacing) registry.registerProvider(original);
+    const beforeInternal = internal.getProvider(model.provider);
+    const beforeNative = internal.getRegisteredNativeProvider(model.provider);
+    const beforeModels = registry.getAll();
+    const failure = new Error("candidate getModels failed");
+    const candidate: Provider = phase === "catalog"
+      ? { ...original, name: "Rejected provider", getModels() { throw failure; } }
+      : { ...original, name: "Rejected provider", auth: {} };
+    assert.throws(() => registry.registerProvider(candidate), (error) => phase === "catalog"
+      ? error === failure
+      : error instanceof Error && /must define an API-key or OAuth method/u.test(error.message));
+    assert.equal(internal.getRegisteredNativeProvider(model.provider), beforeNative);
+    assert.equal(registry.getRegisteredNativeProvider(model.provider), replacing ? original : undefined);
+    assert.equal(registry.getProvider(model.provider), replacing ? original : undefined);
+    assert.equal(internal.getProvider(model.provider), beforeInternal);
+    assert.deepEqual(registry.getAll(), beforeModels);
+  });
+}
+
+for (const { name, part, hidden } of [
+  { name: "sparse canonical parts", part: 7, hidden: false },
+  { name: "filtered provider thinking", part: 1, hidden: true },
+]) {
+  test(`converted public streams retain exactly one part lifecycle with ${name}`, async () => {
+    const models = createModels();
+    const model = {
+      id: "part-model", name: "Part model", api: "openai-chat-completions" as const,
+      provider: "part-provider", baseUrl: "https://example.test/v1", reasoning: true,
+      input: ["text" as const], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8_000, maxTokens: 1_000,
+    };
+    models.setProvider(createProvider({
+      id: model.provider,
+      auth: { apiKey: { name: "Test key", resolve: async () => ({ auth: { apiKey: "test-key" } }) } },
+      models: [model],
+      api: {
+        async *stream() {
+          yield { type: "response_start", model: model.id } as const;
+          if (hidden) {
+            yield { type: "reasoning_start", part: 0, visibility: "provider_trace" } as const;
+            yield { type: "reasoning_delta", part: 0, text: "private", visibility: "provider_trace" } as const;
+            yield { type: "reasoning_end", part: 0, text: "private", visibility: "provider_trace" } as const;
+          }
+          yield { type: "text_start", part } as const;
+          yield { type: "text_delta", part, text: "visible" } as const;
+          yield { type: "text_end", part, text: "visible" } as const;
+          yield {
+            type: "response_end", reason: "stop",
+            state: { kind: "chat_completions", assistantMessage: { role: "assistant", content: "visible" } },
+            content: [
+              ...(hidden ? [{ type: "thinking" as const, thinking: "private", visibility: "provider_trace" as const }] : []),
+              { type: "text", text: "visible" },
+            ],
+          } as const;
+        },
+      },
+    }));
+    const registry = pluginModelRegistry(new ModelRegistry(models));
+    const provider = registry.getProvider(model.provider);
+    assert.ok(provider);
+    const exposed = provider.getModels()[0];
+    assert.ok(exposed);
+    const stream = provider.streamSimple(exposed, { messages: [] });
+    const events: AssistantMessageEvent[] = [];
+    for await (const event of stream) events.push(event);
+    assert.deepEqual(events.map((event) => event.type), ["start", "text_start", "text_delta", "text_end", "done"]);
+    assert.deepEqual((await stream.result()).content, [{ type: "text", text: "visible" }]);
+    assert.equal(JSON.stringify(events).includes("private"), false);
+  });
+}
+
 test("extension model completion uses the active runtime credential and request preparation", async (context) => {
   const runtime = await ModelRuntime.create({
     models: createModels(),

@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@ohm/models";
 
-import { loadRuntime } from "../../src/cli/runtime.js";
+import { loadRuntime, type LoadedRuntime } from "../../src/cli/runtime.js";
 import { DefaultPackageManager } from "../../src/core/package-manager.js";
 import type { PluginAPI, SessionStartEvent } from "../../src/plugins/direct.js";
 import type {
@@ -13,9 +14,12 @@ import type {
   RuntimePluginListenerContext,
 } from "../../src/plugins/runtime.js";
 import { RpcPluginUiBridge } from "../../src/interfaces/rpc-plugin-ui.js";
+import { InteractiveMode } from "../../src/modes/interactive-mode.js";
 import { ProviderWireInterceptorRegistry } from "../../src/providers/wire.js";
 import { AgentSession, type PluginBindings } from "../../src/service/agent-session.js";
+import { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
+import { TuiController } from "../../src/tui/controller.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
 
 declare global {
@@ -28,6 +32,97 @@ function extensionUiContext() {
     "runtime-direct-test",
     new AbortController().signal,
   );
+}
+
+for (const modeName of ["default runtime", "public interactive"] as const) {
+  test(`${modeName} plugin commands preserve projected IDs and navigation signals`, async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "ohm-host-command-identity-"));
+    const manager = SessionManager.inMemory(root, { id: "host-command-identity" });
+    const createdAt = "2026-07-29T12:00:00.000Z";
+    manager.appendMessage({
+      id: "root-message", role: "user", content: [{ type: "text", text: "root" }], createdAt,
+    }, { nodeId: "root" });
+    manager.appendMessage({ id: "tool-message", role: "tool", content: [
+      { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+      { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+    ], createdAt }, { nodeId: "tool" });
+    manager.appendMessage({
+      id: "colliding-message", role: "user", content: [{ type: "text", text: "selected user" }], createdAt,
+    }, { nodeId: "tool~1" });
+    let runtime: LoadedRuntime | undefined;
+    let owner: AgentSessionRuntime | undefined;
+    let mode: InteractiveMode | undefined;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    context.after(async () => {
+      mode?.stop();
+      try {
+        await owner?.dispose();
+      } finally {
+        try { await runtime?.close(); }
+        finally {
+          manager.closeV4Store();
+          input.destroy();
+          output.destroy();
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    });
+    runtime = await loadRuntime({
+      workspace: root,
+      agentDirectory: join(root, "agent"),
+      sessionManager: manager,
+      credentialStore: new InMemoryCredentialStore(),
+      projectTrusted: false,
+      pluginCode: false,
+      pluginRuntime: true,
+      skills: false,
+      promptTemplates: false,
+      themes: false,
+      offline: true,
+    });
+    const session = runtime.session;
+    context.mock.method(session.modelRegistry, "refresh", async () => undefined);
+    const bindings = context.mock.method(runtime.runtimePlugins, "setDirectActionsHandler");
+    const forkTargets: string[] = [];
+    if (modeName === "public interactive") {
+      owner = new AgentSessionRuntime(session, { cwd: root, agentDir: join(root, "agent") },
+        async () => { throw new Error("Command adapter fixture must not replace its session"); });
+      const observeFork: AgentSessionRuntime["fork"] = async (entryId) => {
+        forkTargets.push(entryId);
+        return { cancelled: true };
+      };
+      context.mock.method(owner, "fork", observeFork);
+      const terminal = new TuiController({ input, output, mode: "accessible", handleSignals: false });
+      mode = new InteractiveMode(owner, { terminal });
+      await mode.init();
+    } else {
+      const observeBranch: AgentSession["createBranchedSession"] = (entryId) => {
+        forkTargets.push(entryId);
+        return undefined;
+      };
+      context.mock.method(session, "createBranchedSession", observeBranch);
+      await session.bindPlugins();
+    }
+    const actions = bindings.mock.calls.at(-1)?.arguments[0];
+    assert.ok(actions, "Host initialization must install its real plugin command adapter");
+    const selected = session.sessionManager.getEntry("tool~1~0");
+    assert.equal(selected?.type === "message" ? selected.message.role : undefined, "user");
+    const navigations: Array<{ target: string; signal: AbortSignal | undefined }> = [];
+    const observeNavigation: AgentSession["navigateTree"] = async (target, options = {}) => {
+      navigations.push({ target, signal: options.signal });
+      return { cancelled: true };
+    };
+    context.mock.method(session, "navigateTree", observeNavigation);
+    const signal = new AbortController().signal;
+    await actions.fork("tool~1~0", { position: "at" }, signal);
+    await actions.navigateTree("tool~1~0", {}, signal);
+    assert.deepEqual({ forkTargets, navigations }, {
+      forkTargets: ["tool~1"],
+      navigations: [{ target: "tool~1", signal }],
+    });
+    assert.equal(manager.getLeafId(), "tool~1", "Adapter observation must not mutate native history");
+  });
 }
 
 test("interactive startup can hydrate model state without waiting for live discovery", async (context) => {
@@ -378,10 +473,15 @@ test("persistent runtime refresh transfers ownership of the active session store
   await mkdir(workspace);
   const previousAgentDir = process.env.OHM_HOME;
   process.env.OHM_HOME = agentDir;
+  let ownedRuntime: LoadedRuntime | undefined;
   context.after(async () => {
-    if (previousAgentDir === undefined) delete process.env.OHM_HOME;
-    else process.env.OHM_HOME = previousAgentDir;
-    await rm(root, { recursive: true, force: true });
+    try {
+      await ownedRuntime?.close();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.OHM_HOME;
+      else process.env.OHM_HOME = previousAgentDir;
+    }
   });
 
   const runtime = await loadRuntime({
@@ -395,7 +495,7 @@ test("persistent runtime refresh transfers ownership of the active session store
     themes: false,
     offline: true,
   });
-  context.after(async () => await runtime.close().catch(() => undefined));
+  ownedRuntime = runtime;
   const sessionId = runtime.session.sessionId;
   const sessionFile = runtime.sessionManager.getSessionFile();
   runtime.session.setModelScope(["fixture/one"]);
@@ -427,10 +527,15 @@ test("runtime refresh rejects a changed session directory without replacing the 
   process.env.OHM_HOME = agentDir;
   const lifecycle: string[] = [];
   let generation = 0;
+  let ownedRuntime: LoadedRuntime | undefined;
   context.after(async () => {
-    if (previousAgentDir === undefined) delete process.env.OHM_HOME;
-    else process.env.OHM_HOME = previousAgentDir;
-    await rm(root, { recursive: true, force: true });
+    try {
+      await ownedRuntime?.close();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.OHM_HOME;
+      else process.env.OHM_HOME = previousAgentDir;
+    }
   });
 
   const runtime = await loadRuntime({
@@ -455,7 +560,7 @@ test("runtime refresh rejects a changed session directory without replacing the 
     themes: false,
     offline: true,
   });
-  context.after(async () => await runtime.close().catch(() => undefined));
+  ownedRuntime = runtime;
   const activeSession = runtime.session;
   const activeGeneration = runtime.generationSignal;
   const activeExtensions = runtime.runtimePlugins;
@@ -504,10 +609,15 @@ test("failed runtime replacement construction preserves the active session write
   await mkdir(workspace);
   const previousAgentDir = process.env.OHM_HOME;
   process.env.OHM_HOME = agentDir;
+  let ownedRuntime: LoadedRuntime | undefined;
   context.after(async () => {
-    if (previousAgentDir === undefined) delete process.env.OHM_HOME;
-    else process.env.OHM_HOME = previousAgentDir;
-    await rm(root, { recursive: true, force: true });
+    try {
+      await ownedRuntime?.close();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.OHM_HOME;
+      else process.env.OHM_HOME = previousAgentDir;
+    }
   });
 
   const runtime = await loadRuntime({
@@ -521,7 +631,7 @@ test("failed runtime replacement construction preserves the active session write
     themes: false,
     offline: true,
   });
-  context.after(async () => await runtime.close().catch(() => undefined));
+  ownedRuntime = runtime;
   const sessionFile = runtime.sessionManager.getSessionFile();
   assert.ok(sessionFile !== undefined);
 
@@ -798,7 +908,7 @@ test("runtime refresh quarantines a cancelled partial extension generation and r
     () => incompleteSession.pluginRunner,
     /did not finish starting.*fresh generation/u,
   );
-  assert.throws(() => partialContext?.isIdle(), /Runtime extension host is closed/u);
+  assert.throws(() => partialContext?.isIdle(), /Runtime plugin host is closed/u);
 
   await runtime.refresh();
 

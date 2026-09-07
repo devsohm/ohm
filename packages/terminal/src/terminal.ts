@@ -87,15 +87,18 @@ export class ProcessTerminal implements Terminal {
   stop(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.write("\x1b[?2004l\x1b[<u");
-    this.#input.off("data", this.#onData);
-    this.#output.off?.("resize", this.#onResize);
-    this.#input.pause?.();
-    this.#input.setRawMode?.(false);
-    this.#inputCallback = undefined;
-    this.#resizeCallback = undefined;
-    this.kittyProtocolActive = false;
-    setKittyProtocolActive(false);
+    this.#buffer.clear();
+    try { this.write("\x1b[?2004l\x1b[<u"); }
+    finally {
+      this.#input.off("data", this.#onData);
+      this.#output.off?.("resize", this.#onResize);
+      this.#input.pause?.();
+      this.#input.setRawMode?.(false);
+      this.#inputCallback = undefined;
+      this.#resizeCallback = undefined;
+      this.kittyProtocolActive = false;
+      setKittyProtocolActive(false);
+    }
   }
 
   #route(value: string): void {

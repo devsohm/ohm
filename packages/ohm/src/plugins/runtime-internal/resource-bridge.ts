@@ -60,10 +60,10 @@ async function securePluginDataDirectory(path: string): Promise<string> {
   await mkdir(selected, { recursive: true, mode: 0o700 });
   const information = await lstat(selected);
   if (!information.isDirectory() || information.isSymbolicLink()) {
-    throw new Error(`Runtime extension data path is not a canonical directory: ${selected}`);
+    throw new Error(`Runtime plugin data path is not a canonical directory: ${selected}`);
   }
   const canonical = await realpath(selected);
-  if (canonical !== selected) throw new Error(`Runtime extension data path is not canonical: ${selected}`);
+  if (canonical !== selected) throw new Error(`Runtime plugin data path is not canonical: ${selected}`);
   if (process.platform !== "win32") await chmod(selected, 0o700);
   return canonical;
 }

@@ -311,9 +311,15 @@ interface SessionRowObservation {
 }
 
 function observeSessionRowMaterialization(manager: SessionManager): SessionRowObservation {
+  const getEntry = manager.getEntry;
   const getEntries = manager.getEntries;
   const getEntriesPage = manager.getEntriesPage;
   let materializedRows = 0;
+  manager.getEntry = function observedEntry(id: string): ReturnType<SessionManager["getEntry"]> {
+    const entry = getEntry.call(this, id);
+    if (entry !== undefined) materializedRows += 1;
+    return entry;
+  };
   manager.getEntries = function observedEntries(): ReturnType<SessionManager["getEntries"]> {
     const entries = getEntries.call(this);
     materializedRows += entries.length;
@@ -329,6 +335,7 @@ function observeSessionRowMaterialization(manager: SessionManager): SessionRowOb
   };
   return {
     restore() {
+      manager.getEntry = getEntry;
       manager.getEntries = getEntries;
       manager.getEntriesPage = getEntriesPage;
     },

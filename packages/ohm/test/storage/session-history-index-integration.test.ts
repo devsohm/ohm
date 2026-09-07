@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import type { SessionV4Changes } from "@ohm/kernel/session-v4";
+import type { SessionV4Changes, SessionV4Json } from "@ohm/kernel/session-v4";
 import { SessionManager, type SessionHistoryPageOptions } from "../../src/storage/session-manager.js";
 import { SqliteSessionHistoryIndex, type SessionHistoryIndexCommit } from "../../src/storage/session-history-index.js";
+import { pluginSessionManager } from "../../src/plugins/session-contract.js";
+import { RpcRuntimeDispatcher, type RpcSessionRuntime } from "../../src/interfaces/rpc-runtime.js";
 
 const TIME = "2026-09-05T12:00:00.000Z";
 
@@ -24,6 +26,195 @@ function message(id: string, parentId: string | null) {
 function head(nodeId: string | null) {
   return { type: "head" as const, branchId: "main" as const, nodeId };
 }
+
+test("cold RPC pages load only requested node payloads and do not build history indexes", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "ohm-cold-rpc-page-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const prepare = DatabaseSync.prototype.prepare;
+  const reads = { nodes: 0, commits: 0 };
+  t.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+    const statement = prepare.call(this, sql);
+    if (sql === "SELECT record FROM temp.ohm_session_state_records WHERE kind = ? AND id = ?") {
+      const get = statement.get.bind(statement);
+      t.mock.method(statement, "get", function (kind: string, id: string) {
+        if (kind === "nodes") reads.nodes += 1;
+        if (kind === "commits") reads.commits += 1;
+        return get(kind, id);
+      });
+    }
+    return statement;
+  });
+  const update = t.mock.method(SqliteSessionHistoryIndex.prototype, "update");
+  for (const firstOffset of [0, 63]) {
+    const manager = SessionManager.create(directory, directory, { id: `cold-page-${firstOffset}` });
+    for (let index = 0; index < 64; index += 1) {
+      manager.commitChanges([message(`n${index}`, index === 0 ? null : `n${index - 1}`), head(`n${index}`)], `commit-${index}`, TIME);
+    }
+    const lookup = t.mock.method(manager, "getEntry");
+    const full = t.mock.method(manager, "getEntries");
+    const ordinalPage = t.mock.method(manager, "getEntriesPage");
+    // SAFETY: get_entries uses only the supplied native manager and plugin facade.
+    const session = { nativeSessionManager: manager, sessionManager: pluginSessionManager(manager) } as RpcSessionRuntime["session"];
+    const dispatcher = new RpcRuntimeDispatcher({
+      runtime: { session, setRebindSession() {}, setBeforeSessionInvalidate() {},
+        async newSession() { throw new Error("Session replacement is outside this fixture"); },
+        async switchSession() { throw new Error("Session replacement is outside this fixture"); },
+        async fork() { throw new Error("Session replacement is outside this fixture"); } },
+      output() {},
+    });
+    try {
+      for (const offset of [firstOffset, 1, 63]) {
+        reads.nodes = 0;
+        reads.commits = 0;
+        const previousLookups = lookup.mock.callCount();
+        const response = await dispatcher.dispatch({ id: `page-${offset}`, type: "get_entries", afterSequence: offset, limit: 1 });
+        assert.ok(response?.success === true && response.command === "get_entries");
+        assert.deepEqual(response.data.entries.map((entry) => entry.id), [`n${offset}`]);
+        assert.equal(response.data.totalEntries, 64);
+        assert.equal(lookup.mock.callCount() - previousLookups, 1);
+        assert.ok(reads.nodes <= 1, `one page hydrated ${reads.nodes} node payloads`);
+        if (firstOffset === 0 && previousLookups === 0) assert.equal(reads.nodes, 1);
+        assert.equal(reads.commits, 0);
+        assert.equal(update.mock.callCount(), 0);
+        assert.equal(full.mock.callCount(), 0);
+        assert.equal(ordinalPage.mock.callCount(), 0);
+      }
+      manager.commitChanges([message("appended", "n63"), head("appended")], "append", TIME);
+      reads.nodes = 0;
+      reads.commits = 0;
+      const previousLookups = lookup.mock.callCount();
+      const appended = await dispatcher.dispatch({ id: "appended", type: "get_entries", afterSequence: 64, limit: 1 });
+      assert.ok(appended?.success === true && appended.command === "get_entries");
+      assert.deepEqual(appended.data.entries.map((entry) => entry.id), ["appended"]);
+      assert.equal(appended.data.totalEntries, 65);
+      assert.equal(lookup.mock.callCount() - previousLookups, 1);
+      assert.ok(reads.nodes <= 1);
+      assert.equal(reads.commits, 0);
+      assert.equal(update.mock.callCount(), 0);
+      assert.equal(full.mock.callCount(), 0);
+      assert.equal(ordinalPage.mock.callCount(), 0);
+    } finally { await dispatcher.close(); manager.closeV4Store(); }
+  }
+});
+
+test("cold plugin pages match full projection for canonical messages and accepted fallback payloads", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "ohm-projection-count-parity-"));
+  const saved = SessionManager.create(directory, directory);
+  const memory = SessionManager.inMemory(directory);
+  t.after(() => { saved.closeV4Store(); rmSync(directory, { recursive: true, force: true }); });
+  const results = [
+    { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+    { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+  ];
+  const canonical = { id: "canonical", role: "tool", createdAt: TIME, content: results };
+  const incomplete = { role: "tool", content: results };
+  const invalidBlocks = [...results, { type: "tool_result" }];
+  const custom = { ...canonical, custom: { customType: "fixture", display: false, timestamp: Date.parse(TIME) } };
+  const messageNode = (id: string, content: SessionV4Json, role: "tool" | "assistant" = "tool") => ({
+    id, parentId: null, createdAt: TIME, nodeType: "message" as const, role, content,
+  });
+  const contextNode = (id: string, context: SessionV4Json, extensionId = "ohm.session.message-custom") => ({
+    id, parentId: null, createdAt: TIME, nodeType: "extension_context" as const, extensionId, context,
+  });
+  const cases = [
+    { node: messageNode("nested-tool", canonical, "assistant"), count: 2 },
+    { node: messageNode("nested-assistant", { ...canonical, role: "assistant" }), count: 1 },
+    { node: messageNode("incomplete-message", incomplete), count: 1 },
+    { node: messageNode("invalid-message-content", { ...canonical, content: invalidBlocks }), count: 1 },
+    { node: messageNode("invalid-array", invalidBlocks), count: 1 },
+    { node: messageNode("valid-array", results), count: 2 },
+    { node: messageNode("empty-array", []), count: 1 },
+    { node: messageNode("empty-canonical", { ...canonical, content: [] }), count: 1 },
+    { node: messageNode("canonical-custom", custom), count: 1 },
+    { node: contextNode("context-tool", canonical), count: 2 },
+    { node: contextNode("incomplete-context", incomplete), count: 1 },
+    { node: contextNode("array-context", results), count: 1 },
+    { node: contextNode("custom-context", custom), count: 1 },
+    { node: contextNode("other-context", canonical, "other"), count: 1 },
+    { node: messageNode("bash-message", { role: "bashExecution", command: "true", output: "", cancelled: false,
+      truncated: false, timestamp: Date.parse(TIME) }), count: 1 },
+    { node: messageNode("custom-message", { role: "custom", customType: "fixture", content: "", display: false,
+      timestamp: Date.parse(TIME) }), count: 1 },
+  ];
+  for (const manager of [saved, memory]) {
+    for (const [index, entry] of cases.entries()) {
+      manager.commitChanges([{ type: "conversation_node", node: entry.node }], `commit-${index}`, TIME);
+    }
+    const facade = pluginSessionManager(manager);
+    const total = cases.reduce((sum, entry) => sum + entry.count, 0);
+    const paged = Array.from({ length: total }, (_, offset) => {
+      const page = facade.getEntriesPage(offset, 1);
+      assert.equal(page.totalEntries, total);
+      assert.equal(page.entries.length, 1);
+      return page.entries[0];
+    });
+    const full = facade.getEntries();
+    assert.deepEqual(paged, full);
+    for (let offset = 0; offset < total; offset += 1) {
+      assert.deepEqual(facade.getEntriesPage(offset, 3).entries, full.slice(offset, offset + 3));
+    }
+    assert.deepEqual(manager.getEntryProjectionMetadataPage(0, cases.length).map((entry) => entry.projectedEntryCount),
+      cases.map((entry) => entry.count));
+  }
+});
+
+test("accepted malformed canonical custom metadata falls back consistently across session reads", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "ohm-malformed-custom-projection-"));
+  const managers: SessionManager[] = [];
+  t.after(() => {
+    for (const manager of managers) manager.closeV4Store();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  managers.push(SessionManager.create(directory, directory), SessionManager.inMemory(directory));
+  const valid = { customType: "fixture", display: false, timestamp: Date.parse(TIME) };
+  const malformed: SessionV4Json[] = [
+    null, "invalid", [], {},
+    { ...valid, customType: 1 },
+    { ...valid, display: "false" },
+    { ...valid, timestamp: "yesterday" },
+  ];
+  for (const manager of managers) {
+    let parentId: string | null = null;
+    const payloads = malformed.map((custom) => ({
+      id: "nested", role: "user", createdAt: TIME,
+      content: [{ type: "text", text: "nested content" }], custom,
+    }));
+    for (const [index, content] of payloads.entries()) {
+      for (const nodeType of ["message", "extension_context"] as const) {
+        const id = `${nodeType}-${index}`;
+        const base = { id, parentId, createdAt: TIME };
+        const node = nodeType === "message"
+          ? { ...base, nodeType, role: "user" as const, content }
+          : { ...base, nodeType, extensionId: "ohm.session.message-custom", context: content };
+        manager.commitChanges([{ type: "conversation_node", node }, head(id)]);
+        parentId = id;
+      }
+    }
+    const facade = pluginSessionManager(manager);
+    const pages = payloads.flatMap((content, index) => {
+      const message = facade.getEntriesPage(index * 2, 1);
+      assert.equal(message.totalEntries, payloads.length * 2);
+      assert.equal(message.entries.length, 1);
+      assert.deepEqual(message.entries[0], {
+        type: "message", id: `message-${index}`,
+        parentId: index === 0 ? null : `extension_context-${index - 1}`, timestamp: TIME,
+        message: { role: "user", content: [{ type: "text", text: JSON.stringify(content) }], timestamp: Date.parse(TIME) },
+      });
+      const context = facade.getEntriesPage(index * 2 + 1, 1);
+      assert.equal(context.totalEntries, payloads.length * 2);
+      assert.deepEqual(context.entries, [{
+        type: "custom", id: `extension_context-${index}`, parentId: `message-${index}`, timestamp: TIME,
+        customType: "ohm.session.message-custom", data: content,
+      }]);
+      return [...message.entries, ...context.entries];
+    });
+    assert.deepEqual(facade.getEntries(), pages);
+    assert.deepEqual(facade.buildContextEntries(), pages);
+    for (const entry of pages) assert.deepEqual(facade.getEntry(entry.id), entry);
+    assert.deepEqual(manager.getEntryProjectionMetadataPage(0, pages.length).map((entry) => entry.projectedEntryCount),
+      pages.map(() => 1));
+  }
+});
 
 test("owned SQL history and tree queries preserve native page, branch, label and selection contracts", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "ohm-history-index-contract-"));

@@ -149,6 +149,22 @@ test("promptAndWait disposes its event waiter when prompt submission fails", asy
   await delay(30);
 });
 
+for (const [method, invoke] of [
+  ["prompt", (client: RpcClient) => client.prompt("rejected submission")],
+  ["setThinkingLevel", (client: RpcClient) => client.setThinkingLevel("off")],
+  ["promptAndWait", (client: RpcClient) => client.promptAndWait("rejected submission", undefined, 1_000)],
+] as const) {
+  test(`RPC client ${method} rejects a correlated failure response without disconnecting`, { timeout: 5_000 }, async (t) => {
+    const client = new RpcClient({ cliPath, env: { OHM_RPC_FIXTURE_MODE: "negative-void" } });
+    t.after(async () => await client.stop());
+    await client.start();
+
+    await assert.rejects(invoke(client), /fixture denied (prompt|set_thinking_level)/u);
+    assert.equal(client.pendingRequestCount, 0);
+    assert.equal((await client.getAvailableModels())[0]?.id, "fixture-model");
+  });
+}
+
 test("RPC client delivers correlated bash updates before resolving the command", async () => {
   const client = new RpcClient({ cliPath });
   await client.start();

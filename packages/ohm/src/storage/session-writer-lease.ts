@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -43,6 +44,9 @@ function preparePrivateAgentDirectory(): void {
 
 function fileIdentity(path: string): string {
 	const details = statSync(path, { bigint: true });
+	if (details.nlink > 1n) {
+		throw new Error(`Session file has multiple hard links; use a copy or export instead: ${path}`);
+	}
 	if (details.ino <= 0n) {
 		throw new Error(`Session file identity is unavailable and cannot be locked safely: ${path}`);
 	}
@@ -165,7 +169,8 @@ function acquireLock(
 export function acquireSessionWriterLeaseSync(path: string): SessionWriterLease {
 	preparePrivateAgentDirectory();
 	const owner: SessionWriterOwner = { pid: process.pid, token: randomUUID() };
-	const releasePathLock = acquireLock(lockPath(path), owner, path);
+	const selectedPath = existsSync(path) ? realpathSync(path) : path;
+	const releasePathLock = acquireLock(lockPath(selectedPath), owner, path);
 	let identity: string | undefined;
 	let releaseIdentityLock: (() => void) | undefined;
 	let released = false;

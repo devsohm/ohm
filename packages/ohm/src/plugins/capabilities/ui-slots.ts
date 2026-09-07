@@ -1,4 +1,4 @@
-/** Stable extension-owned composition points inside the session viewport. */
+/** Stable plugin-owned composition points inside the session viewport. */
 export const PLUGIN_UI_SLOT_PATHS = [
   "session.header",
   "session.beforeEditor",

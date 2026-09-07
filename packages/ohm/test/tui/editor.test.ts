@@ -2,6 +2,47 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MultilineEditor } from "../../src/tui/editor.js";
 
+for (const { name, initial, cursor, inserted, expected } of [
+  { name: "combining mark", initial: "a!", cursor: 1, inserted: "\u0301", expected: "a\u0301!" },
+  { name: "emoji modifier", initial: "👩!", cursor: 1, inserted: "🏽", expected: "👩🏽!" },
+  { name: "ZWJ continuation", initial: "👩!", cursor: 1, inserted: "‍💻", expected: "👩‍💻!" },
+  { name: "both adjacent graphemes", initial: "👩💻!", cursor: 1, inserted: "‍", expected: "👩‍💻!" },
+  { name: "following combining mark", initial: "\u0301!", cursor: 0, inserted: "a", expected: "a\u0301!" },
+]) {
+  test(`multiline insertion resegments ${name} across chunk boundaries`, () => {
+    const editor = new MultilineEditor();
+    editor.setText(initial, cursor);
+    editor.insert(inserted);
+    assert.deepEqual({ text: editor.text, length: editor.length, cursor: editor.cursor }, {
+      text: expected, length: 2, cursor: 1,
+    });
+    assert.equal(editor.undo(), true);
+    assert.equal(editor.text, initial);
+    assert.equal(editor.cursor, cursor);
+    assert.equal(editor.redo(), true);
+    editor.backspace();
+    assert.equal(editor.text, "!");
+    assert.equal(editor.cursor, 0);
+  });
+}
+
+test("chunk-boundary grapheme insertion keeps later paste marker offsets and payload", () => {
+  const payload = Array(11).fill("private").join("\n");
+  const editor = new MultilineEditor();
+  editor.insert("a");
+  editor.insertPaste(payload);
+  const before = editor.snapshot();
+  editor.moveHome(true);
+  editor.moveRight();
+  editor.insert("\u0301");
+  assert.equal(editor.cursor, 1);
+  assert.deepEqual(editor.snapshot().pastes, before.pastes);
+  assert.equal(editor.commitHistory(), `a\u0301${payload}`);
+  assert.equal(editor.undo(), true);
+  assert.deepEqual(editor.snapshot().pastes, before.pastes);
+  assert.equal(editor.commitHistory(), `a${payload}`);
+});
+
 test("multiline editor edits by grapheme and moves vertically", () => {
   const editor = new MultilineEditor();
   editor.insert("ab🙂\nxy界");

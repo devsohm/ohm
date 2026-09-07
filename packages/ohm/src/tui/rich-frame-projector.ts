@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, hash } from "node:crypto";
 
 import { optionalProperties } from "../core/optional-properties.js";
 import { isStringValue } from "./value-guards.js";
@@ -458,26 +458,26 @@ interface CachedRichTranscriptRender {
 
 class RetainedRichTranscriptRenderCache {
   readonly #values = new Map<string, CachedRichTranscriptRender[]>();
-  readonly #lru = new Map<string, true>();
   #entries = 0;
   #bytes = 0;
 
   get(key: string, fingerprint: string): OhmTranscriptChunkRender | undefined {
-    const retained = this.#values.get(key)?.find((variant) => variant.fingerprint === fingerprint);
-    if (retained !== undefined) this.#touch(key);
+    const variants = this.#values.get(key);
+    if (variants === undefined) return undefined;
+    const retained = variants.find((variant) => variant.fingerprint === fingerprint);
+    if (retained !== undefined) this.#touch(key, variants);
     return retained?.render;
   }
 
-  #touch(key: string): void {
-    this.#lru.delete(key);
-    this.#lru.set(key, true);
+  #touch(key: string, variants: CachedRichTranscriptRender[]): void {
+    this.#values.delete(key);
+    this.#values.set(key, variants);
   }
 
   #deleteKey(key: string): void {
     const variants = this.#values.get(key);
     if (variants === undefined) return;
     this.#values.delete(key);
-    this.#lru.delete(key);
     this.#entries = Math.max(0, this.#entries - variants.length);
     this.#bytes = Math.max(0, this.#bytes - variants.reduce((total, variant) => total + variant.bytes, 0));
   }
@@ -490,7 +490,7 @@ class RetainedRichTranscriptRenderCache {
   ): void {
     const variants = this.#values.get(key);
     if (variants?.some((variant) => variant.fingerprint === fingerprint) === true) {
-      this.#touch(key);
+      this.#touch(key, variants);
       return;
     }
     const bytes = Buffer.byteLength(key, "utf8")
@@ -508,17 +508,16 @@ class RetainedRichTranscriptRenderCache {
         this.#entries >= MAX_RICH_TRANSCRIPT_RENDER_CACHE_ENTRIES
         || this.#bytes + bytes > MAX_RICH_TRANSCRIPT_RENDER_CACHE_BYTES
       ) {
-        const oldest = this.#lru.keys().next().value;
+        const oldest = this.#values.keys().next().value;
         if (oldest === undefined) return;
         this.#deleteKey(oldest);
       }
       this.#values.set(key, [{ fingerprint, render, bytes }]);
       this.#entries += 1;
       this.#bytes += bytes;
-      this.#touch(key);
       return;
     }
-    this.#touch(key);
+    this.#touch(key, variants);
     const removed = variants.length >= maximumVariants
       ? variants[0]
       : undefined;
@@ -879,7 +878,7 @@ function richTranscriptChunkFingerprint(
       inheritsToolExpansion ? request.toolDetailsExpanded : undefined,
     ]);
     if (serialized === undefined) return undefined;
-    return createHash("sha256").update(serialized, "utf8").digest("base64url");
+    return hash("sha256", serialized, "base64url");
   } catch {
     return undefined;
   }
@@ -1406,7 +1405,7 @@ function retainedTranscriptSources(
     const itemKeys = chunk.entries.map((entry) => `entry:${entry.id}`);
     const entryIds = chunk.entries.map((entry) => entry.id);
     selected.push({
-      key: `chunk:${createHash("sha256").update(JSON.stringify(itemKeys), "utf8").digest("base64url")}`,
+      key: `chunk:${hash("sha256", JSON.stringify(itemKeys), "base64url")}`,
       itemKeys,
       entryIds,
       fingerprint,

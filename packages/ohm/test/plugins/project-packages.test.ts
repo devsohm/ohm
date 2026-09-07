@@ -1755,6 +1755,14 @@ test("transaction recovery rolls replacement crash points back until the target 
     await assertRecovered("1.0.0");
   });
 
+  for (const phase of ["prepared", "backed-up"] as const) {
+    await context.test(`unchanged-lock reconciliation recovers ${phase} after active moves`, async () => {
+      await arrange({ phase, stage: "target", backup: "target", lock: "target" });
+      await assertRecovered("2.0.0");
+      assert.deepEqual(await readFile(lockPath), targetLock);
+    });
+  }
+
   for (const stalePhase of ["prepared", "backed-up"] as const) {
     await context.test(`${stalePhase} marker after target lock persistence keeps the validated target`, async () => {
       await arrange({ phase: stalePhase, active: "target", backup: "previous", lock: "target" });

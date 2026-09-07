@@ -484,6 +484,49 @@ describe("images", () => {
 });
 
 describe("autocomplete", () => {
+  for (const [name, input, column] of [["left", "\x1b[D", 1], ["home", "\x1b[H", 0], ["escape", "\x1b", 2]]) {
+    it(`revokes a pending forced completion after ${name} without changing the draft`, async () => {
+      const { editor } = makeEditor();
+      let resolveSuggestions;
+      let signal;
+      const pending = new Promise((resolveValue) => { resolveSuggestions = resolveValue; });
+      editor.setAutocompleteProvider({
+        getSuggestions(_lines, _line, _column, options) { signal = options.signal; return pending; },
+        applyCompletion(lines, line, cursorCol, item, prefix) {
+          const start = Math.max(0, cursorCol - prefix.length);
+          return { lines: [`${lines[line].slice(0, start)}${item.value}${lines[line].slice(cursorCol)}`], cursorLine: line, cursorCol: start + item.value.length };
+        },
+      });
+      editor.setText("/f");
+      editor.handleInput("\t");
+      assert.ok(signal);
+      assert.equal(signal.aborted, false);
+      editor.handleInput(input);
+      resolveSuggestions({ prefix: "/f", items: [{ value: "/fast", label: "fast" }] });
+      await new Promise((resolveValue) => setImmediate(resolveValue));
+      assert.deepEqual({
+        text: editor.getText(), cursor: editor.getCursor(), showing: editor.isShowingAutocomplete(), aborted: signal.aborted,
+      }, { text: "/f", cursor: { line: 0, col: column }, showing: false, aborted: true });
+    });
+  }
+
+  it("applies a forced singleton completion while its draft and cursor still own the request", async () => {
+    const { editor } = makeEditor();
+    let resolveSuggestions;
+    const pending = new Promise((resolveValue) => { resolveSuggestions = resolveValue; });
+    editor.setAutocompleteProvider({
+      getSuggestions() { return pending; },
+      applyCompletion() { return { lines: ["/fast "], cursorLine: 0, cursorCol: 6 }; },
+    });
+    editor.setText("/f");
+    editor.handleInput("\t");
+    resolveSuggestions({ prefix: "/f", items: [{ value: "fast", label: "fast" }] });
+    await new Promise((resolveValue) => setImmediate(resolveValue));
+    assert.equal(editor.getText(), "/fast ");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 6 });
+    assert.equal(editor.isShowingAutocomplete(), false);
+  });
+
   it("completes command names and delegates argument completion", async () => {
     const provider = new CombinedAutocompleteProvider([
       { name: "model", getArgumentCompletions: () => [{ value: "fast", label: "fast" }] },

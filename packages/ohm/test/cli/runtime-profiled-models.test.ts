@@ -10,7 +10,7 @@ import type {
   CredentialProfileMetadataStore,
   MutableCredentialStore,
 } from "../../src/auth/index.js";
-import { loadRuntime } from "../../src/cli/runtime.js";
+import { loadRuntime, type LoadedRuntime } from "../../src/cli/runtime.js";
 
 class MemoryProfileStore implements CredentialProfileMetadataStore, MutableCredentialStore {
   readonly credentials = new Map<string, AuthCredential>();
@@ -38,12 +38,17 @@ class MemoryProfileStore implements CredentialProfileMetadataStore, MutableCrede
 
 test("profile-backed login immediately exposes subscription models to the interactive runtime", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-profiled-model-runtime-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
   const previousAgentDirectory = process.env.OHM_HOME;
   process.env.OHM_HOME = join(root, "agent");
-  context.after(() => {
-    if (previousAgentDirectory === undefined) delete process.env.OHM_HOME;
-    else process.env.OHM_HOME = previousAgentDirectory;
+  let ownedRuntime: LoadedRuntime | undefined;
+  context.after(async () => {
+    try {
+      await ownedRuntime?.close();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.OHM_HOME;
+      else process.env.OHM_HOME = previousAgentDirectory;
+    }
   });
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -57,7 +62,7 @@ test("profile-backed login immediately exposes subscription models to the intera
     promptTemplates: false,
     themes: false,
   });
-  context.after(() => runtime.close());
+  ownedRuntime = runtime;
 
   await runtime.auth.storeCredential("openai-codex", {
     kind: "oauth",

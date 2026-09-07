@@ -15,10 +15,15 @@ import type { CanonicalMessage } from "../../src/core/types.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
 
 const roots = new Set<string>();
+const managers = new Set<SessionManager>();
 
 test.afterEach(async () => {
-  await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
+  const pendingManagers = [...managers];
+  const pendingRoots = [...roots];
+  managers.clear();
   roots.clear();
+  await Promise.all(pendingManagers.map(async (manager) => manager.closeV4Store()));
+  await Promise.all(pendingRoots.map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
 async function root(): Promise<string> {
@@ -39,6 +44,7 @@ function message(role: "user" | "assistant", text: string): CanonicalMessage {
 }
 
 function persist(manager: SessionManager): string {
+  managers.add(manager);
   manager.appendMessage(message("user", "hello"));
   manager.appendMessage(message("assistant", "hi"));
   const path = manager.getSessionFile()!;
@@ -118,6 +124,7 @@ test("resume invokes the selector instead of continuing the most recent session"
     },
     async confirmForkFromWorkspace() { throw new Error("unexpected confirmation"); },
   });
+  if (result.sessionManager !== undefined) managers.add(result.sessionManager);
   assert.equal(selected, true);
   assert.equal(result.cancelled, false);
   assert.equal(result.sessionManager?.getSessionId(), "older");
@@ -140,10 +147,12 @@ test("--all starts resume with every workspace and continues the newest global s
     },
     async confirmForkFromWorkspace() { throw new Error("unexpected confirmation"); },
   });
+  if (resumed.sessionManager !== undefined) managers.add(resumed.sessionManager);
   assert.equal(resumed.sessionManager?.getSessionId(), "global-newest");
   resumed.sessionManager?.closeV4Store();
 
   const continued = await createStartupSession(parseArgs(["--continue", "--all"]), current, sessions, noInteraction);
+  if (continued.sessionManager !== undefined) managers.add(continued.sessionManager);
   assert.equal(continued.sessionManager?.getSessionId(), "global-newest");
   assert.equal(continued.sessionManager?.getCwd(), resolve(other));
 });
@@ -154,6 +163,7 @@ test("cancelled resume does not create or open a replacement session", async () 
     async selectSession() { return undefined; },
     async confirmForkFromWorkspace() { throw new Error("unexpected confirmation"); },
   });
+  if (result.sessionManager !== undefined) managers.add(result.sessionManager);
   assert.deepEqual(result, { cancelled: true });
 });
 
@@ -164,10 +174,12 @@ test("an exact project session ID resumes while an unused ID creates a session",
   persist(SessionManager.create(workspace, sessions, { id: "known" }));
 
   const existing = await createStartupSession(parseArgs(["--session-id", "known"]), workspace, sessions, noInteraction);
+  if (existing.sessionManager !== undefined) managers.add(existing.sessionManager);
   assert.equal(existing.sessionManager?.getSessionId(), "known");
   assert.equal(existing.sessionManager?.getEntries().length, 2);
 
   const created = await createStartupSession(parseArgs(["--session-id", "fresh"]), workspace, sessions, noInteraction);
+  if (created.sessionManager !== undefined) managers.add(created.sessionManager);
   assert.equal(created.sessionManager?.getSessionId(), "fresh");
   assert.equal(created.sessionManager?.getEntries().length, 0);
 });
@@ -177,13 +189,16 @@ test("an exact project session name resumes and an ambiguous name fails", async 
   const workspace = join(base, "workspace");
   const sessions = join(base, "sessions");
   const first = SessionManager.create(workspace, sessions, { id: "named-first" });
+  managers.add(first);
   first.appendSessionInfo("friendly name");
   persist(first);
 
   const resumed = await createStartupSession(parseArgs(["--session", "friendly name"]), workspace, sessions, noInteraction);
+  if (resumed.sessionManager !== undefined) managers.add(resumed.sessionManager);
   assert.equal(resumed.sessionManager?.getSessionId(), "named-first");
 
   const second = SessionManager.create(workspace, sessions, { id: "named-second" });
+  managers.add(second);
   second.appendSessionInfo("friendly name");
   persist(second);
   await assert.rejects(
@@ -204,6 +219,7 @@ test("fork accepts a target ID, preserves source history, and rejects collisions
     sessions,
     noInteraction,
   );
+  if (forked.sessionManager !== undefined) managers.add(forked.sessionManager);
   assert.equal(forked.sessionManager?.getSessionId(), "copy");
   assert.equal(forked.sessionManager?.getEntries().length, 2);
   persist(forked.sessionManager!);
@@ -225,18 +241,21 @@ test("an explicit session in another workspace forks only after confirmation", a
     async selectSession() { throw new Error("unexpected selector"); },
     async confirmForkFromWorkspace(workspace) { assert.equal(workspace, resolve(other)); return false; },
   });
+  if (pathCancelled.sessionManager !== undefined) managers.add(pathCancelled.sessionManager);
   assert.deepEqual(pathCancelled, { cancelled: true });
 
   const cancelled = await createStartupSession(parseArgs(["--session", "outside"]), current, sessions, {
     async selectSession() { throw new Error("unexpected selector"); },
     async confirmForkFromWorkspace(workspace) { assert.equal(workspace, resolve(other)); return false; },
   });
+  if (cancelled.sessionManager !== undefined) managers.add(cancelled.sessionManager);
   assert.deepEqual(cancelled, { cancelled: true });
 
   const forked = await createStartupSession(parseArgs(["--session", "outside"]), current, sessions, {
     async selectSession() { throw new Error("unexpected selector"); },
     async confirmForkFromWorkspace(workspace) { assert.equal(workspace, resolve(other)); return true; },
   });
+  if (forked.sessionManager !== undefined) managers.add(forked.sessionManager);
   assert.equal(forked.sessionManager?.getCwd(), resolve(current));
   assert.equal(forked.sessionManager?.getHeader()?.parentSession, "outside");
 });

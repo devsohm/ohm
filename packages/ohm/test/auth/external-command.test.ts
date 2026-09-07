@@ -168,6 +168,28 @@ test("configured external credential caching respects bearer expiry and cancella
   assert.equal((await source.resolve({ provider: "expiring" }))?.kind, "bearer");
 });
 
+test("replacing external credential specs cannot cache an older in-flight helper result", async () => {
+  const script = "require('node:fs').writeSync(1, JSON.stringify({type:'api_key',apiKey:process.env.FIXTURE_TOKEN}))";
+  const source = new ExternalCommandCredentialSource({
+    fixture: {
+      argv: [process.execPath, "-e", script],
+      environment: { FIXTURE_TOKEN: "old-helper-key" },
+    },
+  });
+  const previous = source.resolve({ provider: "fixture" });
+  source.replaceSpecs({
+    fixture: {
+      argv: [process.execPath, "-e", script],
+      environment: { FIXTURE_TOKEN: "replacement-helper-key" },
+    },
+  });
+
+  assert.deepEqual(await previous, { kind: "api_key", provider: "fixture", apiKey: "old-helper-key" });
+  assert.deepEqual(await source.resolve({ provider: "fixture" }), {
+    kind: "api_key", provider: "fixture", apiKey: "replacement-helper-key",
+  });
+});
+
 test("configured external credential sources reject unsafe resource bounds", () => {
   const emptyArgv: [string, ...string[]] = [process.execPath];
   emptyArgv.pop();

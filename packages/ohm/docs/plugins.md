@@ -53,7 +53,7 @@ export default function activate(ohm) {
 
 Activation is transactional and time-bounded. A factory that throws, times out, or is cancelled commits nothing. Its API becomes stale before its disposers run once in reverse order.
 
-Refresh sends `session_shutdown` to the live generation, then prepares a candidate. If preparation or its factory fails before publication, ohm disposes the candidate and restarts the previous generation. If preparation succeeds, ohm publishes the candidate, makes the old API stale, and disposes the old generation. A failure in the published generation's subsequent `session_start` is past that rollback point: ohm disables and closes the incomplete generation, and recovery requires a refresh that publishes a fresh generation.
+Refresh sends `session_shutdown` to the live generation, then prepares a candidate. If preparation or its factory fails before publication, ohm disposes the candidate and restarts the previous generation. If preparation succeeds, ohm publishes the candidate, makes the old API stale, and disposes the old generation. Retired-generation cleanup errors are reported through resource diagnostics without rolling back the published candidate. A failure in the published generation's subsequent `session_start` is past that rollback point: ohm disables and closes the incomplete generation, and recovery requires a refresh that publishes a fresh generation.
 
 Use `onDispose` only for plugin-owned resources such as timers, watchers, sockets, temporary files, or raw child processes. Host registrations, UI mounts, and `ohm.processes` workers are generation-owned and are removed automatically. Calling any generation API from a disposer fails because the API is already stale. One failing disposer is reported without skipping the remaining callbacks.
 
@@ -121,6 +121,15 @@ The host creates isolated data roots for each plugin owner:
 
 - use `userData` for state that must cross workspaces;
 - use `workspaceData` for project memory, indexes, caches, and task state.
+
+CLI modes and the default SDK loader share the same data root for a configured
+agent directory. New installations use `extension-data` beneath that directory;
+if only the older SDK location `state/extension-data` exists, both reuse it in
+place. These disk names are retained for saved-data compatibility. If both
+locations exist, loading stops with their paths: close running hosts, back up
+both directories, and explicitly reconcile the plugin state before retrying.
+Ohm never silently merges or deletes either copy. A custom host's explicit
+`dataRoot` remains its own choice, including during refresh.
 
 Durable paths are isolated per runtime contribution. Legacy entries with the
 same plugin ID remain separate when their package-relative source entries

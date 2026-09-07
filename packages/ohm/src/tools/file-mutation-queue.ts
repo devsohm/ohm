@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { errorCode } from "../core/errors.js";
 
 interface PromiseReject {
@@ -91,12 +91,18 @@ class FileMutationScheduler {
 
 async function fileIdentity(path: string): Promise<string> {
   const absolutePath = resolve(path);
-  try {
-    return await realpath(absolutePath);
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return absolutePath;
-    throw error;
+  let existing = absolutePath;
+  for (;;) {
+    try {
+      const resolved = await realpath(existing);
+      return existing === absolutePath ? resolved : resolve(resolved, relative(existing, absolutePath));
+    } catch (error) {
+      const code = errorCode(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(existing);
+      if (parent === existing) return absolutePath;
+      existing = parent;
+    }
   }
 }
 

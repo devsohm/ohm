@@ -638,7 +638,7 @@ function boundedSdkFetch(fetchImplementation: FetchLike, maximum: number): Fetch
     const response = await fetchImplementation(input, { ...init, redirect: "error" });
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > maximum) {
-      await response.body?.cancel().catch(() => undefined);
+      void response.body?.cancel().catch(() => undefined);
       throw new ProtocolError(`Image response exceeded ${maximum} bytes`);
     }
     if (response.body === null) return response;

@@ -4626,11 +4626,13 @@ export class RuntimeEngine {
         const streamPositions = streamPositioner.ordered;
         const streamPosition = streamPositioner.position;
         let summaryBytes = 0;
+        let signatureBytes = 0;
         const nextSummaryBytes = (removed: number, added: number): number => {
           const next = summaryBytes - removed + added;
           if (next > MAX_COMPACTION_SUMMARY_BYTES) {
             throw providerProtocolFailure("Compaction summary exceeded the 4194304-byte stream limit");
           }
+          providerAssistantAggregateBytes(next, 0, signatureBytes);
           return next;
         };
         const summaryFieldBytes = <Value>(value: Value, label: string): number => {
@@ -4702,20 +4704,22 @@ export class RuntimeEngine {
                   throw providerProtocolFailure(`Provider emitted more than one text_end for part ${part}`);
                 }
                 const nextBytes = summaryFieldBytes(event.text, "streamed text final text");
-                if (event.textSignature !== undefined) {
-                  providerAssistantFieldBytes(event.textSignature, `streamed text signature ${part}`);
-                }
+                const nextSignatureBytes = event.textSignature === undefined
+                  ? 0
+                  : providerAssistantFieldBytes(event.textSignature, `streamed text signature ${part}`);
                 const accumulated = textParts.get(part) ?? "";
                 if (!event.text.startsWith(accumulated)) {
                   throw providerProtocolFailure("Compaction provider final text did not match its streamed prefix");
                 }
                 const nextTotal = nextSummaryBytes(textPartBytes.get(part) ?? 0, nextBytes);
+                const nextRetainedSignatures = providerAssistantAggregateBytes(signatureBytes, 0, nextSignatureBytes, nextTotal);
                 startProviderAssistantPart(startedText, startedReasoning, part);
                 textParts.set(part, event.text);
                 textPartBytes.set(part, nextBytes);
                 if (event.textSignature === undefined) textSignatures.delete(part);
                 else textSignatures.set(part, event.textSignature);
                 summaryBytes = nextTotal;
+                signatureBytes = nextRetainedSignatures;
                 completedText.add(part);
               } else if (event.type === "reasoning_start") {
                 const rawPart = providerAssistantPart(event.part, "reasoning");
@@ -4752,9 +4756,9 @@ export class RuntimeEngine {
                 }
                 const visibility = providerReasoningVisibility(reasoningVisibility, part, event.visibility);
                 const nextBytes = summaryFieldBytes(event.text, "streamed reasoning final text");
-                if (event.thinkingSignature !== undefined) {
-                  providerAssistantFieldBytes(event.thinkingSignature, `streamed reasoning signature ${part}`);
-                }
+                const nextSignatureBytes = event.thinkingSignature === undefined
+                  ? 0
+                  : providerAssistantFieldBytes(event.thinkingSignature, `streamed reasoning signature ${part}`);
                 if (event.redacted !== undefined && !Check(BOOLEAN_VALUE, event.redacted)) {
                   throw providerProtocolFailure("Provider returned an invalid streamed reasoning redacted marker");
                 }
@@ -4763,6 +4767,7 @@ export class RuntimeEngine {
                   throw providerProtocolFailure("Compaction provider final reasoning did not match its streamed prefix");
                 }
                 const nextTotal = nextSummaryBytes(reasoningPartBytes.get(part) ?? 0, nextBytes);
+                const nextRetainedSignatures = providerAssistantAggregateBytes(signatureBytes, 0, nextSignatureBytes, nextTotal);
                 startProviderAssistantPart(startedReasoning, startedText, part);
                 reasoningVisibility.set(part, visibility);
                 reasoningParts.set(part, event.text);
@@ -4772,6 +4777,7 @@ export class RuntimeEngine {
                 if (event.redacted === undefined) reasoningRedacted.delete(part);
                 else reasoningRedacted.set(part, event.redacted);
                 summaryBytes = nextTotal;
+                signatureBytes = nextRetainedSignatures;
                 completedReasoning.add(part);
               } else if (event.type === "usage") {
                 const normalized = providerUsage(event.usage);

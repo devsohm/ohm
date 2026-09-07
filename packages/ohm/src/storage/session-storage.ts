@@ -18,6 +18,7 @@ import {
 } from "@ohm/kernel/session-v4";
 import type { SessionHistoryIndexCommit, SqliteSessionHistoryIndex } from "./session-history-index.js";
 import type { SqliteSessionStateRecords } from "./session-state-records.js";
+import type { SessionEntryProjectionMetadata } from "./session-entry-projection.js";
 
 export interface SessionStorageSnapshot {
   header: SessionV4Header;
@@ -100,6 +101,10 @@ export class SessionStorageJournal {
     if (this.#closed) throw new Error("Session storage is closed");
     this.#records?.assertHealthy();
     return inspect(this.#state);
+  }
+
+  getEntryProjectionMetadataPage(offset: number, limit: number): SessionEntryProjectionMetadata[] | undefined {
+    return this.inspectState(() => this.#records?.getEntryProjectionMetadataPage(offset, limit));
   }
 
   /** Transfers an exclusively owned, connection-free read-only replay to its snapshot. */

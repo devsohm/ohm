@@ -401,6 +401,39 @@ test("Anthropic-compatible providers keep their public identity and independent 
   assert.equal(authorization, "custom-secret");
 });
 
+for (const routed of [false, true]) {
+  test(`Azure factory honors ${routed ? "routed inherited" : "direct"} credential provider selection`, async () => {
+    const azure = {
+      kind: "azure-openai" as const,
+      endpoint: "https://company.openai.azure.com",
+    };
+    let authorization: string | null = null;
+    const adapter = createProviderAdapter(routed ? {
+      kind: "routed",
+      id: "company",
+      credentialProvider: "company-credential",
+      adapters: { azure },
+      routes: [{ model: "test-model", adapter: "azure", protocolFamily: "openai-responses" }],
+    } : { ...azure, credentialProvider: "company-credential" }, broker([
+      ["azure-openai", "bearer", "default-identity"],
+      ["company-credential", "bearer", "selected-identity"],
+    ]), {
+      environment: {},
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        const incoming = input instanceof Request ? input : new Request(input, init);
+        authorization = incoming.headers.get("authorization");
+        return new Response(`data: ${JSON.stringify({
+          type: "response.completed",
+          response: { id: "response", model: "test-model", output: [], usage: {} },
+        })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const events = await collect(adapter.stream(request(adapter.id), new AbortController().signal));
+    assert.equal(events.at(-1)?.type, "response_end");
+    assert.equal(authorization, "Bearer selected-identity");
+  });
+}
+
 test("declarative routed providers use exact protocols, one credential binding, and public wire telemetry", async () => {
   const wire = new ProviderWireInterceptorRegistry();
   const observedProviders: string[] = [];

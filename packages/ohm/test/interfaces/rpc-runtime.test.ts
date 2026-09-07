@@ -1676,6 +1676,47 @@ test("RPC history projects split tool results, hides provider traces, and resolv
   await dispatcher.close();
 });
 
+test("RPC fork selections round-trip colliding public user IDs without extra history projection", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "ohm-rpc-fork-identities-"));
+  const manager = SessionManager.inMemory(cwd);
+  let session: AgentSession | undefined;
+  let dispatcher: RpcRuntimeDispatcher | undefined;
+  t.after(async () => {
+    await dispatcher?.close();
+    await session?.close();
+    manager.closeV4Store();
+    await rm(cwd, { recursive: true, force: true });
+  });
+  const createdAt = "2026-07-29T12:00:00.000Z";
+  manager.appendMessage({ id: "tool-message", role: "tool", createdAt, content: [
+    { type: "tool_result", callId: "one", name: "one", content: "first", isError: false },
+    { type: "tool_result", callId: "two", name: "two", content: "second", isError: false },
+  ] }, { nodeId: "tool" });
+  manager.appendMessage({ id: "user-message", role: "user", createdAt,
+    content: [{ type: "text", text: "selected user" }],
+  }, { nodeId: "tool~1" });
+  session = await AgentSession.create({
+    sessionManager: manager, workspace: cwd, providers: new ProviderRegistry(), settingsManager: SettingsManager.inMemory(),
+  });
+  assert.deepEqual(session.getUserMessagesForForking(), [{ entryId: "tool~1", text: "selected user" }]);
+  const fullHistory = t.mock.method(manager, "getEntries");
+  const forkedIds: string[] = [];
+  dispatcher = new RpcRuntimeDispatcher({
+    runtime: { ...fixture().runtime, session,
+      async fork(entryId) { forkedIds.push(entryId); return { cancelled: false }; },
+    },
+    output() {},
+  });
+  const selections = await dispatcher.dispatch({ type: "get_fork_messages" });
+  assert.ok(selections?.success === true && selections.command === "get_fork_messages");
+  assert.deepEqual(selections.data.messages, [{ entryId: "tool~1~0", text: "selected user" }]);
+  assert.equal(fullHistory.mock.callCount(), 1, "only the existing native user-message query may scan history");
+  const result = await dispatcher.dispatch({ type: "fork", entryId: selections.data.messages[0]!.entryId });
+  assert.ok(result?.success === true && result.command === "fork");
+  assert.deepEqual(forkedIds, ["tool~1"]);
+  assert.equal(fullHistory.mock.callCount(), 1, "RPC fork must resolve public IDs from metadata");
+});
+
 test("RPC history retains durable extension provenance on custom records", async () => {
   const provenance = {
     schemaVersion: 1 as const,

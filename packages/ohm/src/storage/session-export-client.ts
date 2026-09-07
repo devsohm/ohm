@@ -429,9 +429,9 @@ export const SESSION_EXPORT_CLIENT = String.raw`
     document.getElementById("tree-count").textContent = count + " of " + entries.length + " entries" + (roots.length > 1 ? " · " + roots.length + " roots" : "");
   }
 
-  function renderPreRendered(parent, callId, key) {
-    var rendered = data.renderedTools && Object.prototype.hasOwnProperty.call(data.renderedTools, callId)
-      ? data.renderedTools[callId]
+  function renderPreRendered(parent, occurrenceKey, key) {
+    var rendered = data.renderedTools && Object.prototype.hasOwnProperty.call(data.renderedTools, occurrenceKey)
+      ? data.renderedTools[occurrenceKey]
       : undefined;
     return rendered ? renderUiBlock(parent, rendered[key]) : false;
   }
@@ -449,10 +449,10 @@ export const SESSION_EXPORT_CLIENT = String.raw`
     details.addEventListener("toggle", function () { if (details.open) load(); });
     return { details: details, load: load };
   }
-  function renderToolCall(parent, block) {
+  function renderToolCall(parent, block, occurrenceKey) {
     var name = text(block.name);
     var card = lazyDetails("tool-card", sessionExportToolCallSummary(name, block.arguments), function (body) {
-      if (renderPreRendered(body, text(block.callId), "call")) return;
+      if (renderPreRendered(body, occurrenceKey, "call")) return;
       var mutation = sessionExportMutationPreview(name, block.arguments);
       if (mutation !== undefined) appendPlainPreview(body, mutation, "code-block bounded-preview mutation-preview");
       else appendJson(body, block.arguments);
@@ -460,10 +460,9 @@ export const SESSION_EXPORT_CLIENT = String.raw`
     card.details.dataset.tool = "true";
     parent.appendChild(card.details);
   }
-  function renderToolResult(parent, block) {
-    var callId = text(block.callId);
-    var rendered = data.renderedTools && Object.prototype.hasOwnProperty.call(data.renderedTools, callId)
-      ? data.renderedTools[callId]
+  function renderToolResult(parent, block, occurrenceKey) {
+    var rendered = data.renderedTools && Object.prototype.hasOwnProperty.call(data.renderedTools, occurrenceKey)
+      ? data.renderedTools[occurrenceKey]
       : undefined;
     var card = lazyDetails(
       "tool-card",
@@ -532,15 +531,15 @@ export const SESSION_EXPORT_CLIENT = String.raw`
     if (reasoning) card.details.dataset.thinking = "true";
     parent.appendChild(card.details);
   }
-  function renderCanonicalContent(parent, message) {
+  function renderCanonicalContent(parent, message, entryId) {
     var blocks = Array.isArray(message.content) ? message.content : [];
-    blocks.forEach(function (block) {
+    blocks.forEach(function (block, index) {
       if (!block || typeof block !== "object") return;
       if (block.type === "text") renderTextBlock(parent, block.text, message.role);
       else if (block.type === "thinking") renderThinking(parent, block);
       else if (block.type === "image") appendImage(parent, block);
-      else if (block.type === "tool_call") renderToolCall(parent, block);
-      else if (block.type === "tool_result") renderToolResult(parent, block);
+      else if (block.type === "tool_call") renderToolCall(parent, block, JSON.stringify([entryId, index]));
+      else if (block.type === "tool_result") renderToolResult(parent, block, JSON.stringify([entryId, index]));
       else if (block.type === "provider_opaque") renderOpaque(parent, block);
       else appendJson(parent, block);
     });
@@ -583,10 +582,10 @@ export const SESSION_EXPORT_CLIENT = String.raw`
       } else if (message.role === "custom") {
         if (message.display === false) card.classList.add("hidden-entry");
         if (typeof message.content === "string") appendMarkdownPreview(body, message.content);
-        else renderCanonicalContent(body, { role: "custom", content: message.content || [] });
+        else renderCanonicalContent(body, { role: "custom", content: message.content || [] }, entry.id);
         if (message.details !== undefined) appendJson(body, message.details);
       } else {
-        renderCanonicalContent(body, message);
+        renderCanonicalContent(body, message, entry.id);
         appendUsageLine(body, message.usage);
       }
     } else if (entry.type === "compaction") {
@@ -606,7 +605,7 @@ export const SESSION_EXPORT_CLIENT = String.raw`
     } else if (entry.type === "custom_message") {
       if (entry.display === false) card.classList.add("hidden-entry");
       if (typeof entry.content === "string") appendMarkdownPreview(body, entry.content);
-      else renderCanonicalContent(body, { role: "custom", content: entry.content || [] });
+      else renderCanonicalContent(body, { role: "custom", content: entry.content || [] }, entry.id);
       if (entry.details !== undefined) appendJson(body, entry.details);
     } else if (entry.type === "model_change" || entry.type === "thinking_level_change") {
       card.classList.add("structural", "compact-entry");

@@ -163,7 +163,7 @@ function assertCatalogBounds(value: JsonValue): void {
   }
 }
 
-async function responseJson(response: Response): Promise<JsonValue> {
+async function responseJson(response: Response, signal: AbortSignal): Promise<JsonValue> {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null) {
     if (!/^\d+$/u.test(declaredLength)) {
@@ -177,15 +177,33 @@ async function responseJson(response: Response): Promise<JsonValue> {
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (bytes + value.byteLength > REMOTE_CATALOG_MAX_BYTES) {
-      await reader.cancel().catch(() => undefined);
-      throw new TypeError(`Remote model catalog response exceeds ${REMOTE_CATALOG_MAX_BYTES} bytes`);
+  let finished = false;
+  let cancelled = false;
+  const cancel = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    void reader.cancel(signal.reason).catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    signal.throwIfAborted();
+    for (;;) {
+      const { done, value } = await reader.read();
+      signal.throwIfAborted();
+      if (done) {
+        finished = true;
+        break;
+      }
+      if (bytes + value.byteLength > REMOTE_CATALOG_MAX_BYTES) {
+        throw new TypeError(`Remote model catalog response exceeds ${REMOTE_CATALOG_MAX_BYTES} bytes`);
+      }
+      chunks.push(value);
+      bytes += value.byteLength;
     }
-    chunks.push(value);
-    bytes += value.byteLength;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (!finished) cancel();
+    reader.releaseLock();
   }
   const parsed: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
   if (!isJsonValue(parsed)) throw new TypeError("Remote model catalog response must be JSON");
@@ -252,25 +270,29 @@ export function withRemoteCatalog(provider: Provider, catalogBaseUrl: string): P
             },
             signal,
           });
-          if (context.signal?.aborted) return;
-          const checkedAt = Date.now();
-          if (response.status === 304) {
-            await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
-            return;
+          try {
+            if (context.signal?.aborted) return;
+            const checkedAt = Date.now();
+            if (response.status === 304) {
+              await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
+              return;
+            }
+            if (response.status === 404 || response.status === 501) {
+              await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
+              return;
+            }
+            if (!response.ok) {
+              await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
+              throw new Error(`Remote model catalog request failed for ${provider.id}: ${response.status}`);
+            }
+            const next = catalogEntries(await responseJson(response, signal)).map((entry) => modelFromCatalog(provider, entry));
+            if (context.signal?.aborted) return;
+            overlay = next;
+            const nextEtag = validEtag(response.headers.get("etag"));
+            await context.store.write({ models: next, checkedAt, ...optionalProperties(nextEtag === undefined ? undefined : { etag: nextEtag }) });
+          } finally {
+            void response.body?.cancel().catch(() => undefined);
           }
-          if (response.status === 404 || response.status === 501) {
-            await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
-            return;
-          }
-          if (!response.ok) {
-            await context.store.write({ models: overlay, checkedAt, ...optionalProperties(etag === undefined ? undefined : { etag }) });
-            throw new Error(`Remote model catalog request failed for ${provider.id}: ${response.status}`);
-          }
-          const next = catalogEntries(await responseJson(response)).map((entry) => modelFromCatalog(provider, entry));
-          if (context.signal?.aborted) return;
-          overlay = next;
-          const nextEtag = validEtag(response.headers.get("etag"));
-          await context.store.write({ models: next, checkedAt, ...optionalProperties(nextEtag === undefined ? undefined : { etag: nextEtag }) });
         } finally {
           active = undefined;
         }

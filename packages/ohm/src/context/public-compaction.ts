@@ -201,58 +201,73 @@ interface BranchProjection {
   message: AgentMessage;
 }
 
+interface ToolOccurrence {
+  id: string;
+  name: string;
+  first: number;
+  last: number;
+  calls: number;
+  results: number;
+  namesMatch: boolean;
+}
+
+function toolOccurrences(messages: readonly AgentMessage[]): ToolOccurrence[] {
+  const active = new Map<string, ToolOccurrence>();
+  const occurrences: ToolOccurrence[] = [];
+  messages.forEach((message, index) => {
+    if (message.role === "assistant") {
+      for (const block of message.content) {
+        if (block.type !== "toolCall") continue;
+        const prior = active.get(block.id);
+        if (prior?.first === index) {
+          prior.calls += 1;
+          continue;
+        }
+        const occurrence = { id: block.id, name: block.name, first: index, last: index, calls: 1, results: 0, namesMatch: true };
+        active.set(block.id, occurrence);
+        occurrences.push(occurrence);
+      }
+    } else if (message.role === "toolResult") {
+      const occurrence = active.get(message.toolCallId);
+      if (occurrence === undefined) return;
+      occurrence.last = index;
+      occurrence.results += 1;
+      occurrence.namesMatch &&= occurrence.name === message.toolName;
+    }
+  });
+  return occurrences;
+}
+
 function projectBranchMessages(entries: SessionEntry[]): BranchProjection[] {
   const projected = entries.flatMap((entry) => {
     const message = branchMessage(entry);
     return message === undefined ? [] : [{ entry, message }];
   });
-  const calls = new Map<string, { count: number; name: string }>();
-  const results = new Map<string, { count: number; name: string }>();
-  for (const { message } of projected) {
-    if (message.role === "assistant") {
-      for (const block of message.content) {
-        if (block.type !== "toolCall") continue;
-        const prior = calls.get(block.id);
-        calls.set(block.id, { count: (prior?.count ?? 0) + 1, name: block.name });
-      }
-    } else if (message.role === "toolResult") {
-      const prior = results.get(message.toolCallId);
-      results.set(message.toolCallId, { count: (prior?.count ?? 0) + 1, name: message.toolName });
+  const paired = new Map<number, Set<string>>();
+  for (const occurrence of toolOccurrences(projected.map(({ message }) => message))) {
+    if (occurrence.calls !== 1 || occurrence.results !== 1 || !occurrence.namesMatch) continue;
+    for (const index of [occurrence.first, occurrence.last]) {
+      const ids = paired.get(index) ?? new Set<string>();
+      ids.add(occurrence.id);
+      paired.set(index, ids);
     }
   }
-  const paired = new Set([...calls].flatMap(([id, call]) => {
-    const result = results.get(id);
-    return call.count === 1 && result?.count === 1 && result.name === call.name ? [id] : [];
-  }));
-  return projected.flatMap(({ entry, message }) => {
+  return projected.flatMap(({ entry, message }, index) => {
     let selected = message;
     if (message.role === "assistant") {
-      const content = message.content.filter((block) => block.type !== "toolCall" || paired.has(block.id));
+      const content = message.content.filter((block) => block.type !== "toolCall" || paired.get(index)?.has(block.id));
       if (content.length === 0) return [];
       selected = content.length === message.content.length ? message : { ...message, content };
-    } else if (message.role === "toolResult" && !paired.has(message.toolCallId)) return [];
+    } else if (message.role === "toolResult" && !paired.get(index)?.has(message.toolCallId)) return [];
     return [{ entry, message: selected }];
   });
 }
 
 function safeBranchBoundaries(frames: readonly BranchProjection[]): boolean[] {
-  const spans = new Map<string, { first: number; last: number }>();
-  frames.forEach((frame, index) => {
-    const message = frame.message;
-    const ids = message.role === "assistant"
-      ? message.content.flatMap((block) => block.type === "toolCall" ? [block.id] : [])
-      : message.role === "toolResult" ? [message.toolCallId] : [];
-    for (const id of ids) {
-      const prior = spans.get(id);
-      spans.set(id, {
-        first: Math.min(prior?.first ?? index, index),
-        last: Math.max(prior?.last ?? index, index),
-      });
-    }
-  });
+  const spans = toolOccurrences(frames.map(({ message }) => message));
   return Array.from(
     { length: frames.length + 1 },
-    (_value, boundary) => [...spans.values()].every(
+    (_value, boundary) => spans.every(
       (span) => !(span.first < boundary && boundary <= span.last),
     ),
   );
@@ -460,33 +475,14 @@ function isTurnStartEntry(entry: SessionEntry): boolean {
 interface ToolSpan {
   first: number;
   last: number;
-  sawCall: boolean;
-  sawResult: boolean;
 }
 
 function conversationToolSpans(entries: readonly SessionEntry[], startIndex: number, endIndex: number): ToolSpan[] {
-  const spans = new Map<string, ToolSpan>();
-  const visit = (id: string, index: number, kind: "call" | "result"): void => {
-    const prior = spans.get(id);
-    const span = prior ?? { first: index, last: index, sawCall: false, sawResult: false };
-    span.first = Math.min(span.first, index);
-    span.last = Math.max(span.last, index);
-    if (kind === "call") span.sawCall = true;
-    else span.sawResult = true;
-    spans.set(id, span);
-  };
-  for (let index = startIndex; index < endIndex; index += 1) {
-    const entry = entries[index];
-    if (entry === undefined) continue;
-    for (const message of entryMessages(entry)) {
-      if (message.role === "assistant") {
-        for (const block of message.content) {
-          if (block.type === "toolCall") visit(block.id, index, "call");
-        }
-      } else if (message.role === "toolResult") visit(message.toolCallId, index, "result");
-    }
-  }
-  return [...spans.values()].filter((span) => span.sawCall && span.sawResult);
+  const frames = entries.slice(startIndex, endIndex).flatMap((entry, offset) =>
+    entryMessages(entry).map((message) => ({ message, index: startIndex + offset })));
+  return toolOccurrences(frames.map(({ message }) => message))
+    .filter((span) => span.results > 0)
+    .map((span) => ({ first: frames[span.first]!.index, last: frames[span.last]!.index }));
 }
 
 function eligibleCutBoundaries(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
@@ -612,13 +608,12 @@ function recordNestedPaths(paths: Set<string>, value: JsonValue | undefined): vo
 function extractSuccessfulFileOps(messages: readonly AgentMessage[], fileOps: FileOperations): void {
   const calls = new Map<string, { name: string; path: JsonValue | undefined }>();
   for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const block of message.content) {
-      if (block.type !== "toolCall") continue;
-      calls.set(block.id, { name: block.name, path: toolArgumentPath(block.arguments) });
+    if (message.role === "assistant") {
+      for (const block of message.content) {
+        if (block.type !== "toolCall") continue;
+        calls.set(block.id, { name: block.name, path: toolArgumentPath(block.arguments) });
+      }
     }
-  }
-  for (const message of messages) {
     if (message.role !== "toolResult" || message.isError) continue;
     const call = calls.get(message.toolCallId);
     if (call === undefined || call.name !== message.toolName) continue;

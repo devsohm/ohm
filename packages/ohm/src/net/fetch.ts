@@ -60,8 +60,8 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
   const environment = options.environment ?? process.env;
   const proxy = options.proxy ?? {};
   const all = resolveProxyValue(proxy.all, environment.all_proxy, environment.ALL_PROXY);
-  const http = normalizeProxyUrl(resolveProxyValue(proxy.http, environment.http_proxy, environment.HTTP_PROXY) ?? all, "HTTP proxy", options.redactor);
-  const https = normalizeProxyUrl(resolveProxyValue(proxy.https, environment.https_proxy, environment.HTTPS_PROXY) ?? all, "HTTPS proxy", options.redactor);
+  const http = normalizeProxyUrl(proxy.http === false ? undefined : resolveProxyValue(proxy.http, environment.http_proxy, environment.HTTP_PROXY) ?? all, "HTTP proxy", options.redactor);
+  const https = normalizeProxyUrl(proxy.https === false ? undefined : resolveProxyValue(proxy.https, environment.https_proxy, environment.HTTPS_PROXY) ?? all, "HTTPS proxy", options.redactor);
   const noProxy = normalizeNoProxy(resolveProxyValue(proxy.noProxy, environment.no_proxy, environment.NO_PROXY));
   const dispatcherOptions = {
     connectTimeout: timeout(options.connectTimeoutMs, 10_000, "connectTimeoutMs"),
@@ -80,6 +80,16 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
         noProxy: noProxy ?? "",
       })
     : new Agent(dispatcherOptions);
+  // Undici inherits HTTP_PROXY for HTTPS when its HTTPS option is empty.
+  // An explicit HTTPS opt-out needs a direct owner for both HTTPS and WSS.
+  const directHttps = proxy.https === false && http !== undefined ? new Agent(dispatcherOptions) : undefined;
+  const dispatchers = directHttps === undefined ? [dispatcher] : [dispatcher, directHttps];
+  const requestDispatcher = directHttps === undefined ? dispatcher : dispatcher.compose((dispatch) => (request, handler) => {
+    const protocol = request.origin === undefined ? undefined : new URL(request.origin).protocol;
+    return protocol === "https:" || protocol === "wss:"
+      ? directHttps.dispatch(request, handler)
+      : dispatch(request, handler);
+  });
   let closed = false;
   let closePromise: Promise<void> | undefined;
   const transportFetch: typeof fetch = async (input, init) => {
@@ -90,17 +100,20 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
     // SAFETY: both inputs implement the WHATWG RequestInfo contract consumed by Undici.
     const requestInput = normalizedInput as Parameters<typeof undiciFetch>[0];
     // SAFETY: RequestInit is preserved and the only Undici-specific addition is its dispatcher.
-    const requestInit = { ...init, dispatcher } as Parameters<typeof undiciFetch>[1];
+    const requestInit = {
+      ...init,
+      dispatcher: requestDispatcher,
+    } as Parameters<typeof undiciFetch>[1];
     const response = await undiciFetch(requestInput, requestInit);
     return domResponse(response);
   };
   const openWebSocket: NetworkWebSocketFactory = (url, headers) => {
     if (closed) throw new Error("Network transport is closed");
     return createWebSocketWithNativeErrorCapture(
-      () => new WebSocket(url, { headers: [...new Headers(headers).entries()], dispatcher }),
+      () => new WebSocket(url, { headers: [...new Headers(headers).entries()], dispatcher: requestDispatcher }),
     );
   };
-  const effectiveHttps = https ?? http;
+  const effectiveHttps = proxy.https === false ? undefined : https ?? http;
   return {
     fetch: transportFetch,
     openWebSocket,
@@ -118,7 +131,7 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
         let completed = false;
         let gracefulFailure: unknown;
         try {
-          const graceful = dispatcher.close();
+          const graceful = Promise.all(dispatchers.map((owned) => owned.close()));
           completed = await Promise.race([
             graceful.then(() => true),
             new Promise<false>((resolve) => {
@@ -132,11 +145,11 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
         }
         if (!completed) {
           try {
-            await dispatcher.destroy(
+            await Promise.all(dispatchers.map((owned) => owned.destroy(
               gracefulFailure instanceof Error
                 ? gracefulFailure
                 : new Error(`Network transport close exceeded ${closeTimeoutMs}ms`),
-            );
+            )));
           } catch (destroyFailure) {
             if (gracefulFailure !== undefined) {
               throw new AggregateError([gracefulFailure, destroyFailure], "Network transport cleanup failed");

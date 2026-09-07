@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import type { JsonValue } from "../../src/core/json.js";
 import type { FetchLike } from "../../src/providers/transport.js";
 import {
@@ -74,6 +75,53 @@ const lifecycleScope = (runId: string, step = 3): ProviderWireLifecycleScope => 
   branch: `branch-${runId}`,
   step,
 });
+
+for (const observer of ["interceptor", "lifecycle"] as const) {
+  for (const cleanup of ["pending", "rejected"] as const) {
+    test(`provider wire ${observer} failure cancels its unread response with ${cleanup} cleanup`, async () => {
+      const registry = new ProviderWireInterceptorRegistry();
+      const failure = new Error("response observer failed");
+      let release!: () => void;
+      const cleanupPending = new Promise<void>((resolve) => { release = resolve; });
+      let cancellations = 0;
+      const body = new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          assert.equal(reason, failure);
+          cancellations += 1;
+          if (cleanup === "rejected") throw new Error("response cleanup failed");
+          return cleanupPending;
+        },
+      });
+      const remove = observer === "interceptor"
+        ? registry.register("anthropic", { observeResponse() { throw failure; } })
+        : registry.registerLifecycle({ afterResponse() { throw failure; } });
+      let requests = 0;
+      const wrapped = registry.wrapFetch("anthropic", async () => {
+        requests += 1;
+        return new Response(body);
+      });
+      let settled = false;
+      const pending = registry.withScope(lifecycleScope("failed-response"), () => wrapped("https://provider.example/messages"))
+        .then((value) => ({ value }), (error) => ({ error }))
+        .then((result) => { settled = true; return result; });
+      try {
+        await nextTurn();
+        assert.equal(settled, true, "response hook failure must not await custom cancellation");
+        const result = await pending;
+        assert.ok("error" in result);
+        assert.equal(result.error, failure);
+        assert.equal(requests, 1);
+        assert.equal(cancellations, 1);
+        assert.equal(body.locked, false);
+      } finally {
+        remove();
+        release();
+        await pending;
+        await body.cancel(failure).catch(() => undefined);
+      }
+    });
+  }
+}
 
 test("provider wire interceptors patch JSON requests without exposing request credentials", async () => {
   const registry = new ProviderWireInterceptorRegistry();

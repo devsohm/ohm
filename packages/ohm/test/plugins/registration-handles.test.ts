@@ -117,6 +117,47 @@ test("staged registration handles are callable, idempotent, and commit nothing a
   assert.equal(disposeCalls, 0);
 });
 
+for (const phase of ["dispatch", "guard", "tool call"] as const) {
+  test(`self-disposing ${phase} listeners do not skip the next listener`, async (context) => {
+    const calls: string[] = [];
+    let first: PluginRegistrationHandle | undefined;
+    const removeFirst = async (): Promise<void> => {
+      calls.push("first");
+      assert.ok(first);
+      await first.dispose();
+    };
+    const { host } = await fixture(context, (api) => {
+      if (phase === "dispatch") {
+        first = api.on("session_start", removeFirst);
+        api.on("session_start", () => { calls.push("second"); });
+      } else if (phase === "guard") {
+        first = api.on("session_before_switch", removeFirst);
+        api.on("session_before_switch", () => { calls.push("second"); return { cancel: true }; });
+      } else {
+        first = api.on("tool_call", removeFirst);
+        api.on("tool_call", () => { calls.push("second"); return { block: true }; });
+      }
+    });
+    try {
+      if (phase === "dispatch") {
+        await host.dispatch("session_start", { reason: "startup", threadId: "self-removing" });
+      } else if (phase === "guard") {
+        assert.deepEqual(await host.reduceSessionBeforeSwitch({ reason: "new" }), { cancel: true });
+      } else {
+        const result = await host.reduceToolCall({
+          threadId: "self-removing", runId: "run", branch: "main", callId: "call",
+          name: "write", input: {}, index: 0,
+        });
+        assert.equal(result.blocked, true);
+      }
+      assert.deepEqual(calls, ["first", "second"]);
+      assert.equal(first?.disposed, true);
+    } finally {
+      await host.close();
+    }
+  });
+}
+
 test("committed handles remove exact registrations once and generation close marks survivors disposed", async (context) => {
   const handles: PluginRegistrationHandle[] = [];
   let api: PluginAPI | undefined;
@@ -349,6 +390,93 @@ test("older live handles cannot remove same-name replacements", async (context) 
   ]);
   await host.close();
 });
+
+for (const cleanupKind of ["sync", "async", "absent"] as const) {
+  test(`live tool disposal selects exactly one ${cleanupKind} cleanup owner`, async (context) => {
+    let api: PluginAPI | undefined;
+    const { host } = await fixture(context, (selected) => { api = selected; });
+    context.after(async () => await host.close());
+    assert.ok(api);
+    let cleanupCalls = 0;
+    let unregisterCalls = 0;
+    host.setLiveRegistrationHandler({
+      registerTool() {
+        if (cleanupKind === "absent") return;
+        if (cleanupKind === "async") return async () => { cleanupCalls += 1; };
+        return () => { cleanupCalls += 1; };
+      },
+      replaceTool() { throw new Error("Unexpected replacement"); },
+      unregisterTool() { unregisterCalls += 1; },
+    });
+    const handle = api.registerTool(tool("cleanup owner"));
+    await handle.dispose();
+    await handle.dispose();
+    await host.close();
+    assert.deepEqual(host.tools(), []);
+    assert.equal(cleanupCalls, cleanupKind === "absent" ? 0 : 1);
+    assert.equal(unregisterCalls, cleanupKind === "absent" ? 1 : 0);
+  });
+}
+
+for (const replacement of [false, true]) {
+  test(`invalid live tool rendering preserves ${replacement ? "the prior registration" : "an empty registry"}`, async (context) => {
+    let api: PluginAPI | undefined;
+    const { host } = await fixture(context, (selected) => { api = selected; });
+    context.after(async () => await host.close());
+    assert.ok(api);
+    const activeApi = api;
+    const externalTools: Array<ReturnType<typeof host.tools>[number]> = [];
+    const mutations: string[] = [];
+    host.setLiveRegistrationHandler({
+      registerTool(selected) { mutations.push("register"); externalTools.push(selected); },
+      replaceTool(previous, selected) {
+        mutations.push("replace");
+        const index = externalTools.indexOf(previous);
+        if (index >= 0) externalTools.splice(index, 1, selected);
+      },
+      unregisterTool(selected) {
+        mutations.push("unregister");
+        const index = externalTools.indexOf(selected);
+        if (index >= 0) externalTools.splice(index, 1);
+      },
+    });
+    const prior = replacement ? activeApi.registerTool(tool("prior")) : undefined;
+    const tools = host.tools();
+    const renderers = host.renderers();
+    mutations.length = 0;
+
+    // Computed fields deliberately model malformed JavaScript before wrappers can hide their types.
+    for (const [field, value] of [
+      ["renderShell", "invalid"],
+      ["execute", undefined],
+      ["prepareArguments", 42],
+      ["resources", null],
+      ["renderCall", {}],
+      ["renderResult", "invalid"],
+    ] as const) {
+      assert.throws(() => activeApi.registerTool({ ...tool("invalid"), [field]: value }), new RegExp(field, "u"));
+      assert.deepEqual(mutations, [], field);
+      assert.deepEqual(host.tools(), tools, field);
+      assert.deepEqual(externalTools, tools, field);
+      assert.deepEqual(host.renderers(), renderers, field);
+      assert.equal(prior?.disposed, replacement ? false : undefined);
+    }
+
+    await prior?.dispose();
+    assert.deepEqual(host.tools(), []);
+    assert.deepEqual([...externalTools], []);
+    assert.deepEqual(host.renderers(), []);
+    const optionalUndefined = tool("optional undefined");
+    for (const field of ["prepareArguments", "resources", "renderCall", "renderResult"]) {
+      Object.defineProperty(optionalUndefined, field, { value: undefined, enumerable: true });
+    }
+    const valid = activeApi.registerTool(optionalUndefined);
+    assert.equal(externalTools[0]?.definition.description, "optional undefined");
+    await valid.dispose();
+    assert.deepEqual(host.tools(), []);
+    assert.deepEqual(externalTools, []);
+  });
+}
 
 test("disposing a shortcut replacement restores the latest surviving owner", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-registration-shortcut-restore-"));

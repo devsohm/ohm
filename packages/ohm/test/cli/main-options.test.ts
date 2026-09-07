@@ -3,11 +3,13 @@ import { execFile, spawn } from "node:child_process";
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { optionalProperties } from "../../src/core/optional-properties.js";
 
 const STRING_VALUE = Type.String();
 const STRING_ARRAY_VALUE = Type.Array(STRING_VALUE);
@@ -18,6 +20,7 @@ const RUNTIME_COMMAND_REPORT_VALUE = Type.Object({
 const RPC_RECORD_VALUE = Type.Object({
   id: Type.Optional(Type.String()),
   type: Type.Optional(Type.String()),
+  method: Type.Optional(Type.String()),
   command: Type.Optional(Type.String()),
   success: Type.Optional(Type.Boolean()),
   extensionId: Type.Optional(Type.String()),
@@ -29,6 +32,11 @@ const RPC_RECORD_VALUE = Type.Object({
     operationId: Type.Optional(Type.String()),
     blocked: Type.Optional(Type.Array(Type.Unknown())),
   })),
+});
+const RPC_NOTIFICATION_VALUE = Type.Object({
+  type: Type.Literal("extension_ui_request"),
+  method: Type.Literal("notify"),
+  message: Type.String(),
 });
 const SESSION_EVENT_VALUE = Type.Object({
   type: Type.Optional(Type.String()),
@@ -75,18 +83,46 @@ const sessionV4Module = pathToFileURL(
   fileURLToPath(new URL("../../../kernel/src/session-v4/index.ts", import.meta.url)),
 ).href;
 
+function isolatedModeEnvironment(root: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH,
+    HOME: root,
+    OHM_HOME: join(root, "agent"),
+    OHM_OFFLINE: "1",
+    XDG_CONFIG_HOME: join(root, "config"),
+    XDG_DATA_HOME: join(root, "data"),
+    XDG_STATE_HOME: join(root, "state"),
+    XDG_CACHE_HOME: join(root, "cache"),
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(root, "absent-session-bus")}`,
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+    RUNNER_TEMP: process.env.RUNNER_TEMP,
+  };
+}
+
 async function executeWithClosedStdin(
   file: string,
   args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number; stdin?: string },
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number; stdin?: string; inputResponse?: string },
 ): Promise<{ stdout: string; stderr: string }> {
-  const { stdin, ...spawnOptions } = options;
+  const { stdin, inputResponse, ...spawnOptions } = options;
   const child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-  child.stdin.end(stdin);
+  if (inputResponse === undefined) child.stdin.end(stdin);
+  else {
+    const reader = createInterface({ input: child.stdout });
+    reader.on("line", (line) => {
+      const record = parseJson(RPC_RECORD_VALUE, line);
+      if (record.type !== "extension_ui_request" || record.method !== "input") return;
+      child.stdin.end(`${JSON.stringify({ type: "extension_ui_response", id: record.id, value: inputResponse })}\n`);
+      reader.close();
+    });
+    if (stdin !== undefined) child.stdin.write(stdin);
+  }
   await new Promise<void>((resolveExit, reject) => {
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
@@ -1526,6 +1562,116 @@ await main([
   assert.equal(await readFile(trustMarker, "utf8"), "1");
 });
 
+for (const completion of ["EOF", "response"] as const) {
+  test(`installed RPC startup accepts ${completion} while commands wait for startup`, async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "ohm-rpc-startup-dialog-"));
+    const workspace = join(root, "workspace");
+    const entrypoint = join(root, "entrypoint.mjs");
+    await mkdir(workspace);
+    context.after(async () => await rm(root, { recursive: true, force: true }));
+    const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
+    await writeFile(entrypoint, `
+import assert from "node:assert/strict";
+import { main } from ${JSON.stringify(mainModule)};
+import { RpcRuntimeDispatcher } from ${JSON.stringify(dispatcher)};
+let ready = false;
+const dispatch = RpcRuntimeDispatcher.prototype.dispatch;
+RpcRuntimeDispatcher.prototype.dispatch = async function(command) {
+  assert.equal(ready, true, "command ran before session_start completed");
+  return await dispatch.call(this, command);
+};
+await main([
+  "--mode", "rpc", "--workspace", ${JSON.stringify(workspace)},
+  "--offline", "--no-plugin-code", "--no-session", "--no-tools",
+  "--no-skills", "--no-prompt-templates", "--no-themes",
+], {
+  pluginFactories: [{ name: "startup-dialog", factory(ohm) {
+    ohm.on("session_start", async (_event, context) => {
+      assert.equal(await context.ui.input("Startup input"), ${completion === "response" ? '"accepted"' : "undefined"});
+      ready = true;
+    });
+  } }],
+});
+`);
+    const result = await executeWithClosedStdin(process.execPath, ["--import", "tsx", entrypoint], {
+      cwd: repositoryRoot,
+      env: isolatedModeEnvironment(root),
+      timeout: 20_000,
+      stdin: `${JSON.stringify({ id: "state", type: "get_state" })}\n${JSON.stringify({ id: "abort", type: "abort" })}\n`,
+      ...optionalProperties(completion === "response" ? { inputResponse: "accepted" } : undefined),
+    });
+    assert.equal(result.stderr, "");
+    const records = result.stdout.trim().split("\n").map((line) => parseJson(RPC_RECORD_VALUE, line));
+    assert.equal(records.find((record) => record.id === "state")?.success, true, result.stdout);
+    assert.equal(records.find((record) => record.id === "abort")?.success, true, result.stdout);
+  });
+}
+
+for (const closure of ["clean EOF", "plugin shutdown"] as const) {
+  test(`installed RPC ${closure} preserves notification output ownership`, async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "ohm-rpc-notification-drain-"));
+    const workspace = join(root, "workspace");
+    const entrypoint = join(root, "entrypoint.mjs");
+    const dispatcherModule = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
+    const bridgeModule = new URL("../../src/interfaces/rpc-plugin-ui.ts", import.meta.url).href;
+    await mkdir(workspace);
+    context.after(async () => await rm(root, { recursive: true, force: true }));
+    await writeFile(entrypoint, `
+import assert from "node:assert/strict";
+import { main } from ${JSON.stringify(mainModule)};
+import { RpcRuntimeDispatcher } from ${JSON.stringify(dispatcherModule)};
+import { RpcPluginUiBridge } from ${JSON.stringify(bridgeModule)};
+let requestShutdown;
+let shutdownRequested = false;
+let drainCalls = 0;
+const drain = RpcPluginUiBridge.prototype.drain;
+RpcPluginUiBridge.prototype.drain = function() { drainCalls += 1; return drain.call(this); };
+const dispatch = RpcRuntimeDispatcher.prototype.dispatch;
+RpcRuntimeDispatcher.prototype.dispatch = async function(command) {
+  const response = await dispatch.call(this, command);
+  if (${JSON.stringify(closure)} === "plugin shutdown") { shutdownRequested = true; requestShutdown(); }
+  return response;
+};
+const write = process.stdout.write.bind(process.stdout);
+process.stdout.write = function(chunk, encodingOrCallback, callback) {
+  if (!String(chunk).includes('"method":"notify"')) return write(chunk, encodingOrCallback, callback);
+  const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+  return write(chunk, (error) => { setTimeout(() => done?.(error), 25); });
+};
+await main([
+  "--mode", "rpc", "--workspace", ${JSON.stringify(workspace)},
+  "--offline", "--no-plugin-code", "--no-session", "--no-tools",
+  "--no-skills", "--no-prompt-templates", "--no-themes",
+], {
+  pluginFactories: [{ name: "queued-notifications", factory(ohm) {
+    ohm.on("session_start", (_event, context) => {
+      requestShutdown = () => context.shutdown();
+      for (let index = 0; index < 8; index += 1) context.ui.notify("queued-" + index);
+    });
+  } }],
+});
+assert.equal(shutdownRequested, ${closure === "plugin shutdown"});
+assert.equal(drainCalls, ${closure === "plugin shutdown" ? 0 : 1});
+`);
+    const result = await executeWithClosedStdin(process.execPath, ["--import", "tsx", entrypoint], {
+      cwd: repositoryRoot,
+      env: isolatedModeEnvironment(root),
+      timeout: 20_000,
+      stdin: `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
+    });
+    assert.equal(result.stderr, "");
+    const records = result.stdout.trim().split("\n").map((line) => parseJson(RPC_RECORD_VALUE, line));
+    assert.equal(records.find((record) => record.id === "state")?.success, true, result.stdout);
+    if (closure === "clean EOF") {
+      assert.deepEqual(records.filter((record) => record.method === "notify").map((record) => {
+        assert.ok(Value.Check(RPC_NOTIFICATION_VALUE, record));
+        return record.message;
+      }),
+        Array.from({ length: 8 }, (_, index) => `queued-${index}`));
+    }
+  });
+}
+
 test("installed RPC mode rebinds extension commands through the session runtime owner", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-main-rpc-owner-"));
   const workspace = join(root, "workspace");
@@ -1789,6 +1935,71 @@ await main([
   }
   assert.equal(types.includes("run_started"), false);
   assert.equal(types.includes("message_appended"), false);
+});
+
+test("installed JSON launcher emits compact versioned progress with an offline provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-main-json-wire-"));
+  const workspace = join(root, "workspace");
+  const pluginPath = join(root, "provider.mjs");
+  try {
+    await mkdir(workspace);
+    await writeFile(pluginPath, `
+export default function activate(ohm) {
+  ohm.registerProvider("json-wire-fixture", {
+    api: "openai-responses", apiKey: "fixture-key", baseUrl: "https://example.invalid/v1",
+    models: [{
+      id: "inline-model", name: "Inline Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8000, maxTokens: 1000,
+    }],
+    streamSimple: async function* () {
+      yield { type: "response_start", model: "inline-model" };
+      for (const text of ["one", " two", " three"]) yield { type: "text_delta", part: 0, text };
+      yield { type: "response_end", reason: "stop", state: { kind: "openai_responses", outputItems: [] } };
+    },
+  });
+}
+`);
+    const noNetwork = `data:text/javascript,${encodeURIComponent(`
+import { Socket } from "node:net";
+globalThis.fetch = async () => { throw new Error("JSON fixture forbids network fetch"); };
+Socket.prototype.connect = function() { throw new Error("JSON fixture forbids outbound connections"); };
+`)}`;
+    const result = await executeWithClosedStdin(process.execPath, [
+      "--import", "tsx", "--import", noNetwork, cliModule,
+      "--mode", "json", "--workspace", workspace, "--offline", "--no-session", "--no-tools",
+      "--no-skills", "--no-prompt-templates", "--no-themes", "--approve", "--plugin", pluginPath,
+      "--provider", "json-wire-fixture", "--model", "inline-model", "hello",
+    ], {
+      cwd: repositoryRoot,
+      env: isolatedModeEnvironment(root),
+      timeout: 20_000,
+    });
+    assert.equal(result.stderr, "");
+    const wireRecord = Type.Object({
+      type: Type.String(),
+      streamVersion: Type.Optional(Type.Number()),
+      message: Type.Optional(Type.Unknown()),
+      assistantMessageEvent: Type.Optional(Type.Object({
+        type: Type.String(), partial: Type.Optional(Type.Unknown()), delta: Type.Optional(Type.String()),
+      })),
+    });
+    const records = result.stdout.trim().split("\n").map((line) => parseJson(wireRecord, line));
+    assert.equal(records[0]?.type, "session");
+    const progress = records.filter((record) => record.type === "message_update");
+    assert.deepEqual(progress.map((record) => record.assistantMessageEvent?.type), [
+      "text_start", "text_delta", "text_delta", "text_delta", "text_end",
+    ]);
+    assert.deepEqual(progress.filter((record) => record.assistantMessageEvent?.type === "text_delta")
+      .map((record) => record.assistantMessageEvent?.delta), ["one", " two", " three"]);
+    for (const record of progress) {
+      assert.equal(record.streamVersion, 1);
+      assert.equal(Object.hasOwn(record, "message"), false);
+      assert.equal(Object.hasOwn(record.assistantMessageEvent!, "partial"), false);
+    }
+    assert.equal(records.some((record) => record.type === "message_end"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("installed JSON mode keeps metadata and provider-failure stdout structured", async (context) => {

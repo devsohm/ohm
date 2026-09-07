@@ -6,6 +6,7 @@ import type {
   SessionV4RecordCollections,
 } from "@ohm/kernel/session-v4";
 import { STRING_VALUE } from "../core/value-schemas.js";
+import { projectedSessionEntryCount, type SessionEntryProjectionMetadata } from "./session-entry-projection.js";
 
 const MIB = 1024 * 1024;
 
@@ -130,6 +131,7 @@ class SqliteRecords<RecordValue, Metadata> implements SessionV4RecordCollection<
 export class SqliteSessionStateRecords {
   readonly collections: SessionV4RecordCollections;
   readonly #clear: Array<() => void> = [];
+  readonly #nodeMetadata: () => IterableIterator<[string, SessionV4NodeMetadata & SessionEntryProjectionMetadata]>;
   #closed = false;
   #faulted = false;
   #fault: unknown;
@@ -161,13 +163,18 @@ export class SqliteSessionStateRecords {
     };
     // Fixed partitions total 8 MiB serialized weight / 128 decoded records.
     // Oversized records are transient reads and are never admitted to these caches.
+    const nodes = create("nodes", (node: Parameters<SessionV4RecordCollections["nodes"]["set"]>[1]) => {
+      const metadata: SessionV4NodeMetadata & SessionEntryProjectionMetadata = {
+        id: node.id, parentId: node.parentId, nodeType: node.nodeType,
+        projectedEntryCount: projectedSessionEntryCount(node),
+      };
+      if (node.operationId !== undefined) metadata.operationId = node.operationId;
+      if (node.nodeType === "message") metadata.role = node.role;
+      return metadata;
+    }, 2 * MIB, 32);
+    this.#nodeMetadata = () => nodes.metadataEntries();
     this.collections = {
-      nodes: create("nodes", (node: Parameters<SessionV4RecordCollections["nodes"]["set"]>[1]) => {
-        const metadata: SessionV4NodeMetadata = { id: node.id, parentId: node.parentId, nodeType: node.nodeType };
-        if (node.operationId !== undefined) metadata.operationId = node.operationId;
-        if (node.nodeType === "message") metadata.role = node.role;
-        return metadata;
-      }, 2 * MIB, 32),
+      nodes,
       commits: create("commits", (commit: Parameters<SessionV4RecordCollections["commits"]["set"]>[1], bytes) => {
         this.#lastCommitSequence = commit.sequence;
         this.#lastCommitBytes = bytes;
@@ -199,6 +206,22 @@ export class SqliteSessionStateRecords {
   }
 
   assertHealthy(): void { this.#guard(() => undefined); }
+
+  /** Normalized ordinal bounds; scanning existing metadata never decodes payloads. */
+  getEntryProjectionMetadataPage(offset: number, limit: number): SessionEntryProjectionMetadata[] {
+    return this.#guard(() => {
+      const entries: SessionEntryProjectionMetadata[] = [];
+      let ordinal = 0;
+      for (const [, metadata] of this.#nodeMetadata()) {
+        if (ordinal >= offset + limit) break;
+        if (ordinal >= offset) entries.push({
+          id: metadata.id, parentId: metadata.parentId, projectedEntryCount: metadata.projectedEntryCount,
+        });
+        ordinal += 1;
+      }
+      return entries;
+    });
+  }
 
   /** Used immediately after accepted replay, never after tentative transition validation. */
   replayCommitBytes(sequence: number): number {

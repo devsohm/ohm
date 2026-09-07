@@ -144,14 +144,7 @@ export async function createAgentSession(
 			modelsPath: resolve(agentDir, "model-providers.json"),
 		})
 		: undefined;
-	const modelRuntime = ownedModelRuntime ?? publicRuntime(options.modelRuntime!);
-	const models = modelRuntime.models();
-	const providers = new ProviderRegistry(
-		models.getProviders().map((provider) => providerAdapterFromModels(models, provider.id)),
-	);
-	const manager = options.sessionManager
-		?? SessionManager.create(cwd, settings.getSessionDir() ?? getDefaultSessionDir(cwd, agentDir));
-	const loader = options.resourceLoader ?? new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings });
+	let manager: SessionManager | undefined;
 	let session: AgentSession | undefined;
 	let pluginsResult: ResourcePluginsResult | undefined;
 	let observability: RuntimeObservability | undefined;
@@ -177,6 +170,14 @@ export async function createAgentSession(
 		if (failures.length > 1) throw new AggregateError(failures, "SDK session cleanup failed");
 	};
 	try {
+		const modelRuntime = ownedModelRuntime ?? publicRuntime(options.modelRuntime!);
+		const models = modelRuntime.models();
+		const providers = new ProviderRegistry(
+			models.getProviders().map((provider) => providerAdapterFromModels(models, provider.id)),
+		);
+		manager = options.sessionManager
+			?? SessionManager.create(cwd, settings.getSessionDir() ?? getDefaultSessionDir(cwd, agentDir));
+		const loader = options.resourceLoader ?? new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings });
 		if (options.providerWireLifecycle !== undefined && options.modelRuntime === undefined) {
 			throw new Error("providerWireLifecycle requires a caller-supplied modelRuntime");
 		}
@@ -315,7 +316,17 @@ export async function createAgentSession(
 				...optionalProperties(requestedThinking === session.thinkingLevel ? undefined : { thinkingLevel: requestedThinking }),
 			});
 		}
-		if (options.resourceLoader === undefined) await session.bindPlugins({ mode: "sdk" });
+		if (options.resourceLoader === undefined) {
+			let shutdownRequested = false;
+			await session.bindPlugins({
+				mode: "sdk",
+				shutdownHandler: () => {
+					shutdownRequested = true;
+					void activeSession.close();
+				},
+			});
+			if (shutdownRequested) throw new Error("AgentSession closed during plugin startup");
+		}
 
 		const fallbackModel = session.model ?? (session.suspendedRun === undefined ? undefined : selected);
 		const fallback = missingPersisted && fallbackModel !== undefined
@@ -327,12 +338,18 @@ export async function createAgentSession(
 			...optionalProperties(fallback === undefined ? undefined : { modelFallbackMessage: fallback }),
 		};
 	} catch (error) {
-		if (session !== undefined) await session.close().catch(() => undefined);
-		else manager.closeV4Store();
+		const failures: unknown[] = [error];
+		try {
+			if (session !== undefined) await session.close();
+			else manager?.closeV4Store();
+		} catch (cleanupError) { failures.push(cleanupError); }
 		if (session === undefined) {
-			pluginsResult?.runtime.invalidate("Plugin runtime disposed after SDK construction failure");
+			try { pluginsResult?.runtime.invalidate("Plugin runtime disposed after SDK construction failure"); }
+			catch (cleanupError) { failures.push(cleanupError); }
 		}
-		await disposeServices().catch(() => undefined);
+		try { await disposeServices(); }
+		catch (cleanupError) { failures.push(cleanupError); }
+		if (failures.length > 1) throw new AggregateError(failures, "SDK session initialization and cleanup failed");
 		throw error;
 	}
 }

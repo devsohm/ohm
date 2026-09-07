@@ -227,6 +227,36 @@ test("extension overrides receive and return the complete load result", async (t
   assert.deepEqual(result.errors, [{ path: "<override>", error: "synthetic diagnostic" }]);
 });
 
+test("published refresh keeps its generation when retired plugin cleanup fails", async (t) => {
+  const value = await fixture();
+  let generation = 0;
+  let rollbacks = 0;
+  const disposed: number[] = [];
+  const loader = new DefaultResourceLoader({
+    cwd: value.cwd,
+    agentDir: value.agentDir,
+    settingsManager: value.settings,
+    pluginFactories: [{ name: "retirement-failure", factory(api) {
+      const current = ++generation;
+      api.registerCommand(`generation-${current}`, { async handler() {} });
+      api.onDispose(() => {
+        disposed.push(current);
+        if (current === 1) throw new Error("retired generation cleanup failed");
+      });
+    } }],
+  });
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
+  await loader.refresh();
+  const previous = loader.getPlugins();
+  await loader.refresh({ preparePlugins() { return () => { rollbacks += 1; }; } });
+  assert.notEqual(loader.getPlugins(), previous);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["generation-2"]);
+  assert.equal(rollbacks, 0);
+  assert.deepEqual([...disposed], [1]);
+  assert.equal(loader.getPlugins().errors.length, 1);
+  assert.match(loader.getPlugins().errors[0]!.error, /retired generation cleanup failed/u);
+});
+
 test("failed and finally-aborted refreshes leave every published resource view on the prior generation", async (t) => {
   const value = await fixture();
   const extension = join(value.root, "atomic.mjs");
@@ -622,6 +652,41 @@ test("refresh retires the previous direct API before awaiting discarded candidat
     await refresh;
   }
   assert.equal(pluginHost(loader.getPlugins()), selectedHost);
+});
+
+test("throwing project trust resolution closes its unpublished plugin host", async (t) => {
+  const value = await fixture();
+  let generation = 0;
+  const disposed: number[] = [];
+  const loader = new DefaultResourceLoader({
+    cwd: value.cwd,
+    agentDir: value.agentDir,
+    settingsManager: value.settings,
+    pluginFactories: [{ name: "trust-cleanup", factory(api) {
+      const selected = ++generation;
+      api.onDispose(() => { disposed.push(selected); });
+    } }],
+  });
+  let failedCandidate: ReturnType<typeof pluginHost> | undefined;
+  t.after(async () => {
+    await failedCandidate?.close();
+    await pluginHost(loader.getPlugins()).close();
+  });
+  await loader.refresh();
+  const previous = loader.getPlugins();
+  const failure = new Error("trust resolver failed");
+
+  const [outcome] = await Promise.allSettled([loader.refresh({
+    async resolveProjectTrust({ pluginsResult }) {
+      failedCandidate = pluginHost(pluginsResult);
+      throw failure;
+    },
+  })]);
+
+  assert.equal(outcome?.status, "rejected");
+  if (outcome?.status === "rejected") assert.equal(outcome.reason, failure);
+  assert.equal(loader.getPlugins(), previous);
+  assert.deepEqual([...disposed], [2]);
 });
 
 test("project trust bootstrap exposes user extensions before project resources", async (t) => {

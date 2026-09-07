@@ -317,6 +317,31 @@ test("OpenAI Codex headless login is abortable while polling", async () => {
   }), /cancelled by test/u);
 });
 
+for (const [error, expected] of [["access_denied", /was denied/u], ["expired_token", /authorization expired/u]] as const) {
+  for (const status of [403, 404]) {
+    test(`OpenAI Codex device login treats ${error} on HTTP ${status} as terminal`, async () => {
+      let polls = 0;
+      let clock = 0;
+      await assert.rejects(authorizeOpenAICodex({
+        flow: "device",
+        clientId: "fixture-client",
+        now: () => clock,
+        sleep: async () => { clock += 15 * 60_000; },
+        showAuthorization() {},
+        fetch: async (input) => {
+          if (String(input) === OPENAI_CODEX_DEVICE_ENDPOINT) {
+            return json({ device_auth_id: "device-auth", user_code: "ABCD-EFGH", interval: 1 });
+          }
+          assert.equal(String(input), OPENAI_CODEX_DEVICE_TOKEN_ENDPOINT);
+          polls += 1;
+          return json({ error }, status);
+        },
+      }), expected);
+      assert.equal(polls, 1);
+    });
+  }
+}
+
 test("OpenAI Codex default polling sleep does not inspect a hostile abort reason", async () => {
   const controller = new AbortController();
   let traps = 0;

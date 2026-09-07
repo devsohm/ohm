@@ -8,10 +8,12 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 
 import type { CanonicalMessage } from "../../src/core/types.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
 import { STRING_VALUE } from "../../src/core/value-schemas.js";
 import { createPluginRuntime } from "../../src/plugins/compat-runtime.js";
 import type { LoadPluginsResult } from "../../src/plugins/direct.js";
-import type { AgentSession, AgentSessionReplacedContext } from "../../src/service/agent-session.js";
+import { ProviderRegistry } from "../../src/providers/registry.js";
+import { AgentSession, type AgentSessionReplacedContext } from "../../src/service/agent-session.js";
 import { createAgentSessionRuntimeCommandActions } from "../../src/service/runtime-command-actions.js";
 import {
   AgentSessionRuntime,
@@ -134,6 +136,7 @@ interface AgentSessionTestDouble {
   readonly nativeSessionManager?: SessionManager;
   readonly sessionFile: string | undefined;
   readonly modelScopeOverride: readonly string[] | undefined;
+  hasPluginHandlers(eventType: string): boolean;
   close(): Promise<void>;
   createReplacedSessionContext(): AgentSessionReplacedContext;
   setModelScope?(selectors: readonly string[]): void;
@@ -172,6 +175,7 @@ function fakeSession(
     get nativeSessionManager() { return manager; },
     get sessionFile() { return manager.getSessionFile(); },
     get modelScopeOverride() { return modelScope === undefined ? undefined : [...modelScope]; },
+    hasPluginHandlers() { return false; },
     setModelScope(selectors) { modelScope = [...selectors]; },
     async close() {
       events.push(`session.close:${generation}`);
@@ -210,6 +214,101 @@ function factory(events: string[]): FactoryFixture {
     },
   };
 }
+
+const bareSessionFactory: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => ({
+  session: await AgentSession.create({
+    sessionManager,
+    providers: new ProviderRegistry(),
+    workspace: cwd,
+    settingsManager: SettingsManager.inMemory(),
+  }),
+  services: { cwd, agentDir },
+});
+
+for (const operation of ["new", "fork", "switch", "dispose"] as const) {
+  test(`a real runtime without plugins supports ${operation}`, async (context) => {
+    const root = await temporaryRoot();
+    const manager = SessionManager.create(root, join(root, "sessions"), { id: "bare" });
+    const entry = manager.appendMessage(message("user", "retained history"));
+    const runtime = await createAgentSessionRuntime(bareSessionFactory, {
+      cwd: root, agentDir: join(root, "agent"), sessionManager: manager,
+    });
+    context.after(async () => await runtime.session.close());
+    const initial = runtime.session;
+    if (operation === "dispose") {
+      await runtime.dispose();
+      await runtime.dispose();
+      assert.equal(initial.lifecycleSignal.aborted, true);
+      return;
+    }
+    let result: { cancelled: boolean };
+    if (operation === "new") result = await runtime.newSession();
+    else if (operation === "fork") result = await runtime.fork(entry, { position: "at" });
+    else {
+      const target = SessionManager.create(root, join(root, "sessions"), { id: "target" });
+      const path = persist(target);
+      target.closeV4Store();
+      result = await runtime.switchSession(path);
+      assert.equal(runtime.session.sessionId, "target");
+    }
+    assert.deepEqual(result, { cancelled: false });
+    assert.notEqual(runtime.session, initial);
+    assert.equal(initial.lifecycleSignal.aborted, true);
+    assert.equal(runtime.session.lifecycleSignal.aborted, false);
+    if (operation === "fork") {
+      assert.equal(runtime.session.nativeSessionManager.getEntry(entry)?.id, entry);
+    }
+    await runtime.dispose();
+  });
+}
+
+test("a missing replacement plugin context recovers the previous bare session without invoking withSession", async (context) => {
+  const root = await temporaryRoot();
+  const manager = SessionManager.create(root, join(root, "sessions"), { id: "bare-context" });
+  const entry = manager.appendMessage(message("user", "recover this history"));
+  const runtime = await createAgentSessionRuntime(bareSessionFactory, {
+    cwd: root, agentDir: join(root, "agent"), sessionManager: manager,
+  });
+  context.after(async () => await runtime.session.close());
+  const initial = runtime.session;
+  let callbackInvoked = false;
+  await assert.rejects(runtime.newSession({
+    withSession: async () => { callbackInvoked = true; },
+  }), /no plugin runner/u);
+  assert.equal(callbackInvoked, false);
+  assert.equal(initial.lifecycleSignal.aborted, true);
+  assert.notEqual(runtime.session, initial);
+  assert.equal(runtime.session.lifecycleSignal.aborted, false);
+  assert.equal(runtime.session.sessionId, "bare-context");
+  assert.equal(runtime.session.nativeSessionManager.getEntry(entry)?.id, entry);
+  assert.deepEqual(await runtime.newSession(), { cancelled: false });
+  await runtime.dispose();
+});
+
+test("same-file resume resolves the stored workspace after a temporary cwd override", async (context) => {
+  const root = await temporaryRoot();
+  const storedCwd = join(root, "stored-workspace");
+  const overrideCwd = join(root, "override-workspace");
+  await mkdir(storedCwd);
+  await mkdir(overrideCwd);
+  const manager = SessionManager.create(storedCwd, join(root, "sessions"), { id: "same-file" });
+  const path = persist(manager);
+  manager.closeV4Store();
+  const opened = SessionManager.open(path, undefined, overrideCwd);
+  const runtime = await createAgentSessionRuntime(bareSessionFactory, {
+    cwd: overrideCwd, agentDir: join(root, "agent"), sessionManager: opened,
+  }, {
+    beforeSwitch: async () => undefined,
+    shutdown: async () => undefined,
+  });
+  context.after(async () => await runtime.session.close());
+  assert.equal(runtime.cwd, overrideCwd);
+  assert.deepEqual(await runtime.switchSession(path), { cancelled: false });
+  assert.equal(runtime.cwd, storedCwd);
+  assert.equal(runtime.session.nativeSessionManager.getCwd(), storedCwd);
+  assert.equal(runtime.session.sessionId, "same-file");
+  await runtime.dispose();
+});
 
 function persist(manager: SessionManager): string {
   manager.appendMessage(message("user", "hello"));
@@ -386,7 +485,6 @@ test("switching the owned persistent file releases its writer before reopening i
     "session.close:1",
     "services.close:1",
     "factory:2",
-    "context:2",
   ]);
   await runtime.dispose();
 
@@ -969,7 +1067,6 @@ test("a persistent V4 session can fork its durably saved first user message", as
     "session.close:1",
     "services.close:1",
     "factory:2",
-    "context:2",
   ]);
 });
 
@@ -1513,6 +1610,7 @@ test("caller cancellation cannot recover until destructive teardown finishes", a
           get sessionManager() { return sessionManager; },
           get sessionFile() { return sessionManager.getSessionFile(); },
           get modelScopeOverride() { return undefined; },
+          hasPluginHandlers() { return false; },
           async close() {
             events.push("session.close:1:start");
             closeStarted.resolve();

@@ -78,8 +78,12 @@ test("session resume offers the active cwd when the stored cwd is missing, then 
 
 test("session resume forwards its caller signal through an explicit path switch", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-resume-signal-"));
-  context.after(async () => await rm(root, { recursive: true, force: true }));
-  const manager = SessionManager.create(root, root, { id: "resume-signal" });
+  let manager: SessionManager | undefined;
+  context.after(async () => {
+    manager?.closeV4Store();
+    await rm(root, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(root, root, { id: "resume-signal" });
   manager.appendMessage({
     id: "message",
     role: "user",

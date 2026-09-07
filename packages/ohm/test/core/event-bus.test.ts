@@ -18,6 +18,23 @@ test("event bus supports independent subscriptions, disposal, and clearing", asy
   assert.deepEqual(seen, [1]);
 });
 
+for (const reset of ["clear", "unsubscribe"] as const) {
+  test(`stale event-bus unsubscribe preserves replacement listeners after ${reset}`, () => {
+    const bus = createEventBus();
+    const off = bus.on("resource", () => {});
+    if (reset === "clear") bus.clear();
+    else off();
+    const seen: number[] = [];
+    bus.on("resource", () => { seen.push(1); });
+
+    off();
+    bus.emit("resource", null);
+
+    assert.deepEqual(seen, [1]);
+    bus.clear();
+  });
+}
+
 test("event bus treats error as an ordinary topic and permits the supported listener volume without warnings", { concurrency: false }, async () => {
   const bus = createEventBus();
   let warnings = 0;

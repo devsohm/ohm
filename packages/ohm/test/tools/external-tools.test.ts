@@ -142,6 +142,39 @@ test("external tool discovery never downloads while offline", async (t) => {
   }), undefined);
 });
 
+for (const failure of ["HTTP rejection", "declared overflow", "streamed overflow"] as const) {
+  test(`fd installation cancels its response body after ${failure}`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ohm-external-tool-body-"));
+    const originalFetch = globalThis.fetch;
+    let cancellations = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (failure === "streamed overflow") controller.enqueue(chunk);
+      },
+      cancel() { cancellations += 1; },
+    });
+    t.after(async () => {
+      globalThis.fetch = originalFetch;
+      await body.cancel();
+      await rm(root, { recursive: true, force: true });
+    });
+    const headers = new Headers();
+    if (failure === "declared overflow") headers.set("content-length", String(64 * 1024 * 1024 + 1));
+    globalThis.fetch = async () => new Response(body, {
+      status: failure === "HTTP rejection" ? 503 : 200,
+      headers,
+    });
+
+    assert.equal(await ensureFd({
+      environment: { OHM_HOME: root, PATH: "" },
+      silent: true,
+    }), undefined);
+    assert.equal(body.locked, false);
+    assert.equal(cancellations, 1, "The installation owner must cancel the rejected response body");
+  });
+}
+
 test("fd discovery falls back to executable PATH entries", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-external-tool-path-"));
   t.after(async () => await rm(root, { recursive: true, force: true }));

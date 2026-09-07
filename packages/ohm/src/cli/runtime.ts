@@ -40,6 +40,7 @@ import {
   canonicalExistingPath,
   TrustStore,
 } from "../config/index.js";
+import { resolvePluginDataRoot } from "../config/plugin-data-root.js";
 import type { ModelInfo, ModelProtocolFamily, ProviderRequest } from "../core/types.js";
 import { errorMessage } from "../core/errors.js";
 import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
@@ -130,7 +131,7 @@ import {
   type RuntimeInlinePlugin,
 } from "../plugins/runtime.js";
 import type { PluginCommandContextActions } from "../plugins/direct.js";
-import { pluginSessionManager } from "../plugins/session-contract.js";
+import { canonicalSessionEntryId, pluginSessionManager } from "../plugins/session-contract.js";
 import { expandPath, agentPaths, type AgentPaths } from "./paths.js";
 import { createNetworkTransport, type NetworkTransport } from "../net/index.js";
 import { sha256 } from "../tools/hash.js";
@@ -190,7 +191,7 @@ export interface LoadedRuntime {
 
 export interface RuntimeRefreshOptions {
   signal?: AbortSignal;
-  preparePlugins?: (extensions: RuntimePluginHost) => void | Promise<void>;
+  preparePlugins?: (plugins: RuntimePluginHost) => void | Promise<void>;
   prepareSettings?: (settings: SettingsManager) => void | Promise<void>;
   onCommit?: () => void | Promise<void>;
   beforeSessionStart?: (session: AgentSession) => void | Promise<void>;
@@ -211,7 +212,7 @@ interface RuntimeOptions {
   ephemeral?: boolean;
   pluginCode?: boolean;
   pluginPaths?: readonly string[];
-  /** Trusted in-process extension factories supplied by the embedding caller. */
+  /** Trusted in-process plugin factories supplied by the embedding caller. */
   pluginFactories?: readonly RuntimeInlinePlugin[];
   pluginRuntime?: boolean;
   /** CLI explicit package selection survives automatic discovery suppression. */
@@ -237,7 +238,7 @@ interface RuntimeOptions {
   sessionManager?: SessionManager;
   /** Session replacement reason supplied by an AgentSessionRuntime owner. */
   sessionStartEvent?: RuntimeSessionStartEvent;
-  /** Already-active user and invocation extensions used for project trust. */
+  /** Already-active user and invocation plugins used for project trust. */
   preactivatedRuntimePlugins?: RuntimePluginHost;
   /** Invocation-scoped project trust policy shared across workspace changes. */
   projectTrustResolver?: ProjectTrustResolver;
@@ -1262,8 +1263,8 @@ export async function activatePackageCandidate(candidate: PackageActivationCandi
 }
 
 /**
- * Activates only launch-authorized extensions before project trust is known.
- * Project configuration, packages, extensions, prompts, skills, and themes are
+ * Activates only launch-authorized plugins before project trust is known.
+ * Project configuration, packages, plugins, prompts, skills, and themes are
  * intentionally not inspected here.
  */
 export async function preactivateProjectTrustPlugins(
@@ -1292,10 +1293,10 @@ export async function preactivateProjectTrustPlugins(
     selected.push(await packages.resolvePluginSources([...options.pluginPaths!], { temporary: true }));
   }
   const direct = directPluginSelection(selected, false);
-  if (direct.paths.length > 128) throw new Error("At most 128 pre-trust runtime extensions may be loaded");
+  if (direct.paths.length > 128) throw new Error("At most 128 pre-trust runtime plugins may be loaded");
   return await loadDirectPlugins(direct.paths, {
     workspace,
-    dataRoot: join(paths.agentDirectory, "extension-data"),
+    dataRoot: resolvePluginDataRoot(paths.agentDirectory),
     projectTrusted: false,
     directPathMetadata: direct.metadata,
     inlinePlugins: options.pluginFactories ?? [],
@@ -1314,8 +1315,10 @@ async function loadResourceGeneration(
   signal?: AbortSignal,
   preactivatedRuntimePlugins?: RuntimePluginHost,
   codexTransportObserver?: OpenAICodexTransportObserver,
+  pluginDataRoot?: string,
 ): Promise<RuntimeResourceGeneration> {
   signal?.throwIfAborted();
+  const dataRoot = preactivatedRuntimePlugins?.dataRoot ?? pluginDataRoot ?? resolvePluginDataRoot(paths.agentDirectory);
   const trust = new TrustStore(paths.trustStore);
   const requestedTrust = options.projectTrusted ?? await trust.isTrusted(workspace);
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: requestedTrust });
@@ -1334,122 +1337,8 @@ async function loadResourceGeneration(
   const modelCatalogBaseline = await modelCatalogStore.read(RUNTIME_MODEL_CATALOG_MAX_BYTES).catch(() => undefined);
   const providers = new ProviderRegistry([], { catalogStore: modelCatalogStore });
   const configuredProviderCleanups: Array<() => void> = [];
-  const providerWire = new ProviderWireInterceptorRegistry();
-  const authBindings: ProviderAuthBinding[] = [];
-  const providerConfigs = configuredProviderConfigs(settings, process.env);
-  const providerConfigsById = new Map<string, RuntimeProviderConfig>();
-  for (const [configuredName, providerConfig] of Object.entries(providerConfigs)) {
-    const providerOptions: NonNullable<Parameters<typeof createProviderAdapter>[2]> & OpenAICodexObservabilityOptions = {
-      fetch: network.fetch,
-      ...optionalProperties(network.openWebSocket === undefined ? undefined : { webSocket: network.openWebSocket }),
-      wire: providerWire,
-      environment: process.env,
-      ...optionalProperties(codexTransportObserver === undefined ? undefined : { [OPENAI_CODEX_TRANSPORT_OBSERVER]: codexTransportObserver }),
-    };
-    const adapter = createProviderAdapter(providerConfig, broker, providerOptions);
-    providers.register(adapter);
-    providerConfigsById.set(adapter.id, providerConfig);
-    authBindings.push(runtimeProviderAuthBinding(configuredName, providerConfig, adapter.id, process.env));
-  }
-  const configuredSessionDirectory = options.sessionDirectory ?? settings.getSessionDir();
-  const sessionDirectory = configuredSessionDirectory === undefined
-    ? undefined
-    : expandPath(configuredSessionDirectory, workspace);
-  const directPackages = new DefaultPackageManager({
-    cwd: workspace,
-    agentDir: paths.agentDirectory,
-    settingsManager: settings,
-    offline: options.offline === true,
-    activateCandidate: async (candidate) => await activatePackageCandidate({
-      ...candidate,
-      ...optionalProperties(signal === undefined ? undefined : { signal }),
-    }),
-  });
-  const automaticDirectResources = options.pluginCode === true
-    ? await directPackages.resolve()
-    : { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths;
-  const automaticPackageDiscovery = options.pluginCode === true
-    ? { diagnostics: directPackages.getDiagnostics(), resolved: automaticDirectResources }
-    : undefined;
-  const directAdditionalSources = (options.pluginPaths ?? []).map((path) => expandPath(path, workspace));
-  const additionalDirectResources = directAdditionalSources.length === 0
-    ? { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths
-    : await directPackages.resolvePluginSources(directAdditionalSources, { temporary: true });
-  const direct = directPluginSelection(
-    options.pluginRuntime === true ? [automaticDirectResources, additionalDirectResources] : [],
-    trusted,
-  );
-  if (direct.paths.length > 128) throw new Error("At most 128 runtime extensions may be loaded");
-  let runtimePlugins: RuntimePluginHost;
-  if (options.pluginRuntime === true) {
-    if (preactivatedRuntimePlugins === undefined) {
-      runtimePlugins = await loadDirectPlugins(direct.paths, {
-        workspace,
-        dataRoot: join(paths.agentDirectory, "extension-data"),
-        projectTrusted: trusted,
-        directPathMetadata: direct.metadata,
-        inlinePlugins: options.pluginFactories ?? [],
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-        ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
-      });
-    } else {
-      runtimePlugins = preactivatedRuntimePlugins;
-      runtimePlugins.setHostContext({ projectTrusted: trusted });
-      const activePaths = new Set(runtimePlugins.plugins().map((entry) => entry.sourcePath));
-      const additional = direct.paths.filter((path) => !activePaths.has(path));
-      await appendDirectPlugins(runtimePlugins, additional, {
-        workspace,
-        dataRoot: join(paths.agentDirectory, "extension-data"),
-        directPathMetadata: direct.metadata,
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-        ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
-      });
-		runtimePlugins.reorderCommittedPlugins(direct.paths);
-    }
-  } else {
-    if (preactivatedRuntimePlugins !== undefined) {
-      throw new Error("Preactivated extensions require pluginRuntime");
-    }
-    runtimePlugins = new RuntimePluginHost(workspace, {
-      dataRoot: join(paths.agentDirectory, "extension-data"),
-      projectTrusted: trusted,
-    });
-  }
-  const extensionCatalogProviderIds = [...new Set(
-    runtimePlugins.directProviderRegistrations().map((registration) => registration.name),
-  )];
-  const auth = new ProviderAuthRegistry({
-    bindings: authBindings,
-    registrations: configuredOAuthRegistrations(process.env, authBindings),
-    environment: process.env,
-    store: credentials,
-  });
-  const extraTools = runtimePlugins.tools();
-  const bindLiveRegistrations = (): void => runtimePlugins.setLiveRegistrationHandler({
-    registerTool(tool) {
-      if (extraTools.some((entry) => entry.definition.name === tool.definition.name)) {
-        throw new Error(`Runtime extension tool is already registered: ${tool.definition.name}`);
-      }
-      extraTools.push(tool);
-      return () => {
-        const index = extraTools.indexOf(tool);
-        if (index >= 0) extraTools.splice(index, 1);
-      };
-    },
-    replaceTool(previous, tool) {
-      const index = extraTools.indexOf(previous);
-      if (index < 0) throw new Error(`Runtime extension tool is not registered: ${previous.definition.name}`);
-      extraTools.splice(index, 1, tool);
-      return () => {
-        const selected = extraTools.indexOf(tool);
-        if (selected >= 0) extraTools.splice(selected, 1);
-      };
-    },
-    unregisterTool(tool) {
-      const index = extraTools.indexOf(tool);
-      if (index >= 0) extraTools.splice(index, 1);
-    },
-  });
+  let ownedRuntimePlugins = preactivatedRuntimePlugins;
+  let extensionCatalogProviderIds: string[] = [];
   let closed = false;
   const close = async (): Promise<void> => {
     if (closed) return;
@@ -1457,7 +1346,7 @@ async function loadResourceGeneration(
     abortController.abort(new Error("Runtime resource generation closed"));
     const failures: unknown[] = [];
     try {
-      await runtimePlugins.close();
+      await ownedRuntimePlugins?.close();
     } catch (error) {
       failures.push(error);
     }
@@ -1490,6 +1379,122 @@ async function loadResourceGeneration(
     throwFailures(failures, "Runtime resource cleanup failed");
   };
   try {
+    const providerWire = new ProviderWireInterceptorRegistry();
+    const authBindings: ProviderAuthBinding[] = [];
+    const providerConfigs = configuredProviderConfigs(settings, process.env);
+    const providerConfigsById = new Map<string, RuntimeProviderConfig>();
+    for (const [configuredName, providerConfig] of Object.entries(providerConfigs)) {
+      const providerOptions: NonNullable<Parameters<typeof createProviderAdapter>[2]> & OpenAICodexObservabilityOptions = {
+        fetch: network.fetch,
+        ...optionalProperties(network.openWebSocket === undefined ? undefined : { webSocket: network.openWebSocket }),
+        wire: providerWire,
+        environment: process.env,
+        ...optionalProperties(codexTransportObserver === undefined ? undefined : { [OPENAI_CODEX_TRANSPORT_OBSERVER]: codexTransportObserver }),
+      };
+      const adapter = createProviderAdapter(providerConfig, broker, providerOptions);
+      providers.register(adapter);
+      providerConfigsById.set(adapter.id, providerConfig);
+      authBindings.push(runtimeProviderAuthBinding(configuredName, providerConfig, adapter.id, process.env));
+    }
+    const configuredSessionDirectory = options.sessionDirectory ?? settings.getSessionDir();
+    const sessionDirectory = configuredSessionDirectory === undefined
+      ? undefined
+      : expandPath(configuredSessionDirectory, workspace);
+    const directPackages = new DefaultPackageManager({
+      cwd: workspace,
+      agentDir: paths.agentDirectory,
+      settingsManager: settings,
+      offline: options.offline === true,
+      activateCandidate: async (candidate) => await activatePackageCandidate({
+        ...candidate,
+        ...optionalProperties(signal === undefined ? undefined : { signal }),
+      }),
+    });
+    const automaticDirectResources = options.pluginCode === true
+      ? await directPackages.resolve()
+      : { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths;
+    const automaticPackageDiscovery = options.pluginCode === true
+      ? { diagnostics: directPackages.getDiagnostics(), resolved: automaticDirectResources }
+      : undefined;
+    const directAdditionalSources = (options.pluginPaths ?? []).map((path) => expandPath(path, workspace));
+    const additionalDirectResources = directAdditionalSources.length === 0
+      ? { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths
+      : await directPackages.resolvePluginSources(directAdditionalSources, { temporary: true });
+    const direct = directPluginSelection(
+      options.pluginRuntime === true ? [automaticDirectResources, additionalDirectResources] : [],
+      trusted,
+    );
+    if (direct.paths.length > 128) throw new Error("At most 128 runtime plugins may be loaded");
+    let runtimePlugins: RuntimePluginHost;
+    if (options.pluginRuntime === true) {
+      if (preactivatedRuntimePlugins === undefined) {
+        runtimePlugins = await loadDirectPlugins(direct.paths, {
+          workspace,
+          dataRoot,
+          projectTrusted: trusted,
+          directPathMetadata: direct.metadata,
+          inlinePlugins: options.pluginFactories ?? [],
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+          ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
+        });
+      } else {
+        runtimePlugins = preactivatedRuntimePlugins;
+        runtimePlugins.setHostContext({ projectTrusted: trusted });
+        const activePaths = new Set(runtimePlugins.plugins().map((entry) => entry.sourcePath));
+        const additional = direct.paths.filter((path) => !activePaths.has(path));
+        await appendDirectPlugins(runtimePlugins, additional, {
+          workspace,
+          directPathMetadata: direct.metadata,
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+          ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
+        });
+        runtimePlugins.reorderCommittedPlugins(direct.paths);
+      }
+    } else {
+      if (preactivatedRuntimePlugins !== undefined) {
+        throw new Error("Preactivated plugins require pluginRuntime");
+      }
+      runtimePlugins = new RuntimePluginHost(workspace, {
+        dataRoot,
+        projectTrusted: trusted,
+      });
+    }
+    ownedRuntimePlugins = runtimePlugins;
+    extensionCatalogProviderIds = [...new Set(
+      runtimePlugins.directProviderRegistrations().map((registration) => registration.name),
+    )];
+    const auth = new ProviderAuthRegistry({
+      bindings: authBindings,
+      registrations: configuredOAuthRegistrations(process.env, authBindings),
+      environment: process.env,
+      store: credentials,
+    });
+    const extraTools = runtimePlugins.tools();
+    const bindLiveRegistrations = (): void => runtimePlugins.setLiveRegistrationHandler({
+      registerTool(tool) {
+        if (extraTools.some((entry) => entry.definition.name === tool.definition.name)) {
+          throw new Error(`Runtime extension tool is already registered: ${tool.definition.name}`);
+        }
+        extraTools.push(tool);
+        return () => {
+          const index = extraTools.indexOf(tool);
+          if (index >= 0) extraTools.splice(index, 1);
+        };
+      },
+      replaceTool(previous, tool) {
+        const index = extraTools.indexOf(previous);
+        if (index < 0) throw new Error(`Runtime extension tool is not registered: ${previous.definition.name}`);
+        extraTools.splice(index, 1, tool);
+        return () => {
+          const selected = extraTools.indexOf(tool);
+          if (selected >= 0) extraTools.splice(selected, 1);
+        };
+      },
+      unregisterTool(tool) {
+        const index = extraTools.indexOf(tool);
+        if (index >= 0) extraTools.splice(index, 1);
+      },
+    });
     signal?.throwIfAborted();
     providers.configureModels(configuredModelsWithMaintainedCatalog([]));
     const providerShellPath = settings.getShellPath();
@@ -2038,6 +2043,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
             signal,
             undefined,
             runtimeOpenAICodexTransportObserver(() => candidateObservability),
+            previous.runtimePlugins.dataRoot,
           );
           candidate.runtimePlugins.setHostContext({ mode: extensionMode });
           if (candidate.sessionDirectory !== previous.sessionDirectory) {
@@ -2262,9 +2268,10 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       async fork(entryId, options = {}, signal) {
         signal?.throwIfAborted();
         if (!runtime.session.isIdle) return { cancelled: true };
+        const canonicalId = canonicalSessionEntryId(runtime.sessionManager, entryId) ?? entryId;
         const target = options.position === "before"
-          ? runtime.sessionManager.getEntries().find((entry) => entry.id === entryId)?.parentId ?? null
-          : entryId;
+          ? runtime.sessionManager.getEntry(canonicalId)?.parentId ?? null
+          : canonicalId;
         if (target === null) throw new Error("Cannot fork before the first session entry");
         const path = runtime.session.createBranchedSession(target);
         if (path === undefined) return { cancelled: true };
@@ -2276,7 +2283,11 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       async navigateTree(targetId, options = {}, signal) {
         signal?.throwIfAborted();
         if (!runtime.session.isIdle) return { cancelled: true };
-        const result = await runtime.session.navigateTree(targetId, options);
+        const canonicalId = canonicalSessionEntryId(runtime.sessionManager, targetId) ?? targetId;
+        const result = await runtime.session.navigateTree(canonicalId, {
+          ...options,
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+        });
         signal?.throwIfAborted();
         return { cancelled: result.cancelled };
       },

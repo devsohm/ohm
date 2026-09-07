@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import test from "node:test";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
 import { discoverSkills, loadSkill } from "../../src/context/skills.js";
+import { agentPaths } from "../../src/cli/paths.js";
 import type { JsonValue } from "../../src/core/json.js";
 import { bundledAuthoringResources } from "../../src/prompts/resources.js";
 
@@ -82,6 +83,22 @@ test("plugin event documentation retains valid table columns", async () => {
       `plugin-events.md:${index + 1} must retain three Markdown table columns`,
     );
   }
+});
+
+test("both distribution-switch backup lists preserve current customization and legacy plugin data", async () => {
+  const install = await readFile(resolve(bundledAuthoringResources().documentationRoot, "install.md"), "utf8");
+  const shell = install.match(/^for name in (.+); do$/mu)?.[1]?.split(" ");
+  const powershell = install.match(/^foreach \(\$name in @\((.+)\)\) \{$/mu)?.[1];
+  assert.ok(shell !== undefined && powershell !== undefined);
+  assert.deepEqual([...powershell.matchAll(/"([^"]+)"/gu)].map((match) => match[1]), shell);
+  const paths = agentPaths({}, resolve("backup-contract-agent"));
+  for (const key of ["settings", "auth", "trustStore", "sessions", "modelCatalog", "userPlugins", "userSkills", "userPrompts", "userThemes"] as const) {
+    assert.ok(shell.includes(relative(paths.agentDirectory, paths[key])), key);
+  }
+  for (const name of ["AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md", "model-providers.json", "extension-data", "state/extension-data", "extensions"]) {
+    assert.ok(shell.includes(name), name);
+  }
+  for (const name of ["bin", "runtime", "app", "state"]) assert.equal(shell.includes(name), false, name);
 });
 
 test("the starter has a runnable public-API-only author check", async () => {
