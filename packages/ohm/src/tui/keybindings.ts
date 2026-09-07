@@ -94,6 +94,8 @@ export const KEYBINDING_ACTIONS = [
   "tui.transcript.pageDown",
   "tui.transcript.previousPrompt",
   "tui.transcript.nextPrompt",
+  "tui.transcript.previousTool",
+  "tui.transcript.nextTool",
   "tui.transcript.top",
   "tui.transcript.bottom",
   "tui.transcript.searchOpen",
@@ -174,6 +176,8 @@ export interface KeybindingOverrides {
   "tui.transcript.pageDown"?: string | readonly string[];
   "tui.transcript.previousPrompt"?: string | readonly string[];
   "tui.transcript.nextPrompt"?: string | readonly string[];
+  "tui.transcript.previousTool"?: string | readonly string[];
+  "tui.transcript.nextTool"?: string | readonly string[];
   "tui.transcript.top"?: string | readonly string[];
   "tui.transcript.bottom"?: string | readonly string[];
   "tui.transcript.searchOpen"?: string | readonly string[];
@@ -265,6 +269,8 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<KeybindingAction, readonly str
   "tui.transcript.pageDown": ["pagedown"],
   "tui.transcript.previousPrompt": ["ctrl+shift+up"],
   "tui.transcript.nextPrompt": ["ctrl+shift+down"],
+  "tui.transcript.previousTool": ["alt+pageup"],
+  "tui.transcript.nextTool": ["alt+pagedown"],
   "tui.transcript.top": ["ctrl+home"],
   "tui.transcript.bottom": ["ctrl+end"],
   "tui.transcript.searchOpen": ["ctrl+shift+f"],

@@ -34,7 +34,7 @@
   <g>
     <rect class="card" x="350" y="174" width="270" height="106"/>
     <text class="label" x="374" y="204">ResourceLoader</text>
-    <text class="detail" x="374" y="228">extensions · skills</text>
+    <text class="detail" x="374" y="228">plugins · skills</text>
     <text class="detail" x="374" y="250">prompts · themes</text>
     <text class="detail" x="374" y="272">context files</text>
   </g>
@@ -84,13 +84,13 @@
     <text class="label" x="454" y="602">AgentSession</text>
     <text class="detail" x="454" y="632">product policy · kernel engine</text>
     <text class="detail" x="454" y="658">ToolCoordinator · V4 · compaction</text>
-    <text class="detail" x="454" y="684">extensions · refresh · events · close</text>
+    <text class="detail" x="454" y="684">plugins · refresh · events · close</text>
   </g>
   <g>
     <rect class="card" x="950" y="562" width="438" height="152"/>
     <text class="label" x="974" y="602">Construction result</text>
     <text class="detail" x="974" y="632">session</text>
-    <text class="detail" x="974" y="658">extensionsResult snapshot</text>
+    <text class="detail" x="974" y="658">pluginsResult snapshot</text>
     <text class="detail" x="974" y="684">modelFallbackMessage?</text>
   </g>
   <path class="edge" d="M882 638h68"/>

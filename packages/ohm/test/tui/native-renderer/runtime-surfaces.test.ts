@@ -55,6 +55,20 @@ function baseView(): TuiViewState {
   };
 }
 
+test("host input waits replace activity without animation and honor explicit indicator controls", () => {
+  const view: TuiViewState = { ...baseView(), inputPrompt: "Continue?", context: {
+    active: true, activity: { phase: "Tool work", startedAt: 0, cancellable: true },
+  } };
+  const options = { columns: 80, rows: 24, unicode: false };
+  assert.deepEqual(plain(projectTuiRuntimeSurfaces(view, options).working), [" Waiting for input"]);
+  assert.deepEqual(plain(projectTuiRuntimeSurfaces({ ...view, context: {
+    ...view.context, workingMessage: "Custom wait",
+  } }, options).working), [" Custom wait"]);
+  assert.equal(projectTuiRuntimeSurfaces({ ...view, context: {
+    ...view.context, workingVisible: false,
+  } }, options).working, undefined);
+});
+
 test("structured projection sanitizes controls, bounds every target width, and clamps its cursor", () => {
   for (const columns of [1, 12, 42, 188]) {
     const projected = projectRuntimeUiBlock({

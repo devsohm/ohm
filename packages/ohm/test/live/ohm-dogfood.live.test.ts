@@ -20,10 +20,10 @@ import { isJsonObject } from "../../src/core/json.js";
 import type { ModelInfo } from "../../src/core/types.js";
 import { STRING_VALUE } from "../../src/core/value-schemas.js";
 import {
-  loadDirectExtensions,
+  loadDirectPlugins,
   type RuntimeDirectPathMetadata,
-  type RuntimeExtensionHost,
-} from "../../src/extensions/runtime.js";
+  type RuntimePluginHost,
+} from "../../src/plugins/runtime.js";
 import { DirectProcessRunner } from "../../src/process/index.js";
 import { bundledAuthoringResources } from "../../src/prompts/resources.js";
 import { WorkspaceBoundary } from "../../src/tools/index.js";
@@ -117,8 +117,8 @@ async function createLiveRuntime(workspace: string, skills: boolean): Promise<{ 
     credentialStore: await liveCredentialStore(),
     projectTrusted: true,
     ephemeral: true,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills,
     promptTemplates: false,
     themes: false,
@@ -313,7 +313,7 @@ async function loadResolvedExtensions(
   resources: ResolvedPaths,
   workspace: string,
   dataRoot: string,
-): Promise<RuntimeExtensionHost> {
+): Promise<RuntimePluginHost> {
   const paths: string[] = [];
   const metadata = new Map<string, RuntimeDirectPathMetadata>();
   for (const resource of resources.extensions) {
@@ -327,7 +327,7 @@ async function loadResolvedExtensions(
     if (resource.metadata.baseDir !== undefined) pathMetadata.resourceRoot = resource.metadata.baseDir;
     metadata.set(path, pathMetadata);
   }
-  return await loadDirectExtensions(paths, {
+  return await loadDirectPlugins(paths, {
     workspace,
     dataRoot,
     directPathMetadata: metadata,
@@ -335,7 +335,7 @@ async function loadResolvedExtensions(
   });
 }
 
-async function assertToolResult(host: RuntimeExtensionHost, workspace: string, text: string): Promise<void> {
+async function assertToolResult(host: RuntimePluginHost, workspace: string, text: string): Promise<void> {
   const tool = host.tools().find((entry) => entry.definition.name === "dogfood_echo");
   assert.ok(tool, "authored package did not register dogfood_echo");
   const input = { text };
@@ -432,15 +432,15 @@ export function average(values) {
     const managedRoot = join(root, "managed");
     await mkdir(workspace, { recursive: true });
     const resources = bundledAuthoringResources();
-    const extensionSkillReference = join(dirname(resources.authoringSkill), "references", "extensions.md");
+    const extensionSkillReference = join(dirname(resources.authoringSkill), "references", "plugins.md");
     const readOnlyReferences = [
       resources.authoringSkill,
       extensionSkillReference,
-      join(resources.documentationRoot, "extensions.md"),
+      join(resources.documentationRoot, "plugins.md"),
       join(resources.documentationRoot, "packages.md"),
       join(resources.examplesRoot, "starter", "README.md"),
       join(resources.examplesRoot, "starter", "package.json"),
-      join(resources.examplesRoot, "starter", "extensions", "index.ts"),
+      join(resources.examplesRoot, "starter", "src", "index.ts"),
       join(resources.examplesRoot, "tool-rendering", "README.md"),
       join(resources.examplesRoot, "tool-rendering", "package.json"),
       join(resources.examplesRoot, "tool-rendering", "extensions", "index.mjs"),
@@ -459,14 +459,14 @@ export function average(values) {
         ].join(" "),
         prompt: [
           "Use the advertised ohm-dev skill to create a fresh package at dogfood-extension/.",
-          "First read the ohm-dev SKILL.md and its extensions reference, then read the extension/package documentation it routes to and inspect only the focused starter and tool-rendering examples.",
-          "Create package.json, extensions/index.mjs, README.md, and test/dogfood.test.mjs.",
-          "Declare the direct factory under package.json ohm.extensions and default-export the activation function.",
+          "First read the ohm-dev SKILL.md and its extensions reference, then read the plugin/package documentation it routes to and inspect only the focused starter and tool-rendering examples.",
+          "Create package.json, src/index.mjs, README.md, and test/dogfood.test.mjs.",
+          "Declare the direct factory under package.json ohm.entrypoints and default-export the activation function.",
           "Register exactly one model-callable tool named dogfood_echo with a closed schema requiring one string field named text.",
           "For valid input, return a direct tool result with a text content block whose text is JSON shaped as {\"echo\": <the exact input>} and JSON-safe details.",
           "Add and run a deterministic node:test covering activation, schema, and the structured result through a minimal local activation host stub.",
           "Inspect the test exit status and output; if it fails, fix the package or test and rerun it. Finish only after the test passes.",
-          "This temporary project has no host dependency installed: the test must import only Node built-ins and local package files and must not import ohm or ohm/extensions.",
+          "This temporary project has no host dependency installed: the test must import only Node built-ins and local package files and must not import ohm or ohm/plugins.",
           "Do not install the package; the independent verifier will install, refresh, invoke, and remove it.",
         ].join(" "),
       }, budget);
@@ -484,7 +484,7 @@ export function average(values) {
       "agent did not load the bundled ohm-dev skill");
       assert.equal(inspected(extensionSkillReference), true,
       "agent did not read the bundled ohm-dev extension reference");
-      assert.equal(inspected(join(resources.documentationRoot, "extensions.md")), true,
+      assert.equal(inspected(join(resources.documentationRoot, "plugins.md")), true,
       "agent did not read the bundled extension documentation");
       assert.equal(observation.toolRequests.some((entry) =>
         entry.name === "bash" && /node --test|npm test/u.test(entry.input)), true,
@@ -509,7 +509,7 @@ export function average(values) {
         await candidateHost.close();
       },
     });
-    let host: RuntimeExtensionHost | undefined;
+    let host: RuntimePluginHost | undefined;
     try {
       await manager.installAndPersist(packageRoot);
       const configured = manager.listConfiguredPackages();

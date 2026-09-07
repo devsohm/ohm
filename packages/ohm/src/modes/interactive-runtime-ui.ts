@@ -1,12 +1,12 @@
 import { optionalProperties } from "../core/optional-properties.js";
-import type { ExtensionRunner } from "../extensions/compat-runtime.js";
-import { resolveRuntimeShortcuts } from "../cli/extension-shortcuts.js";
+import type { PluginRunner } from "../plugins/compat-runtime.js";
+import { resolveRuntimeShortcuts } from "../cli/plugin-shortcuts.js";
 import type {
   RuntimeAdvancedUiOperation,
   RuntimeCommandUi,
   RuntimeInitialUiOperation,
-} from "../extensions/runtime.js";
-import { boundedRuntimeNotification } from "../extensions/runtime.js";
+} from "../plugins/runtime.js";
+import { boundedRuntimeNotification } from "../plugins/runtime.js";
 import type { RuntimeToolRendererBinding } from "../tui/components.js";
 import {
   createInteractiveDirectUiFacade,
@@ -50,12 +50,12 @@ export function createInteractiveRuntimeCommandUi(
       current();
       terminal.notify(boundedRuntimeNotification(message), kind);
     },
-    setStatus(name, value) { current(); terminal.setExtensionStatus(key(name), value, lifecycleSignal); },
-    setWidget(name, value) { current(); terminal.setExtensionWidget(key(name), value, lifecycleSignal); },
-    setHeader(name, value) { current(); terminal.setExtensionHeader(key(name), value, lifecycleSignal); },
-    setFooter(name, value) { current(); terminal.setExtensionFooter(key(name), value, lifecycleSignal); },
-    setWorkingMessage(value) { current(); terminal.setExtensionWorkingMessage(ownerKey, value, lifecycleSignal); },
-    setWorkingVisible(value) { current(); terminal.setExtensionWorkingVisible(ownerKey, value, lifecycleSignal); },
+    setStatus(name, value) { current(); terminal.setPluginStatus(key(name), value, lifecycleSignal); },
+    setWidget(name, value) { current(); terminal.setPluginWidget(key(name), value, lifecycleSignal); },
+    setHeader(name, value) { current(); terminal.setPluginHeader(key(name), value, lifecycleSignal); },
+    setFooter(name, value) { current(); terminal.setPluginFooter(key(name), value, lifecycleSignal); },
+    setWorkingMessage(value) { current(); terminal.setPluginWorkingMessage(ownerKey, value, lifecycleSignal); },
+    setWorkingVisible(value) { current(); terminal.setPluginWorkingVisible(ownerKey, value, lifecycleSignal); },
     setTitle(value) {
       current();
       if (lifecycleSignal === undefined) terminal.setTitle(value);
@@ -159,7 +159,7 @@ function applyAdvancedUi(
   } else if (operation.type === "tool_output_expanded") {
     terminal.setKeyedToolOutputExpanded(`${operation.ownerKey}:global`, operation.expanded, signal);
   } else if (operation.type === "slot") {
-    terminal.setExtensionUiSlot(
+    terminal.setPluginUiSlot(
       operation.ownerKey,
       operation.path,
       operation.key,
@@ -196,7 +196,7 @@ export interface InteractiveRuntimeUiBindOptions {
 
 export function bindInteractiveRuntimeUi(
   terminal: TuiController,
-  runner: ExtensionRunner,
+  runner: PluginRunner,
   cwd: string,
   commandItems: () => readonly PickerItem<string>[],
   directUiServices: InteractiveDirectUiServices = {},
@@ -225,7 +225,7 @@ export function bindInteractiveRuntimeUi(
     if (options.publishCommandInputs === false) return;
     const resolved = resolveRuntimeShortcuts(host.shortcuts(), terminal);
     for (const diagnostic of resolved.diagnostics) terminal.notify(diagnostic, "warning");
-    terminal.setExtensionShortcuts(resolved.shortcuts.map((shortcut) => ({
+    terminal.setPluginShortcuts(resolved.shortcuts.map((shortcut) => ({
       shortcut: shortcut.shortcut,
       ...optionalProperties(shortcut.description === undefined ? undefined : { description: shortcut.description }),
     })), bindingSignal);
@@ -294,7 +294,7 @@ export function bindInteractiveRuntimeUi(
     direct.clear();
     if (activeBindings.get(host) !== bindingToken) return false;
     activeBindings.delete(host);
-    terminal.clearExtensionUi();
+    terminal.clearPluginUi();
     if (!signal.aborted) {
       host.setUiHandler(undefined);
       host.setAdvancedUiHandler(undefined);
@@ -307,7 +307,7 @@ export function bindInteractiveRuntimeUi(
   };
   const dispose = (): boolean => release(new Error("Interactive UI binding disposed"));
   try {
-    if (options.clearUi !== false) terminal.clearExtensionUi();
+    if (options.clearUi !== false) terminal.clearPluginUi();
     selectedToolRendererBinding = toolRendererBinding ?? host.toolRendererBinding();
     bindToolRenderers();
     bindSessionRenderers();

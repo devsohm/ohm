@@ -39,7 +39,7 @@ export const OFFLINE_RELEASE_FOCUSED_CHECKS: readonly FocusedCheckDefinition[] =
     testFiles: [
       "test/cli/process-signal-cleanup.test.ts",
       "test/cli/refresh-pty.test.ts",
-      "test/cli/tui-extension-session-controls-pty.test.ts",
+      "test/cli/tui-plugin-session-controls-pty.test.ts",
       "test/modes/interactive-mode-direct.test.ts",
     ],
   },

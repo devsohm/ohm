@@ -4,6 +4,7 @@ import {
 	existsSync,
 	linkSync,
 	mkdirSync,
+	readFileSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -55,8 +56,9 @@ test("identity writer locks honor OHM_HOME without touching HOME", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-home-"));
 	const home = join(root, "untouched-home");
 	const agentDirectory = join(root, "agent");
-	const path = join(root, "sessions", "session.jsonl");
+	const path = join(root, "sessions", "session.sqlite");
 	try {
+		SessionManager.create(root, join(root, "sessions"), { id: "session" }).closeV4Store();
 		const acquired = openInChild(path, true, { HOME: home, OHM_HOME: agentDirectory });
 		assert.equal(acquired.status, 0, String(acquired.stderr));
 		assert.equal(acquired.stdout, "acquired\n");
@@ -88,8 +90,8 @@ function assertMarker(manager: SessionManager, id: string): void {
 
 test("a persistent SessionManager owns its file across processes until close", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-"));
-	const path = join(root, "session.jsonl");
-	const manager = SessionManager.open(path, root, root);
+	const path = join(root, "session.sqlite");
+	const manager = SessionManager.create(root, root, { id: "session" });
 	try {
 		assert.equal(existsSync(`${path}.writer-lock`), true);
 		assert.throws(() => SessionManager.open(path), /active writer/u);
@@ -111,9 +113,9 @@ test("a persistent SessionManager owns its file across processes until close", a
 
 test("real and symbolic-link paths share one writer lease", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-symlink-"));
-	const path = join(root, "session.jsonl");
-	const alias = join(root, "session-link.jsonl");
-	const manager = SessionManager.open(path, root, root);
+	const path = join(root, "session.sqlite");
+	const alias = join(root, "session-link.sqlite");
+	const manager = SessionManager.create(root, root, { id: "session" });
 	try {
 		symlinkSync(path, alias, "file");
 		assert.throws(() => SessionManager.open(alias), /active writer/u);
@@ -136,9 +138,9 @@ test("real and symbolic-link paths share one writer lease", async () => {
 
 test("hard-link paths share one writer lease", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-hardlink-"));
-	const path = join(root, "session.jsonl");
-	const alias = join(root, "session-hardlink.jsonl");
-	const manager = SessionManager.open(path, root, root);
+	const path = join(root, "session.sqlite");
+	const alias = join(root, "session-hardlink.sqlite");
+	const manager = SessionManager.create(root, root, { id: "session" });
 	try {
 		linkSync(path, alias);
 		assert.throws(() => SessionManager.open(alias), /active writer/u);
@@ -159,35 +161,81 @@ test("hard-link paths share one writer lease", async () => {
 	}
 });
 
-test("renaming an owned session does not create a second writer", async () => {
+test("a live rename blocks new commits and a closed rename preserves session history", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-rename-"));
-	const path = join(root, "session.jsonl");
-	const renamed = join(root, "renamed.jsonl");
-	const manager = SessionManager.open(path, root, root);
+	const path = join(root, "session.sqlite");
+	const renamed = join(root, "renamed.sqlite");
+	const manager = SessionManager.create(root, root, { id: "session" });
 	try {
+		appendMarker(manager, "before-rename-commit");
+		const beforeRename = manager.getEntries();
 		renameSync(path, renamed);
 		assert.throws(() => SessionManager.open(renamed), /active writer/u);
 		assert.equal(existsSync(`${renamed}.writer-lock`), false);
 		assertChildBlocked(renamed);
-		appendMarker(manager, "renamed-owner-commit");
+		assert.throws(() => appendMarker(manager, "renamed-owner-commit"), /ENOENT/u);
+		assert.deepEqual(manager.getEntries(), beforeRename);
 	} finally {
+		if (existsSync(renamed)) renameSync(renamed, path);
 		manager.closeV4Store();
 	}
 
 	try {
+		renameSync(path, renamed);
 		const reopened = SessionManager.open(renamed);
-		assertMarker(reopened, "renamed-owner-commit");
+		assertMarker(reopened, "before-rename-commit");
+		assert.equal(JSON.stringify(reopened.getEntries()).includes("renamed-owner-commit"), false);
 		reopened.closeV4Store();
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
+for (const replacement of ["regular file", "same-inode symlink"] as const) {
+	test(`replacing an owned database with a ${replacement} rejects new commits`, async () => {
+		const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-replaced-"));
+		const path = join(root, "session.sqlite");
+		const displaced = join(root, "displaced.sqlite");
+		const manager = SessionManager.create(root, root, { id: "session" });
+		try {
+			appendMarker(manager, "before-replacement-commit");
+			const beforeReplacement = manager.getEntries();
+			renameSync(path, displaced);
+			if (replacement === "regular file") writeFileSync(path, "replacement must remain untouched");
+			else symlinkSync(displaced, path, "file");
+			assert.throws(() => appendMarker(manager, "replaced-owner-commit"), /changed/u);
+			assert.deepEqual(manager.getEntries(), beforeReplacement);
+			assert.throws(() => appendMarker(manager, "faulted-owner-commit"), /faulted/u);
+			if (replacement === "regular file") {
+				assert.equal(readFileSync(path, "utf8"), "replacement must remain untouched");
+			}
+		} finally {
+			if (existsSync(displaced)) {
+				rmSync(path);
+				renameSync(displaced, path);
+			}
+			manager.closeV4Store();
+		}
+
+		try {
+			const reopened = SessionManager.open(path);
+			try {
+				assertMarker(reopened, "before-replacement-commit");
+				assert.equal(JSON.stringify(reopened.getEntries()).includes("replaced-owner-commit"), false);
+			} finally {
+				reopened.closeV4Store();
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+}
+
 test("a dead process writer record is reclaimed before reopening", async () => {
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-stale-"));
-	const path = join(root, "session.jsonl");
+	const path = join(root, "session.sqlite");
 	try {
-		const created = SessionManager.open(path, root, root);
+		const created = SessionManager.create(root, root, { id: "session" });
 		created.closeV4Store();
 
 		const abandoned = openInChild(path, false);
@@ -209,9 +257,10 @@ test("writer owner reads accept 4 KiB and reject larger or non-regular records",
 		[MAX_CONTROL_FILE_BYTES + 1, /unreadable active writer record/u],
 	] as const) {
 		const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-boundary-"));
-		const path = join(root, "session.jsonl");
+		const path = join(root, "session.sqlite");
 		const lock = `${path}.writer-lock`;
 		try {
+			SessionManager.create(root, root, { id: "session" }).closeV4Store();
 			mkdirSync(lock);
 			writeFileSync(join(lock, "owner.json"), ownerRecord(bytes));
 			assert.throws(() => SessionManager.open(path), expected);
@@ -222,9 +271,10 @@ test("writer owner reads accept 4 KiB and reject larger or non-regular records",
 	}
 
 	const root = await mkdtemp(join(tmpdir(), "ohm-session-owner-nonregular-"));
-	const path = join(root, "session.jsonl");
+	const path = join(root, "session.sqlite");
 	const lock = `${path}.writer-lock`;
 	try {
+		SessionManager.create(root, root, { id: "session" }).closeV4Store();
 		mkdirSync(join(lock, "owner.json"), { recursive: true });
 		assert.throws(() => SessionManager.open(path), /unreadable active writer record/u);
 		assert.equal(statSync(join(lock, "owner.json")).isDirectory(), true);

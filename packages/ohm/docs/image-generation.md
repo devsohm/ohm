@@ -41,7 +41,7 @@ for (const item of result.output) {
 - an empty output array;
 - a bounded `errorMessage`.
 
-A one-shot call can therefore be used in a tool or extension without an unhandled provider rejection.
+A one-shot call can therefore be used in a tool or plugin without an unhandled provider rejection.
 
 Image inputs and outputs are base64 data with an explicit `image/*` MIME type. Inputs are validated with the same 8 MiB per-image boundary used by the rest of ohm. Remote image URLs are not accepted as generation inputs, and remote or malformed provider image outputs are ignored. Text is normalized before JSON encoding so an unpaired UTF-16 surrogate cannot make a provider request invalid.
 

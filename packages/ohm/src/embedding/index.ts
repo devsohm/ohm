@@ -11,12 +11,11 @@ import type {
   ProviderAdapter,
   ProviderId,
 } from "../core/types.js";
-import { projectLoadedExtensionHost } from "../extensions/compat.js";
-import type { ToolDefinition } from "../extensions/direct.js";
+import { projectLoadedPluginHost } from "../plugins/compat.js";
 import {
   directToolRendererBinding,
-  RuntimeExtensionHost,
-} from "../extensions/runtime.js";
+  RuntimePluginHost,
+} from "../plugins/runtime.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import {
   createHarnessRuntime,
@@ -35,6 +34,7 @@ import { SettingsManager } from "../core/settings-manager.js";
 import { SessionManager } from "../storage/session-manager.js";
 import { allToolNames } from "../tools/catalog.js";
 import type { ToolAuthorizationHandler } from "../tools/approval.js";
+import { customToolInventory } from "../tools/custom-tool-inventory.js";
 import {
   createHarnessToolFromDefinition,
   isHarnessTool,
@@ -283,18 +283,18 @@ export interface CreateInMemoryHarnessOptions {
 
 class InMemoryEmbeddingHarness implements EmbeddingHarness {
   readonly #agentSession: AgentSession;
-  readonly #extensionHost: RuntimeExtensionHost | undefined;
+  readonly #pluginHost: RuntimePluginHost | undefined;
   readonly #observability: RuntimeObservability | undefined;
   readonly #session: DirectEmbeddingSession;
   #closeFlight: Promise<void> | undefined;
 
   constructor(
     session: AgentSession,
-    extensionHost?: RuntimeExtensionHost,
+    pluginHost?: RuntimePluginHost,
     observability?: RuntimeObservability,
   ) {
     this.#agentSession = session;
-    this.#extensionHost = extensionHost;
+    this.#pluginHost = pluginHost;
     this.#observability = observability;
     this.#session = new DirectEmbeddingSession(() => session);
   }
@@ -311,7 +311,7 @@ class InMemoryEmbeddingHarness implements EmbeddingHarness {
   async #performClose(): Promise<void> {
     const failures: unknown[] = [];
     try { await this.#agentSession.close(); } catch (error) { failures.push(error); }
-    try { await this.#extensionHost?.close(); } catch (error) { failures.push(error); }
+    try { await this.#pluginHost?.close(); } catch (error) { failures.push(error); }
     try { await this.#observability?.close(); } catch (error) { failures.push(error); }
     try { this.#session.dispose(); } catch (error) { failures.push(error); }
     if (failures.length === 1) throw failures[0];
@@ -344,14 +344,8 @@ export async function createInMemoryHarness(
         closeSink: false,
       });
   const customToolInputs = options.customTools ?? options.tools ?? [];
-  const customToolName = (tool: AgentSessionTool): string =>
-    isHarnessTool(tool) ? tool.definition.name : tool.name;
-  const directDefinitions = new Map<string, ToolDefinition<any, any, any>>();
-  for (const tool of customToolInputs) {
-    if (isHarnessTool(tool)) directDefinitions.delete(tool.definition.name);
-    else directDefinitions.set(tool.name, tool);
-  }
-  const extensionHost = directDefinitions.size === 0 ? undefined : new RuntimeExtensionHost(workspace);
+  const custom = customToolInventory(customToolInputs);
+  const pluginHost = custom.direct.length === 0 ? undefined : new RuntimePluginHost(workspace);
   let session: AgentSession | undefined;
   const customTools = customToolInputs.map((tool) =>
     isHarnessTool(tool)
@@ -361,9 +355,9 @@ export async function createInMemoryHarness(
           return session.createReplacedSessionContext();
         }));
   const customToolRenderer = directToolRendererBinding(
-    [...directDefinitions.values()],
+    custom.direct,
     workspace,
-    (diagnostic) => extensionHost?.addDiagnostic({
+    (diagnostic) => pluginHost?.addDiagnostic({
       extensionId: "embedding",
       sourcePath: "<custom-tool-renderer>",
       message: diagnostic.message,
@@ -377,8 +371,8 @@ export async function createInMemoryHarness(
     : options.noTools === "all"
       ? []
       : options.noTools === "builtin"
-        ? customToolInputs.map(customToolName)
-        : [...allToolNames, ...customToolInputs.map(customToolName)];
+        ? custom.names
+        : [...allToolNames, ...custom.names];
   try {
     session = await AgentSession.create({
       sessionManager: manager,
@@ -386,7 +380,7 @@ export async function createInMemoryHarness(
       workspace,
       settingsManager: SettingsManager.inMemory({}, { projectTrusted: false }),
       ...optionalProperties(observability === undefined ? undefined : { observability }),
-      ...optionalProperties(extensionHost === undefined ? undefined : { extensionsResult: projectLoadedExtensionHost(extensionHost) }),
+      ...optionalProperties(pluginHost === undefined ? undefined : { pluginsResult: projectLoadedPluginHost(pluginHost) }),
       ...optionalProperties(customTools.length === 0 ? undefined : { tools: customTools }),
       ...optionalProperties(customToolRenderer === undefined ? undefined : { toolRendererBinding: customToolRenderer }),
       ...optionalProperties(options.toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler: options.toolAuthorizationHandler }),
@@ -402,12 +396,12 @@ export async function createInMemoryHarness(
       ...optionalProperties(options.api === undefined ? undefined : { api: options.api }),
     });
     await session.setModel(selected);
-    await session.bindExtensions({ mode: "sdk" });
-    return new InMemoryEmbeddingHarness(session, extensionHost, observability);
+    await session.bindPlugins({ mode: "sdk" });
+    return new InMemoryEmbeddingHarness(session, pluginHost, observability);
   } catch (error) {
     await session?.close().catch(() => undefined);
     await observability?.close().catch(() => undefined);
-    await extensionHost?.close().catch(() => undefined);
+    await pluginHost?.close().catch(() => undefined);
     throw error;
   }
 }

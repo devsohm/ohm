@@ -1,8 +1,8 @@
 # Troubleshooting
 
 Start with the privacy-ordered workflow in [Local diagnostics](diagnostics.md). Use non-content logs, stats, support,
-configuration, and session checks before opening private records. Run `ohm extensions doctor --offline` only after
-the user authorizes executing the already-trusted extension runtime; trusted code can have its own side effects. A support file excludes credential values, session content,
+configuration, and session checks before opening private records. Run `ohm plugins doctor --offline` only after
+the user authorizes executing the already-trusted plugin runtime; trusted code can have its own side effects. A support file excludes credential values, session content,
 configuration values, log and crash content, and resource bodies; it records local probe timings, path ownership,
 resource summaries, and bounded errors.
 
@@ -11,7 +11,7 @@ resource summaries, and bounded errors.
 Run `/login`, choose the provider, and reopen `/model`. The picker lists models from connected provider catalogs. It
 does not show a universal static catalog. Use `ohm --list-models` for the same verified view.
 `ohm --offline --list-models` can inspect fallback metadata, but does not prove availability. If a provider cannot
-list deployments, register an exact catalog through a reviewed provider extension. Then select it with
+list deployments, register an exact catalog through a reviewed provider plugin. Then select it with
 `/model PROVIDER/MODEL` or `--model PROVIDER/MODEL`.
 
 ## OAuth login completes but the harness stays disconnected
@@ -25,8 +25,8 @@ Do not paste tokens into a support bundle or issue report.
 Run:
 
 ```sh
-ohm extensions doctor --offline
-ohm extensions show PACKAGE_ID
+ohm plugins doctor --offline
+ohm plugins show PACKAGE_ID
 ```
 
 Check declared resource paths, package filters, project trust, and activation diagnostics. Declare the supported host
@@ -69,8 +69,9 @@ URL, close reason, credentials, or request and response content.
 ## RPC client stops receiving replies
 
 RPC uses one UTF-8 JSON object per LF-delimited line. Correlate concurrent responses by `id` and keep diagnostics on
-stderr. The transport has no advertised record-size limit, so a host that accepts untrusted input must set its own
-bound. Raw event subscriptions are process-local and have no replay cursor. After reconnecting, use `get_entries`
+stderr. Records are limited to 16 MiB; history pages use an 8 MiB payload budget
+to leave room for the response envelope. Raw event subscriptions are process-local
+and have no replay cursor. After reconnecting, use `get_entries`
 with `afterSequence` to page durable history. Malformed JSON and duplicate or stale UI replies fail closed.
 
 ## Session import fails
@@ -78,7 +79,8 @@ with `afterSequence` to page durable history. Malformed JSON and duplicate or st
 Verify that JSONL begins with a strict V4 `record: "session"` header. Every
 later LF-terminated line must be a valid ordered commit. Invalid UTF-8, JSON,
 schema, sequence, ancestry, operation, queue, or tool-effect transitions are
-rejected. `/import` copies the selected file into the active session directory
-before opening it. Keep a backup and inspect private content first. If the
+rejected. `/import` leaves the selected file unchanged and creates a SQLite
+session in the active session directory, or an in-memory session when persistence
+is disabled. Keep a backup and inspect private content first. If the
 stored working directory no longer exists, interactive mode asks whether to
 continue in the current directory and retries only after approval.

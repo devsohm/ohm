@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Trusted editor replacement example for ohm",
   "ohm": {
-    "extensions": ["extensions/index.mjs"]
+    "entrypoints": ["src/index.mjs"]
   }
 }

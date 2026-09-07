@@ -8,21 +8,24 @@ import { Value } from "typebox/value";
 
 import type {
   AgentToolResult,
-  ExtensionContext,
+  PluginContext,
   RegisteredTool,
   ToolRenderState,
   ToolDefinition,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 import {
   canonicalContent,
   canonicalUsage,
   extensionContent,
   extensionUsage,
-} from "../extensions/session-contract.js";
-import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
+} from "../plugins/session-contract.js";
+import { isJsonValue, type JsonValue } from "../core/json.js";
 import { BOOLEAN_VALUE, FUNCTION_VALUE, isObjectValue, STRING_VALUE } from "../core/value-schemas.js";
 import type { ProviderToolDefinition } from "../core/types.js";
 import { DirectProcessRunner } from "../process/runner.js";
+import { MAX_TOOL_INPUT_BYTES } from "./coordinator.js";
+import { getDirectToolDelegate, getDirectToolImplementation, setDirectToolImplementation, setDirectToolOrigin } from "./direct-tool-origin.js";
+import { providerInputSchema } from "./parameter-schema.js";
 import { assertSchema } from "./schema.js";
 import { WorkspaceBoundary } from "./paths.js";
 import type {
@@ -38,7 +41,6 @@ const MAX_DIRECT_VALUES = 65_536;
 const MAX_DIRECT_CONTAINERS = 16_384;
 const MAX_DIRECT_DEPTH = 64;
 const MAX_ADDED_TOOLS = 256;
-const MAX_DIRECT_SCHEMA_BYTES = 1024 * 1024;
 const STANDALONE_TOOL_EXECUTE = Symbol("ohm.standaloneToolExecute");
 
 const DIRECT_CONTENT_VALUE = Type.Array(Type.Union([
@@ -99,7 +101,7 @@ export interface StandaloneToolDefinition<
     input: Static<TParameters>,
     signal?: AbortSignal,
     onUpdate?: (partialResult: AgentToolResult<TDetails>) => void,
-    context?: ExtensionContext,
+    context?: PluginContext,
   ): Promise<AgentToolResult<TDetails>>;
 }
 
@@ -125,6 +127,8 @@ export interface HarnessToolDefinitionOptions<
   TDetails,
 > {
   cwd: string;
+  /** Owning session identity for a session-bound public tool view. */
+  threadId?: string;
   tool: HarnessTool;
   label: string;
   parameters: TParameters;
@@ -198,27 +202,6 @@ function requiredJsonValue<Input>(value: Input, label: string): JsonValue {
   return value;
 }
 
-function providerInputSchema<Input>(value: Input): JsonObject {
-  const snapshot = boundedJsonSnapshot(value, {
-    label: "Tool parameter schema",
-    maximumBytes: MAX_DIRECT_SCHEMA_BYTES,
-    maximumValues: MAX_DIRECT_VALUES,
-    maximumContainers: MAX_DIRECT_CONTAINERS,
-    maximumDepth: MAX_DIRECT_DEPTH,
-    ignoredNonEnumerableDataKeys: [
-      "~codec",
-      "~immutable",
-      "~kind",
-      "~optional",
-      "~readonly",
-      "~refine",
-      "~unsafe",
-    ],
-  }).value;
-  if (!isJsonObject(snapshot)) throw new TypeError("Tool parameter schema must be an object");
-  return snapshot;
-}
-
 function directToolInput<TParameters extends TSchema>(
   schema: TParameters,
   input: JsonValue,
@@ -231,7 +214,8 @@ function isStandaloneToolDefinition<TParameters extends TSchema, TDetails, TStat
   definition: ToolDefinition<TParameters, TDetails, TState>,
 ): definition is StandaloneToolDefinition<TParameters, TDetails, TState> {
   const descriptor = Reflect.getOwnPropertyDescriptor(definition, STANDALONE_TOOL_EXECUTE);
-  return descriptor !== undefined && "value" in descriptor && Value.Check(FUNCTION_VALUE, descriptor.value);
+  return descriptor !== undefined && "value" in descriptor && Value.Check(FUNCTION_VALUE, descriptor.value)
+    && descriptor.value === definition.execute;
 }
 
 function directResult<Input>(value: Input): ToolResult {
@@ -320,13 +304,14 @@ function standaloneContext(
   toolCallId: string,
   signal: AbortSignal,
   reportProgress: ToolContext["reportProgress"],
+  threadId = "direct",
 ): ToolExecutionContext {
   return {
     workspace: standaloneWorkspace(cwd),
     runner: new DirectProcessRunner(),
     signal,
     runId: `direct:${toolCallId}`,
-    threadId: "direct",
+    threadId,
     toolCallId,
     ...optionalProperties(reportProgress === undefined ? undefined : { reportProgress }),
   };
@@ -365,7 +350,7 @@ export function createHarnessToolDefinition<
         };
     const result = await options.tool.execute(
       requiredJsonValue(input, "Tool input"),
-      standaloneContext(options.cwd, toolCallId, selectedSignal, reportProgress),
+      standaloneContext(options.cwd, toolCallId, selectedSignal, reportProgress, options.threadId),
     );
     selectedSignal.throwIfAborted();
     if (result.isError) {
@@ -375,7 +360,7 @@ export function createHarnessToolDefinition<
     }
     return publicResult(result, options.details);
   };
-  return {
+  const projected: StandaloneToolDefinition<TParameters, TDetails> = {
     name: definition.name,
     label: options.label,
     description: definition.description,
@@ -392,7 +377,7 @@ export function createHarnessToolDefinition<
           runner: new DirectProcessRunner(),
           signal: new AbortController().signal,
           runId: "direct:prepare",
-          threadId: "direct",
+          threadId: options.threadId ?? "direct",
         }),
       ),
     }),
@@ -402,6 +387,9 @@ export function createHarnessToolDefinition<
     execute: executeStandalone,
     [STANDALONE_TOOL_EXECUTE]: executeStandalone,
   };
+  setDirectToolImplementation(projected.execute, options.tool);
+  if (projected.prepareArguments !== undefined) setDirectToolImplementation(projected.prepareArguments, options.tool);
+  return projected;
 }
 
 /** Adapt a public direct tool for the coordinated harness runtime. */
@@ -411,10 +399,31 @@ export function createHarnessToolFromDefinition<
   TState,
 >(
   definition: ToolDefinition<TParameters, TDetails, TState>,
-  context: (toolContext: ToolExecutionContext) => ExtensionContext,
+  context: (toolContext: ToolExecutionContext) => PluginContext,
 ): HarnessTool {
-  const prepareArguments = definition.prepareArguments;
+  let prepareArguments: ToolDefinition["prepareArguments"] = definition.prepareArguments;
   const resourceClaims = definition.resources;
+  const execute = definition.execute;
+  let implementation = getDirectToolImplementation(definition.execute);
+  let origin = implementation === undefined ? undefined : getDirectToolDelegate(implementation);
+  let execution: ToolDefinition["execute"] | undefined;
+  // Only this adapter's own SDK wrappers have direct origins. Plugin runtime
+  // wrappers retain their generation guard and are never unwrapped here.
+  while (origin !== undefined) {
+    execution = origin.execute;
+    implementation = getDirectToolImplementation(origin.execute);
+    origin = implementation === undefined ? undefined : getDirectToolDelegate(implementation);
+  }
+  let preparation = prepareArguments === undefined ? undefined : getDirectToolImplementation(prepareArguments);
+  let preparationOrigin = preparation === undefined ? undefined : getDirectToolDelegate(preparation);
+  while (preparationOrigin?.prepareArguments !== undefined) {
+    prepareArguments = preparationOrigin.prepareArguments;
+    preparation = getDirectToolImplementation(prepareArguments);
+    preparationOrigin = preparation === undefined ? undefined : getDirectToolDelegate(preparation);
+  }
+  const prepare = prepareArguments;
+  const standaloneExecute = execution === undefined && isStandaloneToolDefinition(definition)
+    ? definition[STANDALONE_TOOL_EXECUTE] : undefined;
   const providerDefinition: ProviderToolDefinition = {
     name: definition.name,
     ...optionalProperties(definition.label === undefined ? undefined : { label: definition.label }),
@@ -425,27 +434,37 @@ export function createHarnessToolFromDefinition<
     ...optionalProperties(definition.promptSnippet === undefined ? undefined : { promptSnippet: definition.promptSnippet }),
     ...optionalProperties(definition.promptGuidelines === undefined ? undefined : { promptGuidelines: [...definition.promptGuidelines] }),
   };
-  return {
+  const tool: HarnessTool = {
     definition: providerDefinition,
-    ...optionalProperties(prepareArguments === undefined ? undefined : {
-      prepareInput: async (input) => requiredJsonValue(
-        await prepareArguments(directToolInput(definition.parameters, input)),
+    ...optionalProperties(prepare === undefined ? undefined : {
+      prepareInput: async (input, toolContext) => boundedJson(
+        preparation?.prepareInput === undefined
+          ? await prepare(boundedJson(input, "Tool input", MAX_TOOL_INPUT_BYTES))
+          : await preparation.prepareInput(boundedJson(input, "Tool input", MAX_TOOL_INPUT_BYTES), toolContext),
         "Prepared tool input",
+        MAX_TOOL_INPUT_BYTES,
       ),
     }),
     ...optionalProperties(definition.executionMode === undefined ? undefined : { executionMode: definition.executionMode }),
     ...optionalProperties(definition.recovery === undefined ? undefined : { recovery: definition.recovery }),
     validate(input): void {
       assertSchema(providerDefinition.inputSchema, input);
+      implementation?.validate(input);
     },
     resources: resourceClaims === undefined
       ? () => []
       : (input, toolContext) => resourceClaims(directToolInput(definition.parameters, input), toolContext),
     async execute(input, toolContext) {
       toolContext.signal.throwIfAborted();
+      if (implementation !== undefined) {
+        const parameters = directToolInput(definition.parameters, input);
+        const result = await implementation.execute(requiredJsonValue(parameters, "Tool input"), toolContext);
+        toolContext.signal.throwIfAborted();
+        return result;
+      }
       const onUpdate = toolContext.reportProgress === undefined
         ? undefined
-        : (partial: AgentToolResult<TDetails>): void => {
+        : (partial: AgentToolResult<unknown>): void => {
             const converted = directResult(partial);
             toolContext.reportProgress?.({
               type: "result",
@@ -454,17 +473,18 @@ export function createHarnessToolFromDefinition<
               ...optionalProperties(converted.metadata === undefined ? undefined : { metadata: converted.metadata }),
             });
           };
-      const result = await definition.execute(
-        toolContext.toolCallId,
-        directToolInput(definition.parameters, input),
-        toolContext.signal,
-        onUpdate,
-        context(toolContext),
-      );
+      const parameters = directToolInput(definition.parameters, input);
+      const result = standaloneExecute !== undefined
+        ? await standaloneExecute(toolContext.toolCallId, parameters, toolContext.signal, onUpdate)
+        : execution === undefined
+          ? await execute(toolContext.toolCallId, parameters, toolContext.signal, onUpdate, context(toolContext))
+          : await execution(toolContext.toolCallId, parameters, toolContext.signal, onUpdate, context(toolContext));
       toolContext.signal.throwIfAborted();
       return directResult(result);
     },
   };
+  setDirectToolOrigin(tool, definition);
+  return tool;
 }
 
 /** Retain the public definition while presenting the agent-loop callable shape. */
@@ -474,12 +494,12 @@ export function wrapToolDefinition<
   TState,
 >(
   definition: ToolDefinition<TParameters, TDetails, TState>,
-  context?: ExtensionContext,
+  context?: PluginContext,
 ): AgentTool<TParameters, TDetails, TState> {
   const standaloneExecute = isStandaloneToolDefinition(definition)
     ? definition[STANDALONE_TOOL_EXECUTE]
     : undefined;
-  return {
+  const wrapped: AgentTool<TParameters, TDetails, TState> = {
     name: definition.name,
     label: definition.label ?? definition.name,
     description: definition.description,
@@ -503,6 +523,9 @@ export function wrapToolDefinition<
       return await definition.execute(toolCallId, params, signal, onUpdate, context);
     },
   };
+  const implementation = getDirectToolImplementation(definition.execute);
+  if (implementation !== undefined) setDirectToolImplementation(wrapped.execute, implementation);
+  return wrapped;
 }
 
 /** Recreate a public direct definition from an agent-loop tool. */
@@ -518,6 +541,8 @@ export function createToolDefinitionFromAgentTool<
     signal,
     onUpdate,
   ) => tool.execute(toolCallId, input, signal, onUpdate);
+  const implementation = getDirectToolImplementation(tool.execute);
+  if (implementation !== undefined) setDirectToolImplementation(executeStandalone, implementation);
   return {
     name: tool.name,
     label: tool.label,
@@ -539,11 +564,11 @@ export function createToolDefinitionFromAgentTool<
   };
 }
 
-export function wrapRegisteredTool(tool: RegisteredTool, context?: ExtensionContext): AgentTool {
+export function wrapRegisteredTool(tool: RegisteredTool, context?: PluginContext): AgentTool {
   return wrapToolDefinition(tool.definition, context);
 }
 
-export function wrapRegisteredTools(tools: Iterable<RegisteredTool>, context?: ExtensionContext): AgentTool[] {
+export function wrapRegisteredTools(tools: Iterable<RegisteredTool>, context?: PluginContext): AgentTool[] {
   return [...tools].map((tool) => wrapRegisteredTool(tool, context));
 }
 

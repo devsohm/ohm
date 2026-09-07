@@ -1,11 +1,11 @@
 # RPC protocol and typed client
 
-Run `ohm --mode rpc` to control one ohm runtime from another process. Standard input accepts commands and extension UI responses. Standard output emits command responses, raw agent events, shell updates, and extension UI requests.
+Run `ohm --mode rpc` to control one ohm runtime from another process. Standard input accepts commands and plugin UI responses. Standard output emits command responses, raw agent events, shell updates, and plugin UI requests.
 
 RPC has no protocol-specific MCP command and no subagent command, event, or
-handle family. Extension-owned bridges and delegation workflows appear as
+handle family. Plugin-owned bridges and delegation workflows appear as
 ordinary registered tool calls. Any server transport or delegated child
-process is owned and bounded by that extension rather than projected into the
+process is owned and bounded by that plugin rather than projected into the
 RPC protocol as another session.
 
 The command-line RPC host does not synthesize per-tool approval prompts. A Node.js host invoking `main([...], { toolAuthorizationHandler })` can install the same host-owned authorization callback used by the SDK; it is forwarded to every initial and replacement RPC session. Omission preserves allow behavior. See [SDK composition](sdk.md#host-owned-tool-authorization).
@@ -76,9 +76,9 @@ Construction options are:
 | `provider`, `model` | Added as initial CLI selection arguments. |
 | `args` | Additional CLI arguments appended after the generated RPC arguments. |
 
-The public state is `started` and `pendingRequestCount`. `started` is true while the owned child is starting, running, or stopping, and false after it exits. Starting again after an exit first finishes bounded cleanup of the previous process tree. Lifecycle and observation methods are `start()`, `stop()`, `onEvent(listener)`, `respondToExtensionUi(response)`, and `getStderr()`. Every protocol command has a camel-case method, including `listPortablePresentations`, `invokePortablePresentationAction`, `listExtensionWireServices`, and `invokeExtensionWireService`; the existing prompt, queue, model, session, shell, history, and recovery methods retain their current contracts.
+The public state is `started` and `pendingRequestCount`. `started` is true while the owned child is starting, running, or stopping, and false after it exits. Starting again after an exit first finishes bounded cleanup of the previous process tree. Lifecycle and observation methods are `start()`, `stop()`, `onEvent(listener)`, `respondToPluginUi(response)`, and `getStderr()`. Every protocol command has a camel-case method, including `listPortablePresentations`, `invokePortablePresentationAction`, `listPluginWireServices`, and `invokePluginWireService`; the existing prompt, queue, model, session, shell, history, and recovery methods retain their current contracts.
 
-`onEvent()` receives the exact `RpcStreamEvent` union: `AgentSessionEvent`, `RpcBashExecutionUpdate`, `RpcExtensionUiRequest`, `RpcExtensionErrorEvent`, or `PortablePresentationEvent`.
+`onEvent()` receives the exact `RpcStreamEvent` union: `AgentSessionEvent`, `RpcBashExecutionUpdate`, `RpcPluginUiRequest`, `RpcPluginErrorEvent`, or `PortablePresentationEvent`.
 
 The event helpers are `waitForIdle(timeout?)`, `collectEvents(timeout?)`, and `promptAndWait(message, images?, timeout?)`. `promptAndWait()` subscribes before sending the prompt, so it cannot miss a fast completion. All three settle on the raw `agent_settled` event, after terminal cleanup and queued work have finished; their default timeout is 60 seconds. At most 256 event waiters may be active. A collection retains at most 4,096 records or 32 MiB of wire records; use `onEvent()` to consume a larger stream incrementally.
 
@@ -88,7 +88,7 @@ A client timeout rejects and forgets the request. It does not cancel server work
 
 A failure response rejects the typed method with a bounded, secret-redacted `response.error`. Process exit, process error, a broken input pipe, or `stop()` rejects every pending request. Diagnostic errors retain only bounded, redacted stderr; `getStderr()` exposes the raw bounded 64 KiB tail when a caller explicitly needs it.
 
-`respondToExtensionUi()` writes one typed `extension_ui_response` record without creating a pending command or waiting for an acknowledgement. Match its ID to the request observed through `onEvent()`.
+`respondToPluginUi()` writes one typed `extension_ui_response` record without creating a pending command or waiting for an acknowledgement. Match its ID to the request observed through `onEvent()`.
 
 ## Commands
 
@@ -115,6 +115,7 @@ When `prompt.streamingBehavior` is `steer` or `followUp`, a prompt received duri
 | Type | Fields | Result data |
 | --- | --- | --- |
 | `get_state` | none | `RpcSessionState` described below. |
+| `get_inspection` | none | Bounded runtime metadata: model, context sources, tools and owners, current authorization/gate configuration, plugins, and recent operation/tool timings and recognized terminal categories; no message bodies, tool input/output, or free-form error details. Gate presence is not a permission decision or sandbox claim. See [shared inspection semantics](sdk.md#createagentsession). The typed client method is `getInspection()`. |
 | `set_model` | `provider`, `modelId` | The selected public `Model`; selection is session-only and does not rewrite the configured default. |
 | `cycle_model` | none | The next model, effective thinking level, and whether the active scope was used; `null` when fewer than two candidates exist. |
 | `get_available_models` | none | `{ models: Model[] }`. |
@@ -129,7 +130,7 @@ When `prompt.streamingBehavior` is `steer` or `followUp`, a prompt received duri
 | Selection | Optional public `model: Model`; `thinkingLevel` is `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | Active work | Boolean `isStreaming` and `isCompacting` flags, plus optional `suspendedRun` recovery status. |
 | Message delivery | `steeringMode` and `followUpMode`, each set to `all` or `one-at-a-time`. |
-| Session identity | Required string `sessionId`, plus optional string `sessionFile` and `sessionName`. |
+| Session identity | Required string `sessionId`, plus optional strings `sessionFile` and `sessionName`. `sessionFile` is the saved session's SQLite path, not a JSONL text file. Unsaved sessions omit it. |
 | Automation | Boolean `autoCompactionEnabled`. |
 | Counts | Numeric `messageCount` and `pendingMessageCount`. |
 
@@ -150,7 +151,7 @@ While `bash` runs, its merged stdout/stderr is emitted in order:
 {"type":"bash_execution_update","id":"req_1","delta":"building...\n"}
 ```
 
-The update `id` is the originating command ID and is omitted when that command had no ID. Each delta is at most 64 KiB of UTF-8 text. A command emits at most 8 MiB across at most 2,048 update records; if further live output is omitted, the final update has `"truncated":true`. When `fullOutputPath` is present, it identifies the complete persisted artifact; otherwise the bounded final response `{ output, exitCode, isError?, cancelled, timedOut?, signal?, truncated, fullOutputPath? }` is authoritative. All queued updates are written before the final `bash` response. RPC does not expose a per-command shell timeout, so server execution is unbounded unless an extension-provided `BashOperations` implementation applies one. The RPC client's separate response deadline does not cancel server work.
+The update `id` is the originating command ID and is omitted when that command had no ID. Each delta is at most 64 KiB of UTF-8 text. A command emits at most 8 MiB across at most 2,048 update records; if further live output is omitted, the final update has `"truncated":true`. When `fullOutputPath` is present, it identifies the complete persisted artifact; otherwise the bounded final response `{ output, exitCode, isError?, cancelled, timedOut?, signal?, truncated, fullOutputPath? }` is authoritative. All queued updates are written before the final `bash` response. RPC does not expose a per-command shell timeout, so server execution is unbounded unless a plugin-provided `BashOperations` implementation applies one. The RPC client's separate response deadline does not cancel server work.
 
 ### Sessions
 
@@ -169,7 +170,7 @@ The update `id` is the originating command ID and is omitted when that command h
 | `export_html` | `outputPath?` | `{ path }`. |
 | `get_messages` | `cursor?`, `limit?` | A bounded page of public `AgentMessage` values reconstructed from the current branch. |
 
-Session replacement runs the same extension cancellation guards and lifecycle teardown as the interactive host. Successful replacement rebinds extensions and raw event delivery to the new session before the response is returned.
+Session replacement runs the same plugin cancellation guards and lifecycle teardown as the interactive host. Successful replacement rebinds plugins and raw event delivery to the new session before the response is returned.
 
 In `get_session_stats`, message, tool, usage, token, cost, and breakdown fields
 describe the complete journal. Cache-waste fields follow the active branch
@@ -197,7 +198,7 @@ Without paging fields, `get_entries`, `get_tree`, and `get_messages` return the 
 
 `get_tree` and `get_messages` use the same default and maximum page sizes. Start without `cursor`, then pass `nextCursor` until `hasMore` is false. A cursor is valid only for the unchanged session, selected leaf, and entry snapshot that created it. The server rejects malformed, stale, cross-command, and out-of-range cursors. The client also rejects missing or repeated continuations. `get_tree.tree` contains append-order fragments whose `children` include only nodes present in that page; use each entry's `parentId` to assemble the complete tree. The typed `RpcClient.getTree()` validates duplicate IDs, missing parents, cycles, totals, and the leaf while assembling pages. `getTree()` and `getMessages()` retain at most 32,768 items or 32 MiB of wire records, as does `getEntries()`. `getEntriesPage()`, `getTreePage()`, and `getMessagesPage()` are the bounded escape hatches for larger histories.
 
-Durable extension `custom` and `custom_message` entries, including custom messages returned by `get_messages`, retain their optional provenance envelope through the structurally safe RPC projection. `RpcSessionEntry`, `RpcSessionTreeNode`, and `RpcAgentMessage` expose that envelope in the public RPC types. It identifies the owning extension generation with `schemaVersion`, `extensionId`, and `sourceSha256`, plus package version and digest fields when available.
+Durable plugin `custom` and `custom_message` entries, including custom messages returned by `get_messages`, retain their optional provenance envelope through the structurally safe RPC projection. `RpcSessionEntry`, `RpcSessionTreeNode`, and `RpcAgentMessage` expose that envelope in the public RPC types. It identifies the owning plugin generation with `schemaVersion`, `extensionId`, and `sourceSha256`, plus package version and digest fields when available.
 
 All three history commands also stop a page before its item payload exceeds 8 MiB. This leaves room for the response envelope under the shared 16 MiB record limit. If one history item exceeds the page budget by itself, the command returns a failure instead of writing a partial record.
 
@@ -221,9 +222,9 @@ not require a result. Verify external state before sending any resolution.
 
 ### Discoverable commands
 
-`get_commands` returns `{ commands }` containing extension commands, prompt templates, and skills. Each record is `{ name, description?, source, sourceInfo }`, where `source` is `extension`, `prompt`, or `skill` and `sourceInfo` contains `path`, `source`, `scope`, `origin`, and optional `baseDir`.
+`get_commands` returns `{ commands }` containing plugin commands, prompt templates, and skills. Each record is `{ name, description?, source, sourceInfo }`, where `source` is `extension`, `prompt`, or `skill` and `sourceInfo` contains `path`, `source`, `scope`, `origin`, and optional `baseDir`.
 
-### Portable presentations and extension wire services
+### Portable presentations and plugin wire services
 
 `get_portable_presentations` returns the bounded current `show` snapshot for
 late clients. Subsequent `portable_presentation` events carry `show` updates
@@ -238,7 +239,7 @@ descriptor includes owner, name, service version, detached request and response
 JSON schemas, and request/response byte limits. `extension_wire_request` wraps
 the versioned service envelope in its `request` field. The broker validates the
 envelope and schema before dispatch. Handler failures return a generic bounded
-message; extension exception details are not sent over the wire. Catalogs are
+message; plugin exception details are not sent over the wire. Catalogs are
 limited to 256 entries and 2 MiB, individual schemas to 64 KiB, and payloads to
 1 MiB. Generation replacement cancels its endpoints; the RPC connection has no
 separate per-wire-call cancellation command.
@@ -255,7 +256,7 @@ Agent events and `bash_execution_update` records are emitted directly, not wrapp
 | `turn_start` | `turnIndex`, `timestamp` |
 | `turn_end` | `turnIndex`, `message`, `toolResults` |
 | `message_start` | `message` |
-| `message_update` | accumulated `message`, provider-neutral `assistantMessageEvent` |
+| `message_update` | `streamVersion: 1`, current `usage`, compact `assistantMessageEvent` |
 | `message_end` | `message` |
 | `tool_execution_start` | `toolCallId`, `toolName`, `args` |
 | `tool_execution_update` | same identity plus `partialResult` |
@@ -276,19 +277,32 @@ For `toolcall_delta`, consume `assistantMessageEvent.delta` as the guaranteed
 live argument representation. Parsed tool-call `arguments` are authoritative
 at `toolcall_end` and `tool_execution_start`, after the JSON is complete.
 
+JSON and RPC use the exported `SessionWireEvent` type. Progress records no longer
+repeat the growing `message` or nested `partial` snapshot. Accumulate text,
+thinking and argument deltas by content index; `toolcall_start` includes the call
+`id` and `name`. `message_end` still supplies the complete final message. This is
+a wire-format change: consumers reading `message_update.message` must migrate
+to deltas or final messages. In-process SDK subscriptions retain their snapshots.
+
+`cycle_model` accepts optional `direction`, `persist`, and `models` preferences,
+for example `models: [{ selector: "provider/model", thinkingLevel: "high" }]`.
+Preferences never bypass the session's model allowlist or configured credentials.
+Model cycling is session-only unless `persist: true`; `cycle_thinking_level`
+preserves its historical persistence default and accepts `persist: false`.
+
 Tool arguments are emitted only on `tool_execution_start`; correlate later updates and completion by `toolCallId`.
 
 A prompt success response confirms preflight acceptance, not completion. `agent_end` closes one agent run but can be followed by retry or queued work. `agent_settled` is the authoritative idle boundary after cleanup, compaction, retry, and queued follow-up handling.
 
-An extension failure is emitted as `{ type: "extension_error", extensionId,
+A plugin failure is emitted as `{ type: "extension_error", extensionId,
 extensionPath, event, error }`. The redacted fields are bounded to 1,024 UTF-8
 bytes for `extensionId` and `event`, and 4,096 bytes for `extensionPath` and
-`error`; host-owned or otherwise unattributed failures use `runtime`. Extension
+`error`; host-owned or otherwise unattributed failures use `runtime`. Plugin
 UI request records are described next.
 
-## Extension UI
+## Plugin UI
 
-An extension can emit:
+A plugin can emit:
 
 | Method | Request fields after `type`, `id`, `extensionId`, and `method` | Blocking response |
 | --- | --- | --- |
@@ -321,7 +335,7 @@ last ohm-originated replacement. RPC advertises `editorTextWrite` but leaves
 
 `select`, `confirm`, and `input` accept integer timeouts from 1 through 3,600,000 milliseconds. `editor` has no RPC timeout field. Cancellation, timeout, host shutdown, or a failed request write resolves `select`, `input`, and `editor` as `undefined` and `confirm` as `false`. A response with an unknown or already-settled ID is ignored. Presentation request IDs are not awaiting responses.
 
-The bridge admits at most 64 unanswered dialogs and serializes extension UI
+The bridge admits at most 64 unanswered dialogs and serializes plugin UI
 records so a blocked output writer cannot accumulate an unbounded write chain.
 The 16 MiB RPC line limit is also enforced across retained state. Unanswered
 dialog request snapshots share 16 MiB. Current status/widget/editor state and
@@ -339,7 +353,7 @@ not prevent their completion or cleanup. Status and widget state retain at most
 that capacity.
 
 `statusKey` and `widgetKey` are opaque host-namespaced ownership keys, not the
-extension's unqualified local key. Status text and widget lines are omitted to
+plugin's unqualified local key. Status text and widget lines are omitted to
 remove the corresponding presentation value, and generation shutdown emits
 removals for any keys that generation still owns. Only string-array widgets cross
 this bridge; component factories, custom UI, background/header/footer changes,

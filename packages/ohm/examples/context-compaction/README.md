@@ -1,11 +1,11 @@
 # Context and compaction
 
 This example adds one bounded instruction during `before_agent_start`. It also
-shows how an extension can inspect context pressure and request host-owned
+shows how an plugin can inspect context pressure and request host-owned
 compaction.
 
 ```text
-ohm install ./packages/ohm/examples/context-compaction
+ohm plugins install ./packages/ohm/examples/context-compaction
 ```
 
 After `/refresh`:
@@ -14,5 +14,5 @@ After `/refresh`:
   length without exposing the prompt text.
 - `/example-context compact` asks the host to compact with custom guidance.
 
-The extension requests compaction. The host still owns planning, summary
+The plugin requests compaction. The host still owns planning, summary
 validation, persistence, and lifecycle events.

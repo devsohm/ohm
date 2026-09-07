@@ -11,7 +11,11 @@ import type {
 	SessionV4ConversationNode,
 	SessionV4Header,
 	SessionV4Json,
+	SessionV4NodeMetadata,
 	SessionV4OperationState,
+	SessionV4RecordCollection,
+	SessionV4RecordCollections,
+	SessionV4ReducerState,
 	SessionV4State,
 	SessionV4ToolEffectState,
 } from "./types.js";
@@ -25,8 +29,16 @@ function invalid(message: string): never {
 	throw new SessionV4ValidationError(message);
 }
 
-function cloneState(state: SessionV4State): SessionV4State {
-	return structuredClone(state);
+function cloneState(state: SessionV4ReducerState): SessionV4State {
+	return structuredClone({
+		...state,
+		nodes: new Map(state.nodes),
+		operations: new Map(state.operations),
+		checkpoints: new Map(state.checkpoints),
+		queue: new Map(state.queue),
+		toolEffects: new Map(state.toolEffects),
+		commits: new Map(state.commits),
+	});
 }
 
 type SessionV4IdOwner =
@@ -72,7 +84,7 @@ const ID_OWNER_PRIORITY: readonly SessionV4IdOwner[] = [
 	"tool settlement",
 ];
 
-const derivedIndexes = new WeakMap<SessionV4State, SessionV4DerivedIndexes>();
+const derivedIndexes = new WeakMap<SessionV4ReducerState, SessionV4DerivedIndexes>();
 
 function emptyIndexes(): SessionV4DerivedIndexes {
 	return {
@@ -96,9 +108,9 @@ function addOwner(indexes: SessionV4DerivedIndexes, id: string, owner: SessionV4
 	addSetValue(indexes.idOwners, id, owner);
 }
 
-function buildIndexes(state: SessionV4State): SessionV4DerivedIndexes {
+function buildIndexes(state: SessionV4ReducerState): SessionV4DerivedIndexes {
 	const indexes = emptyIndexes();
-	for (const node of state.nodes.values()) addOwner(indexes, node.id, "conversation node");
+	for (const id of state.nodes.keys()) addOwner(indexes, id, "conversation node");
 	for (const operation of state.operations.values()) {
 		addOwner(indexes, operation.id, "operation");
 		if (operation.promptNodeId !== null) {
@@ -131,7 +143,7 @@ function buildIndexes(state: SessionV4State): SessionV4DerivedIndexes {
 	return indexes;
 }
 
-function indexesFor(state: SessionV4State): SessionV4DerivedIndexes {
+function indexesFor(state: SessionV4ReducerState): SessionV4DerivedIndexes {
 	const existing = derivedIndexes.get(state);
 	if (existing !== undefined) return existing;
 	const indexes = buildIndexes(state);
@@ -167,7 +179,7 @@ class SessionV4MutationJournal {
 		});
 	}
 
-	mapSet<K, V>(map: Map<K, V>, key: K, value: V): void {
+	mapSet<K, V>(map: { has(key: K): boolean; get(key: K): V | undefined; set(key: K, value: V): void; delete(key: K): boolean }, key: K, value: V): void {
 		const had = map.has(key);
 		const before = map.get(key);
 		map.set(key, value);
@@ -180,7 +192,7 @@ class SessionV4MutationJournal {
 		});
 	}
 
-	mapDelete<K, V>(map: Map<K, V>, key: K): void {
+	mapDelete<K, V>(map: { has(key: K): boolean; get(key: K): V | undefined; set(key: K, value: V): void; delete(key: K): boolean }, key: K): void {
 		const had = map.has(key);
 		const before = map.get(key);
 		map.delete(key);
@@ -201,6 +213,12 @@ class SessionV4MutationJournal {
 		if (current.has(value)) return;
 		current.add(value);
 		this.#undo.push(() => current.delete(value));
+	}
+
+	replace<V extends object, M>(map: SessionV4RecordCollection<V, M>, key: string, value: V, update: (next: V) => void): void {
+		const next = structuredClone(value);
+		update(next);
+		this.mapSet(map, key, next);
 	}
 
 	commit(): void {
@@ -282,12 +300,19 @@ export function createSessionV4State(header: SessionV4Header): SessionV4State {
 	return state;
 }
 
-export function cloneSessionV4State(state: SessionV4State): SessionV4State {
+export function cloneSessionV4State(state: SessionV4ReducerState): SessionV4State {
 	return cloneState(state);
 }
 
+/** Creates a reducer owned by a host whose collections retain only accepted records. */
+export function createSessionV4ReducerState(header: SessionV4Header, collections: SessionV4RecordCollections): SessionV4ReducerState {
+	const state = { ...createSessionV4State(header), ...collections };
+	derivedIndexes.set(state, emptyIndexes());
+	return state;
+}
+
 function createdIdOwner(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	candidate: string,
 	ignoreToolResultReservations = false,
 ): string | null {
@@ -300,25 +325,25 @@ function createdIdOwner(
 	return null;
 }
 
-function assertFreshId(state: SessionV4State, candidate: string, description: string): void {
+function assertFreshId(state: SessionV4ReducerState, candidate: string, description: string): void {
 	const owner = createdIdOwner(state, candidate);
 	if (owner !== null) invalid(`${description} id ${JSON.stringify(candidate)} is already used by a ${owner}`);
 }
 
-function requireNode(state: SessionV4State, nodeId: string, description: string): SessionV4ConversationNode {
-	const node = state.nodes.get(nodeId);
+function requireNode(state: SessionV4ReducerState, nodeId: string, description: string): SessionV4NodeMetadata {
+	const node = state.nodes.getMetadata === undefined ? state.nodes.get(nodeId) : state.nodes.getMetadata(nodeId);
 	if (node === undefined) invalid(`${description} references unknown node ${JSON.stringify(nodeId)}`);
 	return node;
 }
 
-function requireBranch(state: SessionV4State, branchId: SessionV4BranchId) {
+function requireBranch(state: SessionV4ReducerState, branchId: SessionV4BranchId) {
 	const branch = state.branches.get(branchId);
 	if (branch === undefined) invalid(`branch ${JSON.stringify(branchId)} does not exist`);
 	return branch;
 }
 
 function ancestryToAncestor(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	startNodeId: string | null,
 	ancestorNodeId: string | null,
 	description: string,
@@ -348,7 +373,7 @@ function ancestryToAncestor(
 }
 
 function assertDescendantOrEqual(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	descendantNodeId: string,
 	ancestorNodeId: string,
 	description: string,
@@ -362,7 +387,7 @@ function clearInDoubtDiagnostic(effect: SessionV4ToolEffectState): void {
 	delete effect.inDoubtDetail;
 }
 
-function requireOpenOperation(state: SessionV4State, operationId: string): SessionV4OperationState {
+function requireOpenOperation(state: SessionV4ReducerState, operationId: string): SessionV4OperationState {
 	const operation = state.operations.get(operationId);
 	if (operation === undefined) invalid(`operation ${JSON.stringify(operationId)} does not exist`);
 	const branch = requireBranch(state, operation.branchId);
@@ -377,7 +402,7 @@ function isToolEffectTerminal(status: SessionV4ToolEffectState["status"]): boole
 }
 
 function addConversationNode(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	node: SessionV4ConversationNode,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -521,7 +546,7 @@ function addConversationNode(
 }
 
 function applyRunAccepted(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_accepted" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -571,7 +596,7 @@ function applyRunAccepted(
 }
 
 function applyRunStepSelected(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_step_selected" }>,
 	journal: SessionV4MutationJournal,
 ): void {
@@ -591,16 +616,17 @@ function applyRunStepSelected(
 			invalid("a later run step may be selected only after the preceding step was attempted");
 		}
 	}
-	journal.edit(operation);
-	operation.stepSelections.push({
-		step: change.step,
-		selectedAt: change.selectedAt,
-		selection: change.selection,
+	journal.replace(state.operations, operation.id, operation, (next) => {
+		next.stepSelections.push({
+			step: change.step,
+			selectedAt: change.selectedAt,
+			selection: change.selection,
+		});
 	});
 }
 
 function applyRunAttempt(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_attempt" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -622,20 +648,21 @@ function applyRunAttempt(
 	} else {
 		invalid("run steps must be contiguous");
 	}
-	journal.edit(operation);
-	operation.attempts.push({
-		id: change.attemptId,
-		step: change.step,
-		attempt: change.attempt,
-		task: change.task,
-		startedAt: change.startedAt,
+	journal.replace(state.operations, operation.id, operation, (next) => {
+		next.attempts.push({
+			id: change.attemptId,
+			step: change.step,
+			attempt: change.attempt,
+			task: change.task,
+			startedAt: change.startedAt,
+		});
+		next.status = "running";
 	});
-	operation.status = "running";
 	journalOwner(journal, indexes, change.attemptId, "run attempt");
 }
 
 function applyRunCancel(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_cancel" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -643,27 +670,29 @@ function applyRunCancel(
 	const operation = requireOpenOperation(state, change.operationId);
 	if (operation.cancel !== null) invalid("an operation may record only one cancellation request");
 	assertFreshId(state, change.cancelId, "cancellation");
-	journal.edit(operation);
-	operation.cancel = {
-		id: change.cancelId,
-		requestedAt: change.requestedAt,
-		...optionalProperty("reason", change.reason),
-	};
+	journal.replace(state.operations, operation.id, operation, (next) => {
+		next.cancel = {
+			id: change.cancelId,
+			requestedAt: change.requestedAt,
+			...optionalProperty("reason", change.reason),
+		};
+	});
 	journalOwner(journal, indexes, change.cancelId, "cancellation");
 	for (const effectId of indexes.toolEffectsByOperationId.get(operation.id) ?? []) {
 		const effect = state.toolEffects.get(effectId);
 		if (effect === undefined || effect.status !== "prepared") continue;
-		journal.edit(effect);
-		effect.status = "not_applied";
-		effect.cancelledById = change.cancelId;
-		effect.finishedAt = change.requestedAt;
-		clearInDoubtDiagnostic(effect);
-		delete effect.result;
+		journal.replace(state.toolEffects, effect.id, effect, (next) => {
+			next.status = "not_applied";
+			next.cancelledById = change.cancelId;
+			next.finishedAt = change.requestedAt;
+			clearInDoubtDiagnostic(next);
+			delete next.result;
+		});
 	}
 }
 
 function applyRunCheckpoint(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_checkpoint" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -676,13 +705,14 @@ function applyRunCheckpoint(
 		createdAt: change.createdAt,
 		data: change.data,
 	});
-	journal.edit(operation);
-	operation.checkpointIds.push(change.checkpointId);
+	journal.replace(state.operations, operation.id, operation, (next) => {
+		next.checkpointIds.push(change.checkpointId);
+	});
 	journalOwner(journal, indexes, change.checkpointId, "checkpoint");
 }
 
 function applyRunFinished(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "run_finished" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -730,17 +760,18 @@ function applyRunFinished(
 			invalid(`tool effect ${JSON.stringify(effect.id)} is missing its result node`);
 		}
 	}
-	journal.edit(operation);
-	operation.status = change.outcome;
-	operation.finishedAt = change.finishedAt;
-	if (change.detail === undefined) delete operation.detail;
-	else operation.detail = change.detail;
+	journal.replace(state.operations, operation.id, operation, (next) => {
+		next.status = change.outcome;
+		next.finishedAt = change.finishedAt;
+		if (change.detail === undefined) delete next.detail;
+		else next.detail = change.detail;
+	});
 	journal.edit(branch);
 	branch.openOperationId = null;
 }
 
 function applyQueueAdded(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "queue_added" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -769,7 +800,7 @@ function applyQueueAdded(
 }
 
 function applyQueueClaimed(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "queue_claimed" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -789,15 +820,16 @@ function applyQueueClaimed(
 	if (branch.pendingQueueEntryIds[entry.kind][0] !== entry.id) {
 		invalid(`queue entry ${JSON.stringify(entry.id)} is not first in its branch queue`);
 	}
-	journal.edit(entry);
-	entry.status = "claimed";
-	entry.operationId = change.operationId;
-	entry.claimedAt = change.claimedAt;
+	journal.replace(state.queue, entry.id, entry, (next) => {
+		next.status = "claimed";
+		next.operationId = change.operationId;
+		next.claimedAt = change.claimedAt;
+	});
 	journal.addSetValue(indexes.queueEntriesByOperationId, change.operationId, entry.id);
 }
 
 function applyQueueFinished(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "queue_finished" }>,
 	journal: SessionV4MutationJournal,
 ): void {
@@ -821,9 +853,10 @@ function applyQueueFinished(
 			invalid(`queue entry ${JSON.stringify(entry.id)} target belongs to a different operation`);
 		}
 	}
-	journal.edit(entry);
-	entry.status = change.outcome;
-	entry.finishedAt = change.finishedAt;
+	journal.replace(state.queue, entry.id, entry, (next) => {
+		next.status = change.outcome;
+		next.finishedAt = change.finishedAt;
+	});
 	journal.edit(branch);
 	const pending = branch.pendingQueueEntryIds[entry.kind];
 	const pendingIndex = pending.indexOf(entry.id);
@@ -832,7 +865,7 @@ function applyQueueFinished(
 }
 
 function applyToolPrepared(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_prepared" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -936,7 +969,7 @@ function applyToolPrepared(
 	journal.addSetValue(indexes.toolCallIdsByOperationId, change.operationId, change.callId);
 }
 
-function requireToolEffect(state: SessionV4State, effectId: string): SessionV4ToolEffectState {
+function requireToolEffect(state: SessionV4ReducerState, effectId: string): SessionV4ToolEffectState {
 	const effect = state.toolEffects.get(effectId);
 	if (effect === undefined) invalid(`tool effect ${JSON.stringify(effectId)} does not exist`);
 	requireOpenOperation(state, effect.operationId);
@@ -944,7 +977,7 @@ function requireToolEffect(state: SessionV4State, effectId: string): SessionV4To
 }
 
 function applyToolDispatched(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_dispatched" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -964,30 +997,32 @@ function applyToolDispatched(
 		invalid("a tool effect may dispatch only when prepared, or retry when repeatable and in doubt");
 	}
 	assertFreshId(state, change.dispatchId, "tool dispatch");
-	journal.edit(effect);
-	effect.dispatchIds.push(change.dispatchId);
-	effect.lastDispatchedAt = change.dispatchedAt;
-	effect.status = "dispatched";
-	clearInDoubtDiagnostic(effect);
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.dispatchIds.push(change.dispatchId);
+		next.lastDispatchedAt = change.dispatchedAt;
+		next.status = "dispatched";
+		clearInDoubtDiagnostic(next);
+	});
 	journalOwner(journal, indexes, change.dispatchId, "tool dispatch");
 }
 
 function applyToolInDoubt(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_in_doubt" }>,
 	journal: SessionV4MutationJournal,
 ): void {
 	const effect = requireToolEffect(state, change.effectId);
 	if (effect.status !== "dispatched") invalid("only a dispatched tool effect may become in doubt");
-	journal.edit(effect);
-	effect.status = "in_doubt";
-	effect.inDoubtAt = change.noticedAt;
-	if (change.detail === undefined) delete effect.inDoubtDetail;
-	else effect.inDoubtDetail = change.detail;
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.status = "in_doubt";
+		next.inDoubtAt = change.noticedAt;
+		if (change.detail === undefined) delete next.inDoubtDetail;
+		else next.inDoubtDetail = change.detail;
+	});
 }
 
 function applyToolRecoveryStarted(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_recovery_started" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -998,32 +1033,35 @@ function applyToolRecoveryStarted(
 	}
 	if (effect.recoveryId !== null) invalid("tool effect recovery may start only once");
 	assertFreshId(state, change.recoveryId, "tool recovery");
-	journal.edit(effect);
-	effect.status = "recovery_started";
-	effect.recoveryId = change.recoveryId;
-	effect.recoveryStartedAt = change.startedAt;
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.status = "recovery_started";
+		next.recoveryId = change.recoveryId;
+		next.recoveryStartedAt = change.startedAt;
+	});
 	journalOwner(journal, indexes, change.recoveryId, "tool recovery");
 }
 
 function applyToolFinished(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_finished" }>,
 	journal: SessionV4MutationJournal,
 ): void {
 	const effect = requireToolEffect(state, change.effectId);
 	if (effect.status !== "dispatched") invalid("only a dispatched tool effect may finish");
-	if (change.result === undefined) {
+	const result = change.result;
+	if (result === undefined) {
 		invalid("a finished tool effect must persist its result");
 	}
-	journal.edit(effect);
-	effect.status = change.outcome;
-	effect.finishedAt = change.finishedAt;
-	clearInDoubtDiagnostic(effect);
-	effect.result = change.result;
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.status = change.outcome;
+		next.finishedAt = change.finishedAt;
+		clearInDoubtDiagnostic(next);
+		next.result = result;
+	});
 }
 
 function applyToolReconciled(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_reconciled" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -1041,18 +1079,19 @@ function applyToolReconciled(
 	) {
 		invalid("tool reconciliation result must match its outcome");
 	}
-	journal.edit(effect);
-	effect.settlementId = change.reconciliationId;
-	effect.status = change.outcome;
-	effect.finishedAt = change.resolvedAt;
-	clearInDoubtDiagnostic(effect);
-	if (change.result === undefined) delete effect.result;
-	else effect.result = change.result;
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.settlementId = change.reconciliationId;
+		next.status = change.outcome;
+		next.finishedAt = change.resolvedAt;
+		clearInDoubtDiagnostic(next);
+		if (change.result === undefined) delete next.result;
+		else next.result = change.result;
+	});
 	journalOwner(journal, indexes, change.reconciliationId, "tool settlement");
 }
 
 function applyToolManuallyResolved(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: Extract<SessionV4Change, { type: "tool_effect_manually_resolved" }>,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -1078,21 +1117,22 @@ function applyToolManuallyResolved(
 		invalid("manual tool resolution result must match its outcome");
 	}
 	assertFreshId(state, change.resolutionId, "tool resolution");
-	journal.edit(effect);
-	effect.settlementId = change.resolutionId;
-	if (effect.policy !== "never_repeat" && operation.cancel !== null) {
-		effect.cancelledById = operation.cancel.id;
-	}
-	effect.status = change.outcome;
-	effect.finishedAt = change.resolvedAt;
-	clearInDoubtDiagnostic(effect);
-	if (change.result === undefined) delete effect.result;
-	else effect.result = change.result;
+	journal.replace(state.toolEffects, effect.id, effect, (next) => {
+		next.settlementId = change.resolutionId;
+		if (effect.policy !== "never_repeat" && operation.cancel !== null) {
+			next.cancelledById = operation.cancel.id;
+		}
+		next.status = change.outcome;
+		next.finishedAt = change.resolvedAt;
+		clearInDoubtDiagnostic(next);
+		if (change.result === undefined) delete next.result;
+		else next.result = change.result;
+	});
 	journalOwner(journal, indexes, change.resolutionId, "tool settlement");
 }
 
 function applyChange(
-	state: SessionV4State,
+	state: SessionV4ReducerState,
 	change: SessionV4Change,
 	journal: SessionV4MutationJournal,
 	indexes: SessionV4DerivedIndexes,
@@ -1165,8 +1205,8 @@ function applyChange(
 }
 
 function transitionSessionV4Commit(
-	state: SessionV4State,
-	input: SessionV4Commit,
+	state: SessionV4ReducerState,
+	input: SessionV4Commit | SessionV4Json,
 	retain: boolean,
 ): boolean {
 	const commit = parseSessionV4Commit(input);
@@ -1207,13 +1247,13 @@ function transitionSessionV4Commit(
 	}
 }
 
-/** Applies one validated commit to a state owned by the caller. */
-export function applySessionV4CommitOwned(state: SessionV4State, input: SessionV4Commit): boolean {
+/** Parses, detaches and applies one commit to a state owned by the caller. */
+export function applySessionV4CommitOwned(state: SessionV4ReducerState, input: SessionV4Commit | SessionV4Json): boolean {
 	return transitionSessionV4Commit(state, input, true);
 }
 
 /** Validates one commit against owned state without retaining any mutation. */
-export function validateSessionV4CommitTransition(state: SessionV4State, input: SessionV4Commit): void {
+export function validateSessionV4CommitTransition(state: SessionV4ReducerState, input: SessionV4Commit): void {
 	transitionSessionV4Commit(state, input, false);
 }
 

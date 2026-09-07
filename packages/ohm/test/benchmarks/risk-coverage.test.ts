@@ -40,7 +40,7 @@ test("risk coverage evaluates each configured module independently", () => {
   const parsed = parseV8Coverage(JSON.stringify({
     type: "v8",
     files: [{
-      sourcePath: "src/extensions/runtime.ts",
+      sourcePath: "src/plugins/runtime.ts",
       summary: {
         lines: { total: 100, covered: 95, pct: 95 },
         branches: { total: 20, covered: 16, pct: 80 },
@@ -51,16 +51,16 @@ test("risk coverage evaluates each configured module independently", () => {
   const [result] = evaluateRiskCoverage({
     schemaVersion: 1,
     excludedTests: ["test/live/"],
-    targets: [{ file: "src/extensions/runtime.ts", minimum: { lines: 90, branches: 85, functions: 90 } }],
+    targets: [{ file: "src/plugins/runtime.ts", minimum: { lines: 90, branches: 85, functions: 90 } }],
     groups: [{
       id: "extension-runtime",
-      targets: ["src/extensions/runtime.ts"],
-      testPrefixes: ["test/extensions/"],
+      targets: ["src/plugins/runtime.ts"],
+      testPrefixes: ["test/plugins/"],
       testExcludes: [],
     }],
   }, parsed);
   assert.deepEqual(result, {
-    file: "src/extensions/runtime.ts",
+    file: "src/plugins/runtime.ts",
     actual: { lines: 95, branches: 80, functions: 90 },
     minimum: { lines: 90, branches: 85, functions: 90 },
     passed: false,
@@ -75,7 +75,7 @@ test("risk coverage configuration targets only the six high-risk modules", async
   ), "risk coverage configuration");
   assert.deepEqual(config.excludedTests, ["test/live/"]);
   assert.deepEqual(config.targets, [
-    { file: "src/extensions/runtime.ts", minimum: { lines: 90, branches: 68, functions: 90 } },
+    { file: "src/plugins/runtime.ts", minimum: { lines: 90, branches: 68, functions: 90 } },
     { file: "src/cli/main.ts", minimum: { lines: 84, branches: 68, functions: 74 } },
     { file: "src/tui/controller.ts", minimum: { lines: 91, branches: 78, functions: 85 } },
     { file: "src/service/agent-session.ts", minimum: { lines: 94, branches: 85, functions: 90 } },
@@ -85,8 +85,8 @@ test("risk coverage configuration targets only the six high-risk modules", async
   assert.deepEqual(config.groups, [
     {
       id: "extension-runtime",
-      targets: ["src/extensions/runtime.ts"],
-      testPrefixes: ["test/extensions/", "test/cli/", "test/service/", "test/storage/"],
+      targets: ["src/plugins/runtime.ts"],
+      testPrefixes: ["test/plugins/", "test/cli/", "test/service/", "test/storage/"],
       testExcludes: ["test/cli/process-signal-cleanup.test.ts"],
     },
     {
@@ -98,7 +98,7 @@ test("risk coverage configuration targets only the six high-risk modules", async
     {
       id: "service-runtime",
       targets: ["src/service/agent-session.ts"],
-      testPrefixes: ["test/storage/", "test/service/", "test/cli/", "test/core/", "test/extensions/", "test/tools/"],
+      testPrefixes: ["test/storage/", "test/service/", "test/cli/", "test/core/", "test/plugins/", "test/tools/"],
       testExcludes: ["test/cli/process-signal-cleanup.test.ts"],
     },
     {
@@ -118,19 +118,19 @@ test("risk coverage configuration targets only the six high-risk modules", async
 
 test("risk coverage groups use prefixes and exact exclusions", () => {
   const selected = selectRiskCoverageTests([
-    "test/extensions/runtime.test.ts",
-    "test/extensions/managed-package-host-imports.test.ts",
-    "test/extensions/managed-package-host-imports.test.ts.backup.test.ts",
+    "test/plugins/runtime.test.ts",
+    "test/plugins/managed-package-host-imports.test.ts",
+    "test/plugins/managed-package-host-imports.test.ts.backup.test.ts",
     "test/service/harness.test.ts",
   ], {
     id: "extension-runtime",
-    targets: ["src/extensions/runtime.ts"],
-    testPrefixes: ["test/extensions/"],
-    testExcludes: ["test/extensions/managed-package-host-imports.test.ts"],
+    targets: ["src/plugins/runtime.ts"],
+    testPrefixes: ["test/plugins/"],
+    testExcludes: ["test/plugins/managed-package-host-imports.test.ts"],
   });
   assert.deepEqual(selected, [
-    "test/extensions/runtime.test.ts",
-    "test/extensions/managed-package-host-imports.test.ts.backup.test.ts",
+    "test/plugins/runtime.test.ts",
+    "test/plugins/managed-package-host-imports.test.ts.backup.test.ts",
   ]);
 });
 
@@ -139,13 +139,13 @@ test("risk coverage config rejects traversal and incomplete target ownership", (
     schemaVersion: 1,
     excludedTests: ["test/live/"],
     targets: [
-      { file: "src/extensions/runtime.ts", minimum: { lines: 90, branches: 68, functions: 90 } },
+      { file: "src/plugins/runtime.ts", minimum: { lines: 90, branches: 68, functions: 90 } },
       { file: "src/cli/main.ts", minimum: { lines: 84, branches: 68, functions: 74 } },
     ],
     groups: [{
       id: "runtime",
-      targets: ["src/extensions/runtime.ts"],
-      testPrefixes: ["test/extensions/"],
+      targets: ["src/plugins/runtime.ts"],
+      testPrefixes: ["test/plugins/"],
       testExcludes: [],
     }],
   };
@@ -169,7 +169,7 @@ test("risk coverage preflight rejects stale and non-file source targets", async 
     groups: [{
       id: "runtime",
       targets: ["src/current.ts", "src/stale.ts"],
-      testPrefixes: ["test/extensions/"],
+      testPrefixes: ["test/plugins/"],
       testExcludes: [],
     }],
   });

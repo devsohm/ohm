@@ -54,5 +54,24 @@ export interface ImageProvider {
   id: string;
   name: string;
   models: readonly ImageModel[];
-  generate(model: ImageModel, request: ImageRequest): Promise<ImageResult>;
+  auth?: ProviderAuth;
+  refreshModels?(context: ImageModelsRefreshContext): Promise<readonly ImageModel[]>;
+  generate(model: ImageModel, request: ImageRequest, options?: ImageGenerationOptions): Promise<ImageResult>;
 }
+
+export interface ImageGenerationOptions {
+  apiKey?: string;
+  headers?: ProviderHeaders;
+  baseUrl?: string;
+  fetch?: typeof globalThis.fetch;
+}
+
+export interface ImageModelsRefreshContext {
+  auth?: AuthResult;
+  ctx: AuthContext;
+  allowNetwork: boolean;
+  force?: boolean;
+  signal?: AbortSignal;
+}
+import type { AuthContext, AuthResult, ProviderAuth } from "./credentials-auth-providers-catalog.js";
+import type { ProviderHeaders } from "./models-sampling-streaming.js";

@@ -1,4 +1,4 @@
-export const CONFIG_SCHEMA_URI = "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json";
+export const CONFIG_SCHEMA_URI = "https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/packages/ohm/resources/schemas/config-v1.json";
 
 export const PORTABLE_CONFIG_SCAFFOLD = {
   $schema: CONFIG_SCHEMA_URI,
@@ -28,11 +28,7 @@ export const PORTABLE_CONFIG_SCAFFOLD = {
   quietStartup: false,
   defaultProjectTrust: "ask",
   collapseChangelog: false,
-  packages: [],
-  extensions: [],
-  skills: [],
-  prompts: [],
-  themes: [],
+  plugins: [],
   enableSkillCommands: true,
   tools: { excluded: [] },
   terminal: {

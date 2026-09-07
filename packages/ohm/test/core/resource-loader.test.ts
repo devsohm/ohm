@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,7 +10,7 @@ import { isJsonObject } from "../../src/core/json.js";
 import {
   DefaultResourceLoader,
   type DefaultResourceLoaderOptions,
-  type ResourceExtensionsResult,
+  type ResourcePluginsResult,
 } from "../../src/core/resource-loader.js";
 import {
   PREPARED_PACKAGE_DISCOVERY,
@@ -20,11 +20,11 @@ import { DefaultPackageManager } from "../../src/core/package-manager.js";
 import { createEventBus } from "../../src/core/event-bus.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { FUNCTION_VALUE, NUMBER_VALUE, isObjectValue } from "../../src/core/value-schemas.js";
-import { getExtensionRuntimeHost, projectLoadedExtensionHost } from "../../src/extensions/compat.js";
+import { getPluginRuntimeHost, projectLoadedPluginHost } from "../../src/plugins/compat.js";
 import {
-  loadDirectExtensions,
-  type RuntimeExtensionHost,
-} from "../../src/extensions/runtime.js";
+  loadDirectPlugins,
+  type RuntimePluginHost,
+} from "../../src/plugins/runtime.js";
 
 const missingPromptPathMessage = "Configured prompt template was not found";
 
@@ -67,10 +67,10 @@ function writeFixtureRendererDisposals(key: string, value: RendererDisposals): v
 function staleCatalogCall(key: string, index: number): () => void {
   const values = fixtureGlobalValue(key);
   const api = Array.isArray(values) ? values[index] : undefined;
-  if (!isObjectValue(api)) throw new Error("Extension did not publish its API fixture");
+  if (!isObjectValue(api)) throw new Error("Plugin did not publish its API fixture");
   const descriptor = Object.getOwnPropertyDescriptor(api, "getAllTools");
   const method: unknown = descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
-  if (!Value.Check(FUNCTION_VALUE, method)) throw new Error("Extension API fixture is missing getAllTools");
+  if (!Value.Check(FUNCTION_VALUE, method)) throw new Error("Plugin API fixture is missing getAllTools");
   // SAFETY: the own method was checked as callable and its return value is deliberately ignored by this stale-handle assertion.
   const getAllTools = method as (this: FixtureObject) => void;
   return () => { getAllTools.call(api); };
@@ -94,14 +94,14 @@ async function fixture(): Promise<{ root: string; cwd: string; agentDir: string;
   return { root, cwd, agentDir, settings: SettingsManager.inMemory() };
 }
 
-function extensionHost(result: ResourceExtensionsResult): RuntimeExtensionHost {
-  const host = getExtensionRuntimeHost(result.runtime);
+function pluginHost(result: ResourcePluginsResult): RuntimePluginHost {
+  const host = getPluginRuntimeHost(result.runtime);
   assert.ok(host, "public extension result must retain its native host generation");
   return host;
 }
 
-function registeredCommandNames(result: ResourceExtensionsResult): string[] {
-  return result.extensions.flatMap((extension) => [...extension.commands.keys()]);
+function registeredCommandNames(result: ResourcePluginsResult): string[] {
+  return result.plugins.flatMap((extension) => [...extension.commands.keys()]);
 }
 
 test("resource views are empty before the first refresh", async (t) => {
@@ -111,9 +111,9 @@ test("resource views are empty before the first refresh", async (t) => {
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
-  assert.deepEqual(loader.getExtensions().extensions, []);
+  assert.deepEqual(loader.getPlugins().plugins, []);
   assert.deepEqual(loader.getSkills(), { skills: [], diagnostics: [] });
   assert.deepEqual(loader.getPrompts(), { prompts: [], diagnostics: [] });
   assert.deepEqual(loader.getThemes(), { themes: [], diagnostics: [] });
@@ -139,7 +139,7 @@ test("resource loader applies one configured bound to trusted prompt and theme f
     additionalThemePaths: [theme],
     trustedResourceMaxBytes: 64,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   console.error = (value) => { warnings.push(String(value)); };
   try {
     await loader.refresh();
@@ -162,14 +162,14 @@ test("a supplied event bus reaches direct factories loaded by the resource loade
     agentDir: value.agentDir,
     settingsManager: value.settings,
     eventBus,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "event-probe",
       factory(api) {
         api.events.on("resource-loader:probe", () => { received += 1; });
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
   eventBus.emit("resource-loader:probe", null);
@@ -182,13 +182,13 @@ test("project-trust extensions can be loaded as an explicit bootstrap generation
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "trust-probe",
       factory(api) { api.registerCommand("trust-probe", { async handler() {} }); },
     }],
   });
-  const result = await loader.loadProjectTrustExtensions();
-  t.after(async () => await extensionHost(result).close());
+  const result = await loader.loadProjectTrustPlugins();
+  t.after(async () => await pluginHost(result).close());
 
   assert.deepEqual(registeredCommandNames(result), ["trust-probe"]);
   assert.equal(value.settings.isProjectTrusted(), false);
@@ -201,13 +201,13 @@ test("extension overrides receive and return the complete load result", async (t
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "override-probe",
       factory(api) {
         api.registerCommand("probe", { async handler() {} });
       },
     }],
-    extensionsOverride(base) {
+    pluginsOverride(base) {
       receivedRuntime = base.runtime;
       return {
         ...base,
@@ -215,12 +215,12 @@ test("extension overrides receive and return the complete load result", async (t
       };
     },
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
-  const result = loader.getExtensions();
+  const result = loader.getPlugins();
   assert.equal(result.runtime, receivedRuntime);
-  assert.deepEqual(result.extensions.map((entry) => [entry.path, entry.sourceInfo.scope]), [
+  assert.deepEqual(result.plugins.map((entry) => [entry.path, entry.sourceInfo.scope]), [
     ["<inline:override-probe>", "temporary"],
   ]);
   assert.deepEqual(registeredCommandNames(result), ["probe"]);
@@ -253,7 +253,7 @@ test("failed and finally-aborted refreshes leave every published resource view o
 
   let mode: "normal" | "throw" | "abort" = "normal";
   let abortController: AbortController | undefined;
-  let expectedExtensions: ResourceExtensionsResult | undefined;
+  let expectedExtensions: ResourcePluginsResult | undefined;
   let expectedState: ReturnType<typeof publishedState> | undefined;
   let loader: DefaultResourceLoader;
   function publishedState() {
@@ -271,53 +271,53 @@ test("failed and finally-aborted refreshes leave every published resource view o
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
+    additionalPluginPaths: [extension],
     additionalSkillPaths: [skill],
     additionalPromptTemplatePaths: [prompt],
     additionalThemePaths: [theme],
-    extensionsOverride(base) {
+    pluginsOverride(base) {
       if (mode === "normal") return base;
-      assert.equal(loader.getExtensions(), expectedExtensions);
+      assert.equal(loader.getPlugins(), expectedExtensions);
       assert.deepEqual(publishedState(), expectedState);
       if (mode === "throw") throw new Error("candidate override failure");
       abortController!.abort(new Error("final refresh abort"));
       return base;
     },
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
-  expectedExtensions = loader.getExtensions();
+  expectedExtensions = loader.getPlugins();
   expectedState = publishedState();
-  const expectedHost = extensionHost(expectedExtensions);
+  const expectedHost = pluginHost(expectedExtensions);
   assert.deepEqual(registeredCommandNames(expectedExtensions), ["one"]);
   await writeGeneration("two");
 
   mode = "throw";
   await assert.rejects(loader.refresh(), /candidate override failure/u);
-  assert.equal(loader.getExtensions(), expectedExtensions);
-  assert.equal(extensionHost(loader.getExtensions()), expectedHost);
+  assert.equal(loader.getPlugins(), expectedExtensions);
+  assert.equal(pluginHost(loader.getPlugins()), expectedHost);
   assert.deepEqual(publishedState(), expectedState);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["one"]);
 
   mode = "abort";
   abortController = new AbortController();
   await assert.rejects(loader.refresh({ signal: abortController.signal }), /final refresh abort/u);
-  assert.equal(loader.getExtensions(), expectedExtensions);
-  assert.equal(extensionHost(loader.getExtensions()), expectedHost);
+  assert.equal(loader.getPlugins(), expectedExtensions);
+  assert.equal(pluginHost(loader.getPlugins()), expectedHost);
   assert.deepEqual(publishedState(), expectedState);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["one"]);
 
   mode = "normal";
   abortController = new AbortController();
   await assert.rejects(loader.refresh({
     signal: abortController.signal,
-    prepareExtensions() { abortController!.abort(new Error("preparation abort")); },
+    preparePlugins() { abortController!.abort(new Error("preparation abort")); },
   }), /preparation abort/u);
-  assert.equal(loader.getExtensions(), expectedExtensions);
-  assert.equal(extensionHost(loader.getExtensions()), expectedHost);
+  assert.equal(loader.getPlugins(), expectedExtensions);
+  assert.equal(pluginHost(loader.getPlugins()), expectedHost);
   assert.deepEqual(publishedState(), expectedState);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["one"]);
 });
 
 test("extension load results exclude warnings emitted by active extensions", async (t) => {
@@ -326,19 +326,19 @@ test("extension load results exclude warnings emitted by active extensions", asy
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "reserved-command",
       factory(api) {
         api.registerCommand("quit", { async handler() {} });
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
-  const result = loader.getExtensions();
+  const result = loader.getPlugins();
   assert.deepEqual(result.errors, []);
-  assert.equal(extensionHost(result).diagnostics().some((entry) =>
+  assert.equal(pluginHost(result).diagnostics().some((entry) =>
     /command quit conflicts with a built-in command/u.test(entry.message)), true);
 });
 
@@ -352,7 +352,7 @@ test("extension resources are discovered only after the selected runtime starts"
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "late-resources",
       factory(api) {
         api.on("session_start", () => {
@@ -367,14 +367,14 @@ test("extension resources are discovered only after the selected runtime starts"
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
   assert.deepEqual(lifecycle, []);
   assert.deepEqual(loader.getPrompts().prompts, []);
-  const result = loader.getExtensions();
-  await extensionHost(result).dispatch("session_start", { reason: "startup" });
-  await loader.extendResourcesFromExtensions(result.runtime, "startup");
+  const result = loader.getPlugins();
+  await pluginHost(result).dispatch("session_start", { reason: "startup" });
+  await loader.extendResourcesFromPlugins(result.runtime, "startup");
   assert.deepEqual(lifecycle, ["start", "discover"]);
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), ["late-resource"]);
 });
@@ -399,7 +399,7 @@ test("resource extensions publish skill, prompt, and theme views together", asyn
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   const metadata = {
     source: "extension:atomic",
     scope: "temporary" as const,
@@ -434,16 +434,16 @@ test("late resource discovery cannot publish into a replacement generation", asy
   const discoveryStarted = new Promise<void>((resolve) => { markDiscoveryStarted = resolve; });
   let releaseDiscovery!: () => void;
   const discoveryRelease = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
-  let retainedExtensions: ResourceExtensionsResult | undefined;
+  let retainedExtensions: ResourcePluginsResult | undefined;
   const loader = new DefaultResourceLoader({
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionsOverride(base) {
+    pluginsOverride(base) {
       if (retainedExtensions === undefined) retainedExtensions = base;
       return retainedExtensions;
     },
-    extensionFactories: [{
+    pluginFactories: [{
       name: "late-generation-resources",
       factory(api) {
         api.on("resources_discover", async () => {
@@ -454,13 +454,13 @@ test("late resource discovery cannot publish into a replacement generation", asy
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
-  const previousRuntime = loader.getExtensions().runtime;
+  const previousRuntime = loader.getPlugins().runtime;
   const previousSkillPaths = loader.getSkills().skills.map((entry) => entry.filePath);
   const previousPromptNames = loader.getPrompts().prompts.map((entry) => entry.name);
   const previousThemeNames = loader.getThemes().themes.map((entry) => entry.name);
-  const staleDiscovery = loader.extendResourcesFromExtensions(previousRuntime, "startup").then(
+  const staleDiscovery = loader.extendResourcesFromPlugins(previousRuntime, "startup").then(
     () => ({ error: undefined }),
     (error) => ({ error }),
   );
@@ -472,7 +472,7 @@ test("late resource discovery cannot publish into a replacement generation", asy
   const result = await staleDiscovery;
   assert.ok(result.error instanceof Error);
   assert.match(result.error.message, /stale runtime generation/u);
-  assert.equal(loader.getExtensions().runtime, previousRuntime);
+  assert.equal(loader.getPlugins().runtime, previousRuntime);
   assert.deepEqual(loader.getSkills().skills.map((entry) => entry.filePath), previousSkillPaths);
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), previousPromptNames);
   assert.deepEqual(loader.getThemes().themes.map((entry) => entry.name), previousThemeNames);
@@ -500,8 +500,8 @@ test("refresh composes direct extensions, inline factories, resources, context, 
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
-    extensionFactories: [{
+    additionalPluginPaths: [extension],
+    pluginFactories: [{
       name: "resources",
       factory(api) {
         api.on("resources_discover", () => ({ skillPaths: [skill], promptPaths: [prompt], themePaths: [] }));
@@ -509,12 +509,12 @@ test("refresh composes direct extensions, inline factories, resources, context, 
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
-  await extensionHost(loader.getExtensions()).dispatch("session_start", { reason: "startup" });
-  await loader.extendResourcesFromExtensions(loader.getExtensions().runtime, "startup");
+  await pluginHost(loader.getPlugins()).dispatch("session_start", { reason: "startup" });
+  await loader.extendResourcesFromPlugins(loader.getPlugins().runtime, "startup");
 
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()).sort(), ["from-file", "from-inline"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()).sort(), ["from-file", "from-inline"]);
   assert.equal(loader.getSkills().skills.some((entry) => entry.name === "review"), true);
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), ["review"]);
   assert.deepEqual(loader.getAgentsFiles().agentsFiles.map((entry) => entry.content), ["global context", "project context"]);
@@ -533,7 +533,7 @@ test("refresh composes direct extensions, inline factories, resources, context, 
 test("refresh invalidates the replaced direct API before running its disposer", async (t) => {
   const value = await fixture();
   const generations: Array<{
-    api: import("../../src/extensions/direct.js").ExtensionAPI;
+    api: import("../../src/plugins/direct.js").PluginAPI;
     staleDuringDispose?: boolean;
     disposeCount: number;
   }> = [];
@@ -541,7 +541,7 @@ test("refresh invalidates the replaced direct API before running its disposer", 
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "disposal-probe",
       factory(api) {
         const generation: (typeof generations)[number] = { api, disposeCount: 0 };
@@ -558,7 +558,7 @@ test("refresh invalidates the replaced direct API before running its disposer", 
       },
     }],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
   await loader.refresh();
@@ -574,22 +574,22 @@ test("refresh invalidates the replaced direct API before running its disposer", 
 test("refresh retires the previous direct API before awaiting discarded candidate cleanup", async (t) => {
   const value = await fixture();
   let generation = 0;
-  let previousApi: import("../../src/extensions/direct.js").ExtensionAPI | undefined;
+  let previousApi: import("../../src/plugins/direct.js").PluginAPI | undefined;
   let markDiscardedCleanupStarted!: () => void;
   const discardedCleanupStarted = new Promise<void>((resolve) => { markDiscardedCleanupStarted = resolve; });
   let releaseDiscardedCleanup!: () => void;
   const discardedCleanupGate = new Promise<void>((resolve) => { releaseDiscardedCleanup = resolve; });
-  const selectedHost = await loadDirectExtensions([], {
+  const selectedHost = await loadDirectPlugins([], {
     workspace: value.cwd,
-    inlineExtensions: [{ name: "selected-generation", factory() {} }],
+    inlinePlugins: [{ name: "selected-generation", factory() {} }],
   });
-  const selected = projectLoadedExtensionHost(selectedHost);
+  const selected = projectLoadedPluginHost(selectedHost);
   let selectOverride = false;
   const loader = new DefaultResourceLoader({
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "refresh-order-probe",
       factory(api) {
         generation += 1;
@@ -602,11 +602,11 @@ test("refresh retires the previous direct API before awaiting discarded candidat
         }
       },
     }],
-    extensionsOverride(base) { return selectOverride ? selected : base; },
+    pluginsOverride(base) { return selectOverride ? selected : base; },
   });
   t.after(async () => {
     releaseDiscardedCleanup();
-    await extensionHost(loader.getExtensions()).close();
+    await pluginHost(loader.getPlugins()).close();
     await selectedHost.close();
   });
 
@@ -621,13 +621,13 @@ test("refresh retires the previous direct API before awaiting discarded candidat
     releaseDiscardedCleanup();
     await refresh;
   }
-  assert.equal(extensionHost(loader.getExtensions()), selectedHost);
+  assert.equal(pluginHost(loader.getPlugins()), selectedHost);
 });
 
 test("project trust bootstrap exposes user extensions before project resources", async (t) => {
   const value = await fixture();
   const userExtension = join(value.agentDir, "extensions", "user.ts");
-  const projectExtension = join(value.cwd, ".ohm", "extensions", "project.ts");
+  const projectPlugin = join(value.cwd, ".ohm", "extensions", "project.ts");
   await mkdir(join(value.agentDir, "extensions"), { recursive: true });
   await mkdir(join(value.cwd, ".ohm", "extensions"), { recursive: true });
   const activationKey = `__ohmTrustActivation${Date.now()}${Math.random().toString(16).slice(2)}`;
@@ -635,24 +635,24 @@ test("project trust bootstrap exposes user extensions before project resources",
     globalThis[${JSON.stringify(activationKey)}] = (globalThis[${JSON.stringify(activationKey)}] ?? 0) + 1;
     api.registerCommand("user", { handler() {} });
   };`);
-  await writeFile(projectExtension, `export default (api) => api.registerCommand("project", { handler() {} });`);
+  await writeFile(projectPlugin, `export default (api) => api.registerCommand("project", { handler() {} });`);
   value.settings.setProjectTrusted(true);
   const loader = new DefaultResourceLoader({
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   let bootstrapCommands: string[] = [];
   await loader.refresh({
-    async resolveProjectTrust({ extensionsResult }) {
-      bootstrapCommands = registeredCommandNames(extensionsResult);
+    async resolveProjectTrust({ pluginsResult }) {
+      bootstrapCommands = registeredCommandNames(pluginsResult);
       return true;
     },
   });
   assert.deepEqual(bootstrapCommands, ["user"]);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()).sort(), ["project", "user"]);
-  assert.deepEqual(loader.getExtensions().extensions.map((entry) => entry.sourceInfo.scope).sort(), ["project", "user"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()).sort(), ["project", "user"]);
+  assert.deepEqual(loader.getPlugins().plugins.map((entry) => entry.sourceInfo.scope).sort(), ["project", "user"]);
   assert.equal(fixtureActivationCount(activationKey), 1);
   deleteFixtureGlobal(activationKey);
 });
@@ -660,7 +660,7 @@ test("project trust bootstrap exposes user extensions before project resources",
 test("trust bootstrap reapplies project, user, and inline registration precedence without reactivation", async (t) => {
   const value = await fixture();
   const userExtension = join(value.agentDir, "extensions", "user.ts");
-  const projectExtension = join(value.cwd, ".ohm", "extensions", "project.ts");
+  const projectPlugin = join(value.cwd, ".ohm", "extensions", "project.ts");
   await mkdir(join(value.agentDir, "extensions"), { recursive: true });
   await mkdir(join(value.cwd, ".ohm", "extensions"), { recursive: true });
   const activationKey = `__ohmPrecedenceActivation${Date.now()}${Math.random().toString(16).slice(2)}`;
@@ -694,13 +694,13 @@ test("trust bootstrap reapplies project, user, and inline registration precedenc
     api.registerCommand("shared", { description: ${JSON.stringify(owner)}, handler() {} });
   };`;
   await writeFile(userExtension, source("user", true));
-  await writeFile(projectExtension, source("project"));
+  await writeFile(projectPlugin, source("project"));
   let inlineActivations = 0;
   const loader = new DefaultResourceLoader({
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "inline-precedence",
       factory(api) {
         inlineActivations += 1;
@@ -733,22 +733,22 @@ test("trust bootstrap reapplies project, user, and inline registration precedenc
     }],
   });
   t.after(async () => {
-    await extensionHost(loader.getExtensions()).close();
+    await pluginHost(loader.getPlugins()).close();
     deleteFixtureGlobal(activationKey);
     deleteFixtureGlobal(rendererDisposalKey);
   });
 
   await loader.refresh({ resolveProjectTrust: async () => true });
 
-  const host = extensionHost(loader.getExtensions());
+  const host = pluginHost(loader.getPlugins());
   assert.deepEqual(
-    host.extensions().map((entry) => entry.scope),
+    host.plugins().map((entry) => entry.scope),
     ["project", "user", "invocation"],
     JSON.stringify(host.diagnostics()),
   );
   assert.equal(host.tools().find((tool) => tool.definition.name === "shared_tool")?.definition.description, "project");
   assert.equal(
-    loader.getExtensions().extensions
+    loader.getPlugins().plugins
       .find((extension) => extension.sourceInfo.scope === "project")
       ?.tools.get("shared_tool")?.definition.description,
     "project",
@@ -796,14 +796,14 @@ test("a failed trust-bootstrap factory is diagnosed once and not retried in the 
     settingsManager: value.settings,
   });
   t.after(async () => {
-    await extensionHost(loader.getExtensions()).close();
+    await pluginHost(loader.getPlugins()).close();
     deleteFixtureGlobal(activationKey);
   });
 
   await loader.refresh({ resolveProjectTrust: async () => true });
 
   assert.equal(fixtureActivationCount(activationKey), 1);
-  assert.equal(extensionHost(loader.getExtensions()).diagnostics().filter((entry) =>
+  assert.equal(pluginHost(loader.getPlugins()).diagnostics().filter((entry) =>
     entry.sourcePath === extension && /expected bootstrap failure/u.test(entry.message)).length, 1);
 });
 
@@ -815,14 +815,14 @@ test("refresh imports changed TypeScript factories without retaining the module 
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
+    additionalPluginPaths: [extension],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["first"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["first"]);
   await writeFile(extension, `export default (api) => api.registerCommand("second", { handler() {} });`);
   await loader.refresh();
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["second"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["second"]);
 });
 
 test("refresh evaluates every changed MJS factory generation from fresh source bytes", async (t) => {
@@ -839,23 +839,23 @@ test("refresh evaluates every changed MJS factory generation from fresh source b
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
+    additionalPluginPaths: [extension],
   });
   t.after(async () => {
-    await extensionHost(loader.getExtensions()).close();
+    await pluginHost(loader.getPlugins()).close();
     deleteFixtureGlobal(activationKey);
   });
 
   await loader.refresh();
   const firstGetAllTools = staleCatalogCall(activationKey, 0);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["one"]);
   await writeFile(extension, source("two"));
   await loader.refresh();
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["two"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["two"]);
   assert.throws(firstGetAllTools, /no longer active|stale/iu);
   await writeFile(extension, source("three"));
   await loader.refresh();
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["three"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["three"]);
   assert.equal(fixtureArrayLength(activationKey), 3);
 });
 
@@ -866,10 +866,11 @@ test("dynamic resources resolve relative to their package and reject boundary es
   await mkdir(join(packageRoot, "prompts"), { recursive: true });
   await writeFile(join(packageRoot, "prompts", "relative.md"), "Relative prompt");
   await writeFile(join(value.root, "outside.md"), "Must not load");
+  await symlink(join(value.root, "outside.md"), join(packageRoot, "linked.md"));
   await writeFile(extension, `export default (api) => {
     api.on("resources_discover", () => ({
       skillPaths: [],
-      promptPaths: ["prompts/relative.md", "../outside.md"],
+      promptPaths: ["prompts/relative.md", "../outside.md", "linked.md"],
       themePaths: []
     }));
   };`);
@@ -877,18 +878,54 @@ test("dynamic resources resolve relative to their package and reject boundary es
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
+    additionalPluginPaths: [extension],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
-  await extensionHost(loader.getExtensions()).dispatch("session_start", { reason: "startup" });
-  await loader.extendResourcesFromExtensions(loader.getExtensions().runtime, "startup");
+  await pluginHost(loader.getPlugins()).dispatch("session_start", { reason: "startup" });
+  await loader.extendResourcesFromPlugins(loader.getPlugins().runtime, "startup");
 
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), ["relative"]);
   assert.equal(loader.getPrompts().prompts[0]?.filePath, join(packageRoot, "prompts", "relative.md"));
-  assert.equal(extensionHost(loader.getExtensions()).diagnostics().some((entry) =>
+  assert.equal(pluginHost(loader.getPlugins()).diagnostics().some((entry) =>
     /resource path was ignored/iu.test(entry.message) && /escapes workspace/iu.test(entry.message)), true);
+});
+
+test("trusted dynamic resources can select absolute workspace and external paths with bounded reads", async (t) => {
+  const value = await fixture();
+  const packageRoot = join(value.root, "resource-package");
+  const externalRoot = join(value.root, "shared-resources");
+  const skill = join(externalRoot, "shared-skill", "SKILL.md");
+  const prompt = join(value.cwd, "workspace-prompt.md");
+  const oversized = join(externalRoot, "oversized.md");
+  const theme = join(externalRoot, "shared-theme.json");
+  await mkdir(packageRoot);
+  await mkdir(join(externalRoot, "shared-skill"), { recursive: true });
+  await writeFile(skill, "---\nname: shared-skill\ndescription: External skill\n---\nShared instructions");
+  await writeFile(prompt, "Workspace instructions");
+  await writeFile(oversized, "x".repeat(2_048));
+  await writeFile(theme, JSON.stringify({ schemaVersion: 1, name: "shared-theme", styles: { accent: { foreground: 81 } } }));
+  const extension = join(packageRoot, "index.mjs");
+  await writeFile(extension, `export default (api) => {
+    api.on("resources_discover", () => (${JSON.stringify({ skillPaths: [skill], promptPaths: [prompt, oversized], themePaths: [theme] })}));
+  };`);
+  const loader = new DefaultResourceLoader({
+    cwd: value.cwd,
+    agentDir: value.agentDir,
+    settingsManager: value.settings,
+    additionalPluginPaths: [extension],
+    trustedResourceMaxBytes: 1_024,
+  });
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
+  await loader.refresh();
+  await loader.extendResourcesFromPlugins(loader.getPlugins().runtime, "startup");
+
+  assert.deepEqual(loader.getSkills().skills.map((entry) => entry.filePath), [skill]);
+  assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.filePath), [prompt]);
+  assert.deepEqual(loader.getThemes().themes.map((entry) => entry.sourcePath), [theme]);
+  assert.equal(loader.getPrompts().diagnostics.some((entry) => entry.path === oversized && /exceeds 1024 bytes/u.test(entry.message)), true);
+  assert.deepEqual(pluginHost(loader.getPlugins()).diagnostics(), []);
 });
 
 test("refresh adopts a prepared trust host without activating its factories twice", async (t) => {
@@ -899,23 +936,23 @@ test("refresh adopts a prepared trust host without activating its factories twic
     globalThis[${JSON.stringify(activationKey)}] = (globalThis[${JSON.stringify(activationKey)}] ?? 0) + 1;
     api.registerCommand("prepared", { handler() {} });
   };`);
-  const host = await loadDirectExtensions([extension], { workspace: value.cwd });
+  const host = await loadDirectPlugins([extension], { workspace: value.cwd });
   const loader = new DefaultResourceLoader({
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [extension],
-    preparedExtensions: host,
+    additionalPluginPaths: [extension],
+    preparedPlugins: host,
   });
   t.after(async () => {
-    await extensionHost(loader.getExtensions()).close();
+    await pluginHost(loader.getPlugins()).close();
     deleteFixtureGlobal(activationKey);
   });
 
   await loader.refresh();
 
   assert.equal(fixtureActivationCount(activationKey), 1);
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["prepared"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["prepared"]);
 });
 
 test("resource name collisions keep the first definition and report the loser", async (t) => {
@@ -932,7 +969,7 @@ test("resource name collisions keep the first definition and report the loser", 
     settingsManager: value.settings,
     additionalPromptTemplatePaths: [first, second],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
   assert.equal(loader.getPrompts().prompts[0]?.content, "First");
   assert.equal(loader.getPrompts().diagnostics[0]?.collision?.loserPath, second);
@@ -964,13 +1001,13 @@ test("configured package filters select the direct factories and companion resou
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
 
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), ["one"]);
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), ["kept"]);
-  const extension = loader.getExtensions().extensions[0];
+  const extension = loader.getPlugins().plugins[0];
   const expectedSourceInfo = {
     path: join(packageRoot, "extensions", "one.mjs"),
     source: packageRoot,
@@ -1027,11 +1064,11 @@ test("prepared discovery loads twelve mixed packages once before later refreshes
     },
   };
   const loader = new DefaultResourceLoader(options);
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh({ preparedSettings: value.settings });
 
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), names);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), names);
   assert.deepEqual(loader.getSkills().skills.filter((entry) => names.includes(entry.name)).map((entry) => entry.name), names);
   assert.deepEqual(loader.getPrompts().prompts.map((entry) => entry.name), names);
   assert.deepEqual(loader.getThemes().themes.map((entry) => entry.name), names);
@@ -1039,7 +1076,7 @@ test("prepared discovery loads twelve mixed packages once before later refreshes
     loader.refresh({ preparedSettings: value.settings }),
     /Path does not exist/u,
   );
-  assert.deepEqual(registeredCommandNames(loader.getExtensions()), names);
+  assert.deepEqual(registeredCommandNames(loader.getPlugins()), names);
 });
 
 test("project resources precede same-named user resources", async (t) => {
@@ -1055,7 +1092,7 @@ test("project resources precede same-named user resources", async (t) => {
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
   assert.equal(loader.getPrompts().prompts.find((prompt) => prompt.name === "same")?.content, "Project");
   assert.equal(loader.getPrompts().diagnostics[0]?.collision?.loserPath, userPrompt);
@@ -1072,7 +1109,7 @@ test("extendResources works before the first refresh and expires with that resou
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.extendResources({
     skillPaths: [{
       path: pathToFileURL(directory).href,
@@ -1106,7 +1143,7 @@ test("discovery flags retain explicit skills and suppress context files", async 
     noContextFiles: true,
     additionalSkillPaths: [explicit],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
 
   assert.deepEqual(loader.getSkills().skills.map((skill) => skill.name), ["explicit"]);
@@ -1133,10 +1170,10 @@ test("untrusted projects cannot activate project resources or project system pro
     agentDir: value.agentDir,
     settingsManager: value.settings,
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
 
-  assert.deepEqual(loader.getExtensions().extensions, []);
+  assert.deepEqual(loader.getPlugins().plugins, []);
   assert.equal(loader.getSkills().skills.some((skill) => skill.name === "project-only"), false);
   assert.equal(loader.getPrompts().prompts.some((prompt) => prompt.name === "project-only"), false);
   assert.equal(loader.getSystemPrompt(), "user system");
@@ -1165,7 +1202,7 @@ test("resource and prompt overrides receive and replace the composed views", asy
     systemPromptOverride: (base) => `${base ?? ""} + override`,
     appendSystemPromptOverride: (base) => [...base, "override append"],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
 
   assert.equal(skillOverrideCalled, true);
@@ -1192,7 +1229,7 @@ test("inline prompt inputs have stable content-free source labels", async (t) =>
     systemPrompt: "inline system",
     appendSystemPrompt: ["first append", "second append"],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
   await loader.refresh();
 
   assert.deepEqual(loader.getPromptCompositionSources().map((entry) => entry.source), [
@@ -1214,16 +1251,16 @@ test("missing explicit local resources produce typed diagnostics", async (t) => 
     cwd: value.cwd,
     agentDir: value.agentDir,
     settingsManager: value.settings,
-    additionalExtensionPaths: [missingExtension],
+    additionalPluginPaths: [missingExtension],
     additionalSkillPaths: [missingSkill],
     additionalPromptTemplatePaths: [missingPrompt],
     additionalThemePaths: [missingTheme],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
 
-  assert.equal(loader.getExtensions().errors.some((entry) =>
+  assert.equal(loader.getPlugins().errors.some((entry) =>
     entry.path === missingExtension && /was not found/iu.test(entry.error)), true);
   assert.deepEqual(loader.getSkills().diagnostics, [{
     type: "error",
@@ -1252,7 +1289,7 @@ test("invalid prompt metadata is excluded from the published resource generation
     settingsManager: value.settings,
     additionalPromptTemplatePaths: [invalid],
   });
-  t.after(async () => await extensionHost(loader.getExtensions()).close());
+  t.after(async () => await pluginHost(loader.getPlugins()).close());
 
   await loader.refresh();
 

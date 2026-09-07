@@ -1,5 +1,5 @@
 import { optionalProperties } from "../../core/optional-properties.js";
-import { isJsonObject, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { Type, type Static } from "typebox";
@@ -7,6 +7,7 @@ import { preprocessImage, sniffImageMediaType } from "../../images/preprocess.js
 import { inspectImage } from "../image-info.js";
 import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type StandaloneToolDefinition } from "../direct-tool.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import { inputObject, stringInput } from "../input.js";
 import { safeIntegerInput } from "../integer-input.js";
 import {
@@ -31,12 +32,12 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
 const readParameters = Type.Object({
   path: Type.String({ description: "File path. It can be absolute or relative to the workspace." }),
   offset: Type.Optional(Type.Integer({
-    description: "First line to return. Line numbers start at 1.",
+    description: "First text line to return, starting at 1. Defaults to 1; use the returned continuation offset for the next page.",
     minimum: 1,
     maximum: Number.MAX_SAFE_INTEGER,
   })),
   limit: Type.Optional(Type.Integer({
-    description: "Largest number of lines to return.",
+    description: `Requested text line count. Each response still stops at ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024} KiB.`,
     minimum: 1,
     maximum: Number.MAX_SAFE_INTEGER,
   })),
@@ -51,15 +52,7 @@ export interface ReadOperations {
 }
 export interface ReadToolOptions { autoResizeImages?: boolean; operations?: ReadOperations }
 
-const schema = {
-  type: "object",
-  required: ["path"],
-  properties: {
-    path: { type: "string", description: "File path. It can be absolute or relative to the workspace." },
-    offset: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-    limit: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-  },
-} satisfies JsonObject;
+const schema = providerInputSchema(readParameters);
 
 function textMetadata(
   path: string,
@@ -92,9 +85,12 @@ export class ReadTool implements HarnessTool {
 
   readonly definition = {
     name: "read",
-    description: `Load one text file or supported image. The image formats are JPEG, PNG, GIF, WebP, and BMP. An image becomes a model attachment. Text output stops after ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024} KiB. Use offset and limit to load a long file in parts.`,
+    description: `Read a text file or attach a JPEG, PNG, GIF, WebP, or BMP image. Text starts at the 1-based offset (default 1) and returns up to limit lines, capped at ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024} KiB per response. Images ignore offset and limit.`,
     promptSnippet: "Load text or an image from a file",
-    promptGuidelines: ["Inspect a file with read when a shell command is not necessary."],
+    promptGuidelines: [
+      "Use read to inspect file contents before editing them.",
+      "For truncated text, continue at the offset reported by read; increasing limit does not remove the response cap. A single oversized line needs a targeted shell command.",
+    ],
     inputSchema: schema,
   };
 
@@ -187,32 +183,48 @@ export class ReadTool implements HarnessTool {
     }
 
     const text = bytes.toString("utf8");
-    const allLines = text.split("\n");
     const offset = safeIntegerInput(object, "offset", 1, 1);
-    const start = offset ? Math.max(0, offset - 1) : 0;
-    if (start >= allLines.length) {
-      const detail = `Cannot start at line ${offset}; this file contains ${allLines.length} lines`;
+    const start = offset - 1;
+    const requestedLimit = object.limit === undefined ? undefined : safeIntegerInput(object, "limit", 1, 1);
+    const requestedEnd = requestedLimit === undefined ? undefined : start + requestedLimit;
+    let totalLines = 1;
+    let startCharacter = 0;
+    let endCharacter = text.length;
+    for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", newline + 1)) {
+      if (totalLines === start) startCharacter = newline + 1;
+      if (totalLines === requestedEnd) endCharacter = newline;
+      totalLines++;
+    }
+    if (start >= totalLines) {
+      const detail = `Cannot start at line ${offset}; this file contains ${totalLines} lines`;
       throw new Error(detail);
     }
-    const requestedLimit = object.limit === undefined ? undefined : safeIntegerInput(object, "limit", 1, 1);
-    const end = requestedLimit === undefined ? allLines.length : Math.min(start + requestedLimit, allLines.length);
-    const selected = allLines.slice(start, end).join("\n");
+    const end = requestedEnd === undefined ? totalLines : Math.min(requestedEnd, totalLines);
+    const selected = text.slice(startCharacter, endCharacter);
     const truncated = truncateToolHead(selected);
+    if (truncated.truncatedBy === "bytes" && !truncated.firstLineExceedsLimit
+      && truncated.content.length < selected.length && selected[truncated.content.length] !== "\n") {
+      // Offsets address whole lines, so leave the byte-clipped line for the next page.
+      truncated.content = truncated.content.slice(0, truncated.content.lastIndexOf("\n"));
+      truncated.outputLines = truncated.content.split("\n").length;
+      truncated.outputBytes = Buffer.byteLength(truncated.content, "utf8");
+    }
     const firstShown = start + 1;
     let content: string;
     let nextOffset: number | undefined;
 
     if (truncated.firstLineExceedsLimit) {
-      const size = formatBytes(Buffer.byteLength(allLines[start] ?? "", "utf8"));
+      const newline = selected.indexOf("\n");
+      const size = formatBytes(Buffer.byteLength(newline === -1 ? selected : selected.slice(0, newline), "utf8"));
       content = `[Line ${firstShown} is ${size}, above the ${formatBytes(TOOL_MAX_BYTES)} read limit.]`;
     } else if (truncated.truncated) {
       const lastShown = firstShown + truncated.outputLines - 1;
       nextOffset = lastShown + 1;
       const byteNote = truncated.truncatedBy === "bytes" ? ` (${formatBytes(TOOL_MAX_BYTES)} limit)` : "";
-      content = `${truncated.content}\n\n[Returned lines ${firstShown}-${lastShown} of ${allLines.length}${byteNote}. Continue at offset=${nextOffset}.]`;
-    } else if (requestedLimit !== undefined && end < allLines.length) {
+      content = `${truncated.content}\n\n[Returned lines ${firstShown}-${lastShown} of ${totalLines}${byteNote}. Continue at offset=${nextOffset}.]`;
+    } else if (requestedLimit !== undefined && end < totalLines) {
       nextOffset = end + 1;
-      content = `${truncated.content}\n\n[${allLines.length - end} lines remain. Continue at offset=${nextOffset}.]`;
+      content = `${truncated.content}\n\n[${totalLines - end} lines remain. Continue at offset=${nextOffset}.]`;
     } else {
       content = truncated.content;
     }
@@ -220,7 +232,7 @@ export class ReadTool implements HarnessTool {
     return {
       content,
       isError: false,
-      metadata: textMetadata(shownPath, firstShown, allLines.length, truncated, nextOffset),
+      metadata: textMetadata(shownPath, firstShown, totalLines, truncated, nextOffset),
     };
   }
 }

@@ -11,7 +11,7 @@ import {
   isNormalizedUsage,
   normalizedContextTokens,
   normalizedTotalTokens,
-  parseExtensionGalleryIndex,
+  parsePluginGalleryIndex,
   parseModelReasoningReference,
   sniffImageMediaType,
   type AdapterEvent,
@@ -23,15 +23,22 @@ import {
   type ProviderRequest,
   type ResourceClaim,
   type RpcCommand,
-  type RpcExtensionErrorEvent,
-  type RpcExtensionUiRequest,
+  type RpcPluginErrorEvent,
+  type RpcPluginUiRequest,
   type RpcResponse,
   type RuntimeEvent,
   type SessionBranchQuery,
   type ToolResult,
 } from "ohm";
 import type { ModelInfo } from "ohm/core";
-import { createInteractiveDirectUiContext } from "ohm/tui";
+import { createInteractiveDirectUiContext, type TranscriptEntry, type TuiModel } from "ohm/tui";
+
+export function replayTuiHistory(model: TuiModel, items: Parameters<TuiModel["applyAll"]>[0]): boolean | undefined {
+  model.applyAll(items);
+  model.applyAll(items, { historical: true });
+  const entry: TranscriptEntry | undefined = model.entries[0];
+  return entry?.historical;
+}
 
 const directUiServicesExcludeHostOwnership: "ownerKey" extends keyof NonNullable<
   Parameters<typeof createInteractiveDirectUiContext>[4]
@@ -96,7 +103,7 @@ void [
   normalizedContextTokens(usage),
   normalizedTotalTokens(usage),
   parseModelReasoningReference("consumer-offline/consumer-model"),
-  parseExtensionGalleryIndex({ schemaVersion: 1, packages: [] }),
+  parsePluginGalleryIndex({ schemaVersion: 1, packages: [] }),
   sniffImageMediaType(Buffer.from([0x42, 0x4d])),
   imageCoordinateHint(coordinates),
   ModelReferenceResolutionError,
@@ -119,14 +126,14 @@ const imageCommand: RpcCommand = {
   message: "inspect",
   images: [{ type: "image", mimeType: "image/png", data: "AA==" }],
 };
-const extensionUiRequest: RpcExtensionUiRequest = {
+const extensionUiRequest: RpcPluginUiRequest = {
   type: "extension_ui_request",
   id: "consumer-ui",
   extensionId: "consumer.extension",
   method: "notify",
   message: "ready",
 };
-const extensionError: RpcExtensionErrorEvent = {
+const extensionError: RpcPluginErrorEvent = {
   type: "extension_error",
   extensionId: "consumer.extension",
   extensionPath: "/consumer/extension.mjs",

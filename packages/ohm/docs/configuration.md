@@ -14,7 +14,8 @@ keys remain in the file but have no effect. ohm does not generate a second “ef
 Each generated document's `$schema` points to the versioned editor schema at
 [`resources/schemas/config-v1.json`](../resources/schemas/config-v1.json). Editors can use it for completion and
 flag unknown core keys. `$schema` is metadata and never enters effective runtime settings. The runtime still
-preserves unknown keys so a newer extension or ohm release can own them without an older process deleting them.
+preserves unknown keys so a newer plugin or ohm release can own them without an older process deleting them.
+Existing v0.1.0 schema references remain accepted; the next requested settings write upgrades them to v0.2.0.
 JSON Schema counts Unicode characters rather than UTF-8 bytes, so it prechecks model-selector shape and character
 length while `ohm config validate`, startup, and `/refresh` enforce the exact byte limits documented below.
 
@@ -35,7 +36,7 @@ default physical locations are:
 
 | Data | User scope | Trusted project scope |
 |---|---|---|
-| Loose extensions | `~/.ohm/extensions/` | `WORKSPACE/.ohm/extensions/` |
+| Local plugins | `~/.ohm/plugins/` | `WORKSPACE/.ohm/plugins/` |
 | Skills | `~/.ohm/skills/` | `WORKSPACE/.ohm/skills/` |
 | Prompt templates | `~/.ohm/prompts/` | `WORKSPACE/.ohm/prompts/` |
 | Themes | `~/.ohm/themes/` | `WORKSPACE/.ohm/themes/` |
@@ -46,8 +47,8 @@ default physical locations are:
 | Managed Git packages | `~/.ohm/git/repositories/` | `WORKSPACE/.ohm/git/repositories/` |
 | Declarative project packages | Not applicable | `WORKSPACE/.ohm/packages/`, declared by `WORKSPACE/.ohm/packages.json` and pinned by `WORKSPACE/.ohm/packages.lock.json` |
 
-ohm uses packages as installable extension bundles; it does not have a second plugin store. A custom ohm home
-directory replaces the `~/.ohm` prefix in this table.
+Plugins bundle code, skills, prompts, and themes in one installation. A custom ohm home directory replaces the
+`~/.ohm` prefix in this table.
 
 Global settings load first. Trusted project settings override them. Nested objects merge recursively. Arrays and
 scalar values replace earlier values. A nested or top-level `null` inherits the lower-precedence or default value.
@@ -67,8 +68,8 @@ an unresolved `ask` decision keeps project resources disabled.
 
 `/refresh` requires an idle session and blocks interactive input while it runs. It first waits for pending writes. It
 then rereads both active settings scopes, including `keybindings`. Finally, it
-rebuilds extensions, skills, prompt templates, themes, and context files without switching the active JSONL session.
-`/refresh` reloads runtime configuration and resources, including extensions, but it does not load changed ohm core
+rebuilds plugins, skills, prompt templates, themes, and context files without switching the active session.
+`/refresh` reloads runtime configuration and resources, including plugins, but it does not load changed ohm core
 or source modules; source changes require a build followed by an explicit process exit and relaunch.
 
 `/refresh` restores model state from cached catalogs and never waits for live provider discovery. A parse failure leaves
@@ -76,26 +77,26 @@ the last valid in-memory scope active and reports the error. Settings writes loc
 changed by the process, so unrelated external edits survive.
 
 Credential state is stored separately from settings, using the selected platform backend or the private auth file.
-Sessions are append-only JSONL files under `sessions/`. Neither belongs in `config.json`. Provider and model
+Sessions store append-only V4 journals in SQLite databases under `sessions/`. Neither belongs in `config.json`. Provider and model
 declarations and authentication commands are also not settings. Use the model registry and trusted provider
-extensions described in [Providers](providers.md).
+plugins described in [Providers](providers.md).
 
 The CLI owns `models.json` as its durable discovered-model catalog snapshot. It may rewrite the file after catalog
 refreshes. Its top level is `{ "version": 1, "savedAt": "...", "providers": [...] }`. The SDK compatibility
 `ModelRuntime` does not parse this file as configuration.
 
-`ModelRuntime.create()` instead reads optional editable provider declarations from `model-providers.json`. That file
+The CLI and SDK read optional editable provider declarations from `model-providers.json` in the active ohm home. That file
 has a provider-keyed top level such as
-`{ "providers": { "company": { "baseUrl": "...", "api": "openai-completions", "models": [...] } } }`. The CLI does
-not read `model-providers.json`; CLI provider customization remains extension-owned. An explicit SDK `modelsPath`
-selects another provider configuration file. `modelsPath: null` disables file loading.
+`{ "providers": { "company": { "baseUrl": "...", "api": "openai-completions", "models": [...] } } }`. The CLI loads it
+at startup and `/refresh`; provider plugins remain available for custom behavior. An explicit SDK `modelsPath`
+selects another provider configuration file. `modelsPath: null` disables file loading for that SDK model runtime.
 
 There is no automatic rename or copy from `models.json`, because it may contain a live CLI catalog. An SDK-only
 installation that placed provider declarations there should move that provider-keyed document to
 `model-providers.json` before starting the CLI.
 
 Application and editor overrides live under `keybindings` in `config.json`. See [Keybindings](keybindings.md) for
-the action map and chord format. `/refresh` applies keybinding, settings, and extension-resource changes together.
+the action map and chord format. `/refresh` applies keybinding, settings, and plugin-resource changes together.
 
 ## Agent instructions
 
@@ -114,7 +115,7 @@ Reinstall and update preserve the customized file byte-for-byte.
 ohm loads the global file first. It then loads one instruction file from each ancestor directory, from the
 filesystem root to the working directory. More specific instructions therefore appear later. `/refresh` rereads the
 active files. `--no-context-files` disables instruction discovery for one invocation. Instruction files are prompt
-text; they do not grant extension trust or more operating-system authority.
+text; they do not grant plugin trust or more operating-system authority.
 
 ## Locate or edit settings
 
@@ -187,13 +188,12 @@ metacharacters `*`, `?`, `[`, `]`, `{`, and `}` are rejected.
 | `quietStartup` | `false` | Suppress the normal startup report. |
 | `defaultProjectTrust` | `ask` | Global-only trust default: `ask`, `always`, or `never`. |
 | `npmCommand` | platform npm | Executable plus fixed argv prefix for package operations. |
-| `packages` | `[]` | npm, Git, or local package sources and optional resource filters. |
-| `extensions` | `[]` | Additional extension files or directories. |
+| `plugins` | `[]` | npm, Git, or local plugin sources and optional contribution filters. |
 | `skills` | `[]` | Additional skill files or directories. |
 | `prompts` | `[]` | Additional prompt-template files or directories. |
 | `themes` | `[]` | Additional custom theme files or directories. |
 | `enableSkillCommands` | `true` | Register discovered skills as slash commands. |
-| `tools.enabled` | all built-in and extension tools | Persistent tool allowlist; `null` keeps every available tool enabled. Invocation flags take precedence. |
+| `tools.enabled` | all built-in and plugin tools | Persistent tool allowlist; `null` keeps every available tool enabled. Invocation flags take precedence. |
 | `tools.excluded` | `[]` | Persistent tool exclusions, combined with `--exclude-tools`. |
 | `terminal.showImages` | `true` | Render supported terminal images. |
 | `terminal.imageWidthCells` | `60` | Preferred terminal image width. |
@@ -219,9 +219,13 @@ metacharacters `*`, `?`, `[`, `]`, `{`, and `}` are rejected.
 | `collapseChangelog` | `false` | Prefer a condensed changelog display. |
 | `keybindings` | platform defaults | Complete application/editor action map. `null` on an action keeps its built-in binding; `[]` unbinds it. |
 
-For `extensions`, `skills`, `prompts`, and `themes`, entries beginning with `!`, `+`, or `-` remain resource-filter
-rules. Every other entry is an additional file or directory path. Global paths resolve from `$OHM_HOME`; trusted
-project paths resolve from `WORKSPACE/.ohm`. Untrusted project paths are not read or activated.
+The generated baseline uses only `plugins` for resource setup. Each source is a string or an object with `source`
+and optional `entrypoints`, `skills`, `prompts`, and `themes` filters. Entrypoints register tools, hooks, commands,
+providers, or UI; a resource-only plugin needs no entrypoint. See [Plugins](packages.md) for the manifest and filters.
+
+`plugins: null` inherits the lower scope; `plugins: []` disables its configured list.
+Global paths resolve from `$OHM_HOME`; trusted project paths resolve from `WORKSPACE/.ohm`.
+Untrusted project paths are not read or activated.
 
 The cached WebSocket retains one bounded connection and continuation state per session/transport identity; it is
 separate from the provider's prompt-token cache reported by `cacheRead` and the TUI cache percentage. Changing
@@ -262,12 +266,12 @@ then run `/refresh` after editing.
 A newly created trusted-project file contains only `$schema`. Add only the project overrides you want; all other
 values continue to come from the global file. Both scopes use the same schema and merge rules.
 
-## Package-resource selector
+## Plugin-resource selector
 
-`ohm config` opens the package-resource selector. It updates only the `packages` setting in the selected global or trusted-project scope. It does not print or maintain another configuration format.
+`ohm config` opens the plugin-resource selector. It updates only the `plugins` setting in the selected global or trusted-project scope. It does not print or maintain another configuration format.
 
-## Extension-owned configuration
+## Plugin-owned configuration
 
 Keep custom providers, model metadata, OAuth clients, request headers, credential commands, and external execution
-policy in a reviewed provider or tool extension. This keeps provider authority and secrets out of the main settings
+policy in a reviewed provider or tool plugin. This keeps provider authority and secrets out of the main settings
 file.

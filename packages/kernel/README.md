@@ -71,6 +71,14 @@ change set. The reducer reconstructs conversation nodes, the selected head, oper
 checkpoints, and tool-effect recovery state. Writers validate and reduce before appending, sync durable bytes before
 publication, and make commit-ID retries idempotent.
 
+`createSessionV4State()` uses plain Maps. Low-level owners can instead pass
+replace-only `SessionV4RecordCollections` to `createSessionV4ReducerState()`.
+The reducer replaces changed records rather than mutating values returned by a
+collection. Collections must preserve insertion order and support rollback;
+optional typed metadata lets validation inspect identities without loading full
+payloads. They are trusted owner infrastructure, not an untrusted storage plugin
+protocol. `cloneSessionV4State()` still returns detached, ordinary Maps.
+
 Tool effects declare one recovery policy:
 
 - `repeatable`: a verified in-doubt effect may run again;

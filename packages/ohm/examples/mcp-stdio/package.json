@@ -8,9 +8,9 @@
     "test": "node --test checks/runtime.test.mjs"
   },
   "peerDependencies": {
-    "ohm": ">=0.1.0 <0.2.0"
+    "ohm": ">=0.2.0 <0.3.0"
   },
   "ohm": {
-    "extensions": ["extensions/index.mjs"]
+    "entrypoints": ["src/index.mjs"]
   }
 }

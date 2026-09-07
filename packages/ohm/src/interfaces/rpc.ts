@@ -6,7 +6,7 @@ import { errorMessage } from "../core/errors.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
 import { STRING_VALUE } from "../core/value-schemas.js";
 import { writeMachineOutput } from "./output-guard.js";
-import type { RpcCommand, RpcExtensionUiResponse } from "./rpc-protocol.js";
+import type { RpcCommand, RpcPluginUiResponse } from "./rpc-protocol.js";
 import { Value } from "typebox/value";
 
 export const MAX_RPC_LINE_BYTES = 16 * 1024 * 1024;
@@ -171,7 +171,7 @@ export interface RpcUnknownCommand extends JsonObject {
   type: string;
 }
 
-export type ParsedRpcInput = RpcCommand | RpcExtensionUiResponse | RpcUnknownCommand;
+export type ParsedRpcInput = RpcCommand | RpcPluginUiResponse | RpcUnknownCommand;
 
 /** Parse one command record while preserving unknown command names and their IDs. */
 export function parseRpcInput(line: string): ParsedRpcInput {

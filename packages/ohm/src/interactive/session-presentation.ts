@@ -13,12 +13,14 @@ import {
   canonicalMessage,
   canonicalUsage,
   extensionSessionEntries,
-  type SessionEntry as ExtensionSessionEntry,
-} from "../extensions/session-contract.js";
+  type SessionEntry as PluginSessionEntry,
+} from "../plugins/session-contract.js";
 import type { AgentSessionEvent } from "../service/agent-session.js";
-import type { ActiveBranchUsage } from "../storage/session-manager.js";
+import type { ActiveBranchUsage, SessionManager } from "../storage/session-manager.js";
 import type { SessionEntry as CanonicalSessionEntry } from "../storage/types.js";
 import type { TuiLatestCacheUsage, TuiSessionSummary, TuiTranscriptItem } from "../tui/types.js";
+import type { TuiTranscriptHistory } from "../tui/transcript-history.js";
+import { byteTruncate } from "../tui/unicode.js";
 import { Value } from "typebox/value";
 
 export const INTERACTIVE_TRANSCRIPT_ENTRY_LIMIT = 2_000;
@@ -38,7 +40,7 @@ const NORMALIZED_USAGE_FIELDS = [
   "serverToolCalls",
   "durationMs",
 ] as const satisfies readonly (keyof NormalizedUsage)[];
-type PresentationEntry = CanonicalSessionEntry | ExtensionSessionEntry;
+type PresentationEntry = CanonicalSessionEntry | PluginSessionEntry;
 
 interface LinkedEntryReader<T extends PresentationEntry> {
   getEntry(id: string): T | undefined;
@@ -54,8 +56,9 @@ interface BranchUsageReader {
 }
 
 interface InteractiveTranscriptSession {
-  readonly nativeSessionManager?: BranchEntryReader<CanonicalSessionEntry> & BranchUsageReader;
-  readonly sessionManager: BranchEntryReader<ExtensionSessionEntry> & Partial<BranchUsageReader>;
+  readonly nativeSessionManager?: BranchEntryReader<CanonicalSessionEntry> & BranchUsageReader
+    & Partial<Pick<SessionManager, "getHistoryPage" | "searchHistory" | "getLeafId">>;
+  readonly sessionManager: BranchEntryReader<PluginSessionEntry> & Partial<BranchUsageReader>;
 }
 
 interface InteractiveTranscriptHistorySession extends InteractiveTranscriptSession {
@@ -69,7 +72,7 @@ interface InteractiveSessionPresentationSession extends InteractiveTranscriptHis
 
 type RecentDisplayEntries =
   | { entries: CanonicalSessionEntry[]; source: "canonical" }
-  | { entries: ExtensionSessionEntry[]; source: "public" };
+  | { entries: PluginSessionEntry[]; source: "public" };
 
 function isDisplayEntry(entry: PresentationEntry): entry is Extract<PresentationEntry, { type: "custom" | "custom_message" }> {
   return entry.type === "custom" || (entry.type === "custom_message" && entry.display === true);
@@ -285,7 +288,7 @@ export function interactiveTranscriptUsageBaseline(session: InteractiveTranscrip
   };
 }
 
-function publicDisplayMessage(entry: Extract<ExtensionSessionEntry, { type: "message" }>): CanonicalMessage | undefined {
+function publicDisplayMessage(entry: Extract<PluginSessionEntry, { type: "message" }>): CanonicalMessage | undefined {
   const message = entry.message;
   if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") return undefined;
   let safeMessage: Parameters<typeof canonicalMessage>[0] = message;
@@ -304,7 +307,7 @@ function publicDisplayMessage(entry: Extract<ExtensionSessionEntry, { type: "mes
   return { ...canonical, id: entry.id, createdAt: entry.timestamp };
 }
 
-function publicCustomMessage(entry: Extract<ExtensionSessionEntry, { type: "message" }>): TuiTranscriptItem | undefined {
+function publicCustomMessage(entry: Extract<PluginSessionEntry, { type: "message" }>): TuiTranscriptItem | undefined {
   const message = entry.message;
   if (message.role !== "custom" || !message.display) return undefined;
   return {
@@ -329,7 +332,7 @@ function displayUsage(usage: NormalizedUsage | undefined): Omit<NormalizedUsage,
   return display;
 }
 
-function projectedDisplayEntries(entries: readonly ExtensionSessionEntry[]): ReadonlyMap<string, TuiTranscriptItem> {
+function projectedDisplayEntries(entries: readonly PluginSessionEntry[]): ReadonlyMap<string, TuiTranscriptItem> {
   const projected = new Map<string, TuiTranscriptItem>();
   for (const entry of entries) {
     if (entry.type === "custom" || (entry.type === "custom_message" && entry.display === true)) {
@@ -340,7 +343,7 @@ function projectedDisplayEntries(entries: readonly ExtensionSessionEntry[]): Rea
 }
 
 function shellProjection(
-  entry: Extract<CanonicalSessionEntry | ExtensionSessionEntry, { type: "message" }>,
+  entry: Extract<CanonicalSessionEntry | PluginSessionEntry, { type: "message" }>,
 ): TranscriptProjection | undefined {
   const message = entry.message;
   if (message.role !== "bashExecution") return undefined;
@@ -364,7 +367,7 @@ function summaryProjection(
   entry: Extract<CanonicalSessionEntry, { type: "compaction" | "branch_summary" }>,
 ): TranscriptProjection;
 function summaryProjection(
-  entry: Extract<ExtensionSessionEntry, { type: "compaction" | "branch_summary" }>,
+  entry: Extract<PluginSessionEntry, { type: "compaction" | "branch_summary" }>,
 ): TranscriptProjection;
 function summaryProjection(
   entry: Extract<PresentationEntry, { type: "compaction" | "branch_summary" }>,
@@ -409,7 +412,7 @@ function canonicalTranscriptProjections(entries: readonly CanonicalSessionEntry[
   });
 }
 
-function publicTranscriptProjections(entries: readonly ExtensionSessionEntry[]): TranscriptProjection[] {
+function publicTranscriptProjections(entries: readonly PluginSessionEntry[]): TranscriptProjection[] {
   const displays = projectedDisplayEntries(entries);
   return entries.flatMap((entry): TranscriptProjection[] => {
     if (entry.type === "compaction" || entry.type === "branch_summary") return [summaryProjection(entry)];
@@ -432,18 +435,22 @@ function publicTranscriptProjections(entries: readonly ExtensionSessionEntry[]):
 
 /** Projects the active JSONL branch into one stable, ordered terminal history. */
 export function interactiveTranscriptHistory(session: InteractiveTranscriptHistorySession): TuiTranscriptItem[] {
-  let sequence = 0;
-  let parentEventId: string | undefined;
   const recent = recentDisplayEntries(session);
   const projections = recent.source === "canonical"
     ? canonicalTranscriptProjections(recent.entries)
     : publicTranscriptProjections(recent.entries);
+  return transcriptProjectionItems(session.sessionId, projections);
+}
+
+function transcriptProjectionItems(sessionId: string, projections: readonly TranscriptProjection[]): TuiTranscriptItem[] {
+  let sequence = 0;
+  let parentEventId: string | undefined;
   return projections.flatMap((projection): TuiTranscriptItem[] => {
     if (projection.kind === "item") return [projection.item];
     const { id, message, timestamp } = projection;
     const envelope: EventEnvelope = {
       eventId: id,
-      threadId: session.sessionId,
+      threadId: sessionId,
       ...optionalProperties(parentEventId === undefined ? undefined : { parentEventId }),
       sequence: ++sequence,
       timestamp,
@@ -454,7 +461,7 @@ export function interactiveTranscriptHistory(session: InteractiveTranscriptHisto
     if (message.role !== "assistant") return [envelope];
     return [envelope, {
       eventId: `${id}~assistant-completed`,
-      threadId: session.sessionId,
+      threadId: sessionId,
       parentEventId: id,
       sequence: ++sequence,
       timestamp,
@@ -468,6 +475,78 @@ export function interactiveTranscriptHistory(session: InteractiveTranscriptHisto
   });
 }
 
+function interactiveTranscriptHistoryProvider(session: InteractiveTranscriptHistorySession): TuiTranscriptHistory | undefined {
+  const reader = session.nativeSessionManager;
+  if (reader?.getHistoryPage === undefined || reader.searchHistory === undefined) return undefined;
+  const read = reader.getHistoryPage.bind(reader);
+  const search = reader.searchHistory.bind(reader);
+  return {
+    async page(request, signal) {
+      signal.throwIfAborted();
+      const from = request.from ?? reader.getLeafId?.() ?? reader.getLeafEntry()?.id;
+      let before = request.before;
+      if (request.beforeVisibleId !== undefined) {
+        // Resolve the retained message identity in bounded pages, not a full branch clone.
+        while (true) {
+          const page = read({ ...optionalProperties(from === undefined ? undefined : { from }),
+            ...optionalProperties(before === undefined ? undefined : { before }), limit: 100, maxBytes: 256 * 1024 });
+          const entry = page.entries.find((entry) => entry.id === request.beforeVisibleId
+            || (entry.type === "message" && "id" in entry.message && entry.message.id === request.beforeVisibleId));
+          if (entry !== undefined) { before = entry.id; break; }
+          if (!page.hasMoreBefore || page.entries.length === 0) break;
+          before = page.entries[0]!.id;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
+        }
+      }
+      const page = read({
+        ...optionalProperties(from === undefined ? undefined : { from }),
+        ...optionalProperties(before === undefined ? undefined : { before }),
+        ...optionalProperties(request.after === undefined ? undefined : { after: request.after }),
+        ...optionalProperties(request.edge === undefined ? undefined : { edge: request.edge }),
+        limit: request.limit ?? 100,
+        maxBytes: request.maxBytes ?? 256 * 1024,
+      });
+      signal.throwIfAborted();
+      const last = page.entries.at(-1);
+      const projections = canonicalTranscriptProjections(page.entries).map((projection): TranscriptProjection => {
+        if (projection.kind !== "message") return projection;
+        let remaining = Math.min(64 * 1024, Math.floor((request.maxBytes ?? 256 * 1024) / 2));
+        const clip = (text: string): string => {
+          const size = Buffer.byteLength(text, "utf8");
+          if (size <= remaining) { remaining -= size; return text; }
+          const match = request.query === undefined ? -1 : text.toLocaleLowerCase().indexOf(request.query.toLocaleLowerCase());
+          const start = match < 0 ? 0 : Math.max(0, match - Math.floor(remaining / 4));
+          const clipped = `${start > 0 ? "… " : ""}${byteTruncate(text.slice(start), remaining)}\n[History excerpt; full message remains in the journal]`;
+          remaining = 0;
+          return clipped;
+        };
+        return { ...projection, message: { ...projection.message,
+          content: projection.message.content.map((block) => block.type === "text" ? { ...block, text: clip(block.text) }
+            : block.type === "thinking" && block.visibility === "summary" && block.redacted !== true
+              ? { ...block, thinking: clip(block.thinking) } : block),
+        } };
+      });
+      return {
+        items: transcriptProjectionItems(session.sessionId, projections),
+        ...optionalProperties(page.entries[0] === undefined ? undefined : { firstId: page.entries[0].id }),
+        ...optionalProperties(page.entries.at(-1) === undefined ? undefined : { lastId: page.entries.at(-1)!.id }),
+        ...optionalProperties(request.from === undefined ? undefined : { from: request.from }),
+        ...optionalProperties(request.from === undefined ? undefined : {
+          focusId: last?.type === "message" && "id" in last.message
+            ? last.message.id
+            : request.from,
+        }),
+        hasMoreBefore: page.hasMoreBefore,
+        hasMoreAfter: page.hasMoreAfter,
+      };
+    },
+    async search(query, cursor, signal) {
+      return await search(query, { ...cursor, limit: 1, signal });
+    },
+  };
+}
+
 export interface InteractiveSessionPresentationOptions {
   onEnvelope?(event: EventEnvelope): void;
   onSessionEvent?(event: AgentSessionEvent): void;
@@ -476,8 +555,9 @@ export interface InteractiveSessionPresentationOptions {
 
 /** Rendering port shared by interactive frontends. */
 export interface InteractiveSessionPresentationTerminal {
+  setTranscriptHistory?(history: TuiTranscriptHistory | undefined): void;
   render(event: EventEnvelope): void;
-  renderSessionEntry(entry: Extract<ExtensionSessionEntry, { type: "custom" | "custom_message" }>): void;
+  renderSessionEntry(entry: Extract<PluginSessionEntry, { type: "custom" | "custom_message" }>): void;
   replaceTranscript(
     items: readonly TuiTranscriptItem[],
     branch?: string,
@@ -543,6 +623,7 @@ export function bindInteractiveSessionPresentation(
     terminal.replaceTranscript(interactiveTranscriptHistory(session), "main", {
       preserveExisting: options.preserveTranscript === true,
     });
+    terminal.setTranscriptHistory?.(interactiveTranscriptHistoryProvider(session));
     const usage = interactiveTranscriptUsageBaseline(session);
     terminal.setUsageBaseline(
       usage.usage,
@@ -554,14 +635,17 @@ export function bindInteractiveSessionPresentation(
     for (const action of pending) action();
     pending.length = 0;
   } catch (error) {
+    const failures: unknown[] = [error];
+    try { terminal.setTranscriptHistory?.(undefined); } catch (cleanupError) { failures.push(cleanupError); }
     unsubscribeInteractiveSessionPresentation(
       unsubscribeSession,
       unsubscribeEnvelope,
-      [error],
+      failures,
       "Interactive session presentation failed and cleanup was incomplete",
     );
   }
   return () => {
+    terminal.setTranscriptHistory?.(undefined);
     replaying = false;
     pending.length = 0;
     unsubscribeInteractiveSessionPresentation(

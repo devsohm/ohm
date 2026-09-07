@@ -10,7 +10,7 @@ The built-in `bash` tool resolves these values immediately before each command:
 | Variable | Value |
 | --- | --- |
 | `OHM_SESSION_ID` | Active session ID. |
-| `OHM_SESSION_FILE` | Absolute JSONL path for a persisted session; otherwise unset. |
+| `OHM_SESSION_FILE` | Absolute SQLite path for a persisted session; otherwise unset. |
 | `OHM_PROVIDER` | Selected provider ID; unset when no model is selected. |
 | `OHM_MODEL` | Selected model ID; unset when no model is selected. |
 | `OHM_REASONING_LEVEL` | Effective `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` level; otherwise unset. |

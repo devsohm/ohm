@@ -253,7 +253,7 @@ test("interactive chat preserves conventional SIGINT, SIGHUP, and SIGTERM exit c
     const child = fixture.spawnPtyHarness([
       "--offline",
       "--no-session",
-      "--no-extensions",
+      "--no-plugin-code",
       "--no-skills",
       "--no-prompt-templates",
       "--no-themes",
@@ -276,8 +276,8 @@ test("interactive chat SIGTERM kills an active tool tree, disposes extensions, a
     "--provider", "signal-offline",
     "--model", "signal-model",
     "--tools", "bash",
-    "--extension", fixture.extension,
-    "--no-extensions",
+    "--plugin", fixture.extension,
+    "--no-plugin-code",
     "--no-session",
     "--approve",
     "--workspace", fixture.workspace,
@@ -308,8 +308,8 @@ test("print SIGTERM cancels work, kills the detached process group, disposes ext
     "--provider", "signal-offline",
     "--model", "signal-model",
     "--tools", "bash",
-    "--extension", fixture.extension,
-    "--no-extensions",
+    "--plugin", fixture.extension,
+    "--no-plugin-code",
     "--no-session",
     "--workspace", fixture.workspace,
     "--print",
@@ -334,8 +334,8 @@ test("RPC SIGHUP cancels work, kills the detached process group, disposes extens
     "--provider", "signal-offline",
     "--model", "signal-model",
     "--tools", "bash",
-    "--extension", fixture.extension,
-    "--no-extensions",
+    "--plugin", fixture.extension,
+    "--no-plugin-code",
     "--workspace", fixture.workspace,
   ], "pipe");
   child.stdin!.write(`${JSON.stringify({ id: "prompt", type: "prompt", message: "start the shell fixture" })}\n`);
@@ -359,8 +359,8 @@ test("RPC SIGTERM bounds a provider request that never observes cancellation", {
     "--provider", "signal-offline",
     "--model", "signal-model",
     "--tools", "bash",
-    "--extension", fixture.extension,
-    "--no-extensions",
+    "--plugin", fixture.extension,
+    "--no-plugin-code",
     "--workspace", fixture.workspace,
   ], "pipe");
   child.stdin!.write(`${JSON.stringify({
@@ -395,8 +395,8 @@ test("RPC startup does not create its stdin relay before runtime loading succeed
   `);
   const child = fixture.spawnHarness([
     "--mode", "rpc",
-    "--extension", extension,
-    "--no-extensions",
+    "--plugin", extension,
+    "--no-plugin-code",
     "--workspace", fixture.workspace,
   ], "pipe");
   await waitForFile(activationStarted);
@@ -411,7 +411,7 @@ test("RPC stdin relay exits when its parent is killed", {
   const fixture = await signalFixture(t);
   const child = fixture.spawnHarness([
     "--mode", "rpc",
-    "--no-extensions",
+    "--no-plugin-code",
     "--workspace", fixture.workspace,
   ], "pipe");
   child.stdin!.write(`${JSON.stringify({ id: "state", type: "get_state" })}\n`);
@@ -433,8 +433,8 @@ test("a repeated termination signal force-exits with the conventional status whe
     "start noncooperative provider",
     "--provider", "signal-offline",
     "--model", "signal-model",
-    "--extension", fixture.extension,
-    "--no-extensions",
+    "--plugin", fixture.extension,
+    "--no-plugin-code",
     "--no-session",
     "--workspace", fixture.workspace,
     "--print",

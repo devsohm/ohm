@@ -6,6 +6,7 @@ import {
   type RuntimeRecord,
 } from "./value-guards.js";
 import { optionalProperties } from "../core/optional-properties.js";
+import { turnPrefix } from "./turn-layout.js";
 import { extname } from "node:path";
 import { elapsedText, MAX_RETAINED_MUTATION_PREVIEW_ROWS } from "./model.js";
 import type { Frame, PickerItem, TranscriptEntry, TuiWorkingIndicatorOptions } from "./types.js";
@@ -341,7 +342,10 @@ function toolStateSpans(entry: TranscriptEntry, theme: Theme): RuntimeUiSpan[] {
   const durationDetail = duration === "" ? "" : `${separator.trimEnd()}${duration}`;
   let label: string;
   let role: ThemeRole;
-  if (entry.status === "completed") {
+  if (entry.historical === true) {
+    label = `history${separator}result not shown`;
+    role = "muted";
+  } else if (entry.status === "completed") {
     label = `done${duration}`;
     role = "success";
   } else if (entry.status === "failed") {
@@ -372,6 +376,7 @@ function toolStateSpans(entry: TranscriptEntry, theme: Theme): RuntimeUiSpan[] {
 function conciseToolStateSpans(entry: TranscriptEntry, theme: Theme): RuntimeUiSpan[] {
   const metadata = toolMetadata(entry);
   const separator = theme.unicode ? " · " : " | ";
+  if (entry.historical === true) return [{ text: separator, role: "muted" }, { text: "history", role: "muted" }];
   if (entry.status === "completed") return [{ text: separator, role: "muted" }, { text: "done", role: "success" }];
   if (entry.status === "failed") {
     const label = metadata?.timedOut === true
@@ -952,7 +957,7 @@ const COLLAPSED_WRITE_COMPLETE_MAX_ROWS = 4;
 const RETAINED_TOOL_OUTPUT_ROW_MARKER = "… retained output rows shortened; ending follows";
 const RETAINED_HEAD_OUTPUT_ROW_MARKER = "… retained output rows shortened; first rows shown";
 const COLLAPSED_TOOL_OUTPUT_ROW_MARKER = "… output shortened";
-const RETAINED_EXTENSION_ROW_MARKER = "… retained extension rows shortened; ending follows";
+const RETAINED_PLUGIN_ROW_MARKER = "… retained plugin rows shortened; ending follows";
 const RETAINED_STARTUP_ROW_MARKER = "… retained startup rows shortened; ending follows";
 const COLLAPSED_STARTUP_ROW_MARKER = "… startup shortened";
 const RETAINED_CARD_ROW_MARKER = "… retained card rows shortened; ending follows";
@@ -1558,7 +1563,7 @@ function hangingLines(prefix: string, value: string, width: number, role: ThemeR
   }));
 }
 
-function retainedExtensionFallbackLines(
+function retainedPluginFallbackLines(
   prefix: string,
   value: string,
   width: number,
@@ -1572,7 +1577,7 @@ function retainedExtensionFallbackLines(
       EXPANDED_TOOL_DETAIL_MAX_ROWS,
     ),
     width,
-    RETAINED_EXTENSION_ROW_MARKER,
+    RETAINED_PLUGIN_ROW_MARKER,
     (selected) => hangingLines(prefix, selected, width, role),
     EXPANDED_TOOL_DETAIL_MAX_ROWS,
   );
@@ -1604,52 +1609,22 @@ function stableTranscriptEntryLines(
 }
 
 function userMessageLines(value: string, width: number, outputPad = 1): RenderedLine[] {
-  const leftPadding = Math.min(outputPad, Math.max(0, width - 1));
-  const rightPadding = Math.min(outputPad, Math.max(0, width - leftPadding - 1));
-  const edge = " ".repeat(leftPadding);
-  const content = renderMarkdownMessageLines(
-    edge,
+  const inset = Math.min(outputPad, Math.floor((width - 1) / 2));
+  return renderMarkdownMessageLines(
+    " ".repeat(inset),
     value,
-    Math.max(1, width - rightPadding),
-    "userMessage",
+    width - inset,
     "userMessage",
   );
-  const padding: RenderedLine = {
-    text: "",
-    role: "userMessage",
-    background: "userMessageBg",
-    fill: true,
-  };
-  return [
-    padding,
-    ...content.map((line): RenderedLine => ({
-      ...line,
-      background: "userMessageBg",
-      fill: true,
-    })),
-    padding,
-  ];
 }
 
-function imageOnlyUserMessageLines(lines: readonly RenderedLine[], width: number, outputPad = 1): RenderedLine[] {
-  const leftPadding = " ".repeat(Math.min(outputPad, Math.max(0, width - 1)));
-  const padding: RenderedLine = {
-    text: "",
-    role: "userMessage",
-    background: "userMessageBg",
-    fill: true,
-  };
-  return [
-    padding,
-    ...lines.map((line): RenderedLine => ({
-      ...line,
-      text: line.image === undefined ? `${leftPadding}${line.text}` : line.text,
-      role: line.image === undefined ? "userMessage" : line.role,
-      background: "userMessageBg",
-      fill: true,
-    })),
-    padding,
-  ];
+function userMessageImageLines(lines: readonly RenderedLine[], width: number, outputPad = 1): RenderedLine[] {
+  const inset = Math.min(outputPad, Math.floor((width - 1) / 2));
+  return lines.map((line): RenderedLine => ({
+    ...line,
+    text: line.image === undefined ? truncateCells(`${" ".repeat(inset)}${line.text}`, width - inset) : line.text,
+    role: line.image === undefined ? "userMessage" : line.role,
+  }));
 }
 
 function toolCardPadding(width: number): ToolCardPadding {
@@ -1677,6 +1652,7 @@ function compactToolLines(lines: readonly RenderedLine[], width: number): Render
 }
 
 function toolCardStatus(entry: TranscriptEntry, theme: Theme): ToolCardStatus {
+  if (entry.historical === true) return { glyph: "?", role: "muted" };
   if (entry.status === "completed") return { glyph: theme.glyphs.success, role: "success" };
   if (entry.status === "failed") return { glyph: theme.glyphs.failure, role: "error" };
   if (entry.status === "in_doubt") return { glyph: "!", role: "warning" };
@@ -1691,21 +1667,12 @@ function toolCardLines(
   theme: Theme,
 ): RenderedLine[] {
   const status = toolCardStatus(entry, theme);
-  const railRole = entry.status === "completed"
-    ? "success"
-    : entry.status === "failed"
-      ? "error"
-      : entry.status === "in_doubt"
-        ? "warning"
-        : entry.status === "running"
-          ? "toolRunning"
-          : "toolPending";
   const paddingCells = activityTimelinePadding(width);
   const content = compactToolLines(lines, paddingCells.content);
   const rendered = content.map((line, index): RenderedLine => {
     const marker: RuntimeUiSpan = index === 0
       ? { text: `${status.glyph}${paddingCells.left > 1 ? " " : ""}`, role: status.role }
-      : { text: `${theme.unicode ? "│" : "|"}${paddingCells.left > 1 ? " " : ""}`, role: railRole };
+      : { text: `${theme.unicode ? "│" : "|"}${paddingCells.left > 1 ? " " : ""}`, role: status.role };
     return {
       ...line,
       text: "",
@@ -2166,10 +2133,10 @@ function transcriptLineChunks(
     if (entry.kind === "user") {
       const outputPad = imageOptions.outputPad ?? 1;
       const availableWidth = Math.max(1, width - (2 * outputPad));
-      const images = renderedImages(entry);
+      const images = userMessageImageLines(renderedImages(entry), width, outputPad);
       const markdown = entry.text === "" ? "" : transformedMarkdown(entry, "user", availableWidth);
       const promptLines = entry.text === ""
-        ? images.length === 0 ? [] : imageOnlyUserMessageLines(images, width, outputPad)
+        ? images.length === 0 ? userMessageLines(" ", width, outputPad) : []
         : entry.streaming !== true
           ? stableTranscriptEntryLines(
               cachedUserLines,
@@ -2182,8 +2149,10 @@ function transcriptLineChunks(
               width,
               outputPad,
             );
-      const lines = entry.text === "" ? promptLines : [...promptLines, ...images];
-      return [...separator, ...withSemanticZone(lines)];
+      const lines = [...promptLines, ...images].map((line) =>
+        line.image === undefined ? { ...line, background: "userMessageBg" as const, fill: true } : line);
+      const padding: RenderedLine = { text: " ".repeat(width), role: "userMessage", background: "userMessageBg", fill: true };
+      return [...separator, ...withSemanticZone([padding, ...lines, padding])];
     }
     if (entry.kind === "reasoning" && imageOptions.hideReasoningBlock === true) {
       if (sameReasoningRun(previous, entry)) return [];
@@ -2268,8 +2237,8 @@ function transcriptLineChunks(
     if (entry.kind === "assistant") {
       const outputPad = imageOptions.outputPad ?? 0;
       const availableWidth = Math.max(1, width - (2 * outputPad));
-      const messagePrefix = `${" ".repeat(outputPad)}${prefix}`;
-      const messageWidth = Math.max(1, width - outputPad);
+      const messagePrefix = `${" ".repeat(Math.max(0, outputPad - 1))}${turnPrefix("assistant", width, theme.unicode)}`;
+      const messageWidth = width;
       const markdown = entry.text === "" ? "" : transformedMarkdown(entry, "assistant", availableWidth);
       const messageLines = entry.text === ""
         ? []
@@ -2282,7 +2251,7 @@ function transcriptLineChunks(
             markdown,
             messageWidth,
             role,
-            undefined,
+            "info",
             { codeBlockIndent: imageOptions.codeBlockIndent ?? "" },
           ),
         );
@@ -2323,7 +2292,7 @@ function transcriptLineChunks(
         ? label
         : entry.text === "" ? label : `${label}: ${entry.text}`;
       const fallbackLines = entry.expandable === true && entry.expanded === true
-        ? retainedExtensionFallbackLines(prefix, fallback, width, role)
+        ? retainedPluginFallbackLines(prefix, fallback, width, role)
         : hangingLines(prefix, fallback, width, role);
       return [...separator, ...fallbackLines, ...renderedImages(entry)];
     }

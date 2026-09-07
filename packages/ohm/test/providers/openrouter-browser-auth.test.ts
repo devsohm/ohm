@@ -11,7 +11,7 @@ import type { ResourceLoader } from "../../src/core/resource-loader.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { loginInteractively } from "../../src/cli/main.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
-import { createExtensionRuntime } from "../../src/extensions/compat.js";
+import { createPluginRuntime } from "../../src/plugins/compat.js";
 import { InteractiveMode } from "../../src/modes/interactive-mode.js";
 import { builtinModels, builtinProviders } from "../../src/providers/all.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
@@ -168,8 +168,8 @@ test("public InteractiveMode bare /login reaches OpenRouter in an empty auth env
 
   const modelRegistry = new ModelRegistry(directModels);
   await modelRegistry.refresh({ allowNetwork: false });
-  const extensionRuntime = createExtensionRuntime();
-  const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+  const pluginRuntime = createPluginRuntime();
+  const pluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
   const loader: ResourceLoader = {
     async refresh() {},
     extendResources() {},
@@ -179,14 +179,14 @@ test("public InteractiveMode bare /login reaches OpenRouter in an empty auth env
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
-    getExtensions: () => extensionsResult,
+    getPlugins: () => pluginsResult,
   };
   const session = await AgentSession.create({
     sessionManager: SessionManager.inMemory(workspace),
     providers: new ProviderRegistry(),
     modelRegistry,
     resourceLoader: loader,
-    extensionsResult,
+    pluginsResult,
     workspace,
     agentDirectory,
     settingsManager: SettingsManager.inMemory(),
@@ -262,8 +262,8 @@ test("CLI runtime direct providers preserve OpenRouter login for embedded and re
     ephemeral: true,
     offline: true,
     deferModelNetworkRefresh: true,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills: false,
     promptTemplates: false,
     themes: false,

@@ -21,7 +21,7 @@ not remove dead code unless the task asks for it or your change made it dead.
 - `packages/kernel`: the reusable agent loop, context handling, tools, and V4
   session journal.
 - `packages/terminal`: terminal input, layout, rendering, and components.
-- `packages/ohm`: product policy, providers, credentials, extensions, tools,
+- `packages/ohm`: product policy, providers, credentials, plugins, tools,
   TUI, CLI modes, RPC, serve mode, and SDK composition.
 - `scripts`: workspace, release, model-catalog, and policy checks.
 
@@ -42,16 +42,17 @@ update both paths and add conformance coverage for the shared contract.
 - Session commits are append-only. Derived state must be rebuildable from the
   journal.
 - Preserve opaque provider state byte-for-byte. Never expose hidden reasoning.
-- Keep extension contracts transport-neutral. A UI or protocol adapter must
+- Keep plugin contracts transport-neutral. A UI or protocol adapter must
   not become part of the core execution engine.
 
 ## Security and data
 
 - Keep credential access behind `packages/ohm/src/auth/`.
 - Never log, return, or store a secret outside the selected credential backend.
-- Validate tool input before and after an extension transforms it.
+- Validate bounded JSON before raw argument preparation, then validate the full
+  parameter schema before and after later tool-input transforms.
 - Apply resource claims before execution.
-- Treat paths, URLs, terminal controls, provider output, and extension input as
+- Treat paths, URLs, terminal controls, provider output, and plugin input as
   untrusted data.
 - Use bounded reads, queues, streams, and retained output.
 

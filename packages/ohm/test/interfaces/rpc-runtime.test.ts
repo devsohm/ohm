@@ -24,8 +24,8 @@ import {
   extensionMessages,
   extensionSessionEntries,
   type SessionTreeNode as PublicSessionTreeNode,
-} from "../../src/extensions/session-contract.js";
-import type { RuntimeExtensionEventMap } from "../../src/extensions/runtime.js";
+} from "../../src/plugins/session-contract.js";
+import type { RuntimePluginEventMap } from "../../src/plugins/runtime.js";
 import { AgentSession, type AgentSessionEvent } from "../../src/service/agent-session.js";
 import type {
   AgentSessionBashResult,
@@ -225,14 +225,14 @@ function fixture(
         async getAvailable() { return [MODEL]; },
       };
     },
-    hasExtensionHandlers() { return false; },
-    get extensionRunner() {
+    hasPluginHandlers() { return false; },
+    get pluginRunner() {
       return {
         getRegisteredCommands() {
           return [{
             name: "extension-command",
             invocationName: "extension-command",
-            description: "Extension command",
+            description: "Plugin command",
             sourceInfo: {
               path: "/tmp/extension.mjs",
               source: "extension",
@@ -300,7 +300,7 @@ function fixture(
       return { steering: ["cancelled steer"], followUp: ["cancelled follow-up"] };
     },
     setThinkingLevel(...args: unknown[]) { record("setThinkingLevel", ...args); },
-    cycleThinkingLevel() { record("cycleThinkingLevel"); return "xhigh"; },
+    cycleThinkingLevel(...args: Parameters<AgentSession["cycleThinkingLevel"]>) { record("cycleThinkingLevel", ...args); return "xhigh"; },
     getAvailableThinkingLevels() { record("getAvailableThinkingLevels"); return ["off", "high", "xhigh"]; },
     setSteeringMode(...args: unknown[]) { record("setSteeringMode", ...args); },
     setFollowUpMode(...args: unknown[]) { record("setFollowUpMode", ...args); },
@@ -335,8 +335,8 @@ function fixture(
     },
     async exportToHtml(...args: unknown[]) { record("exportToHtml", ...args); return "/tmp/session.html"; },
     async setModel(...args: unknown[]) { record("setModel", ...args); },
-    async cycleModel() {
-      record("cycleModel");
+    async cycleModel(...args: Parameters<AgentSession["cycleModel"]>) {
+      record("cycleModel", ...args);
       return { model: MODEL, thinkingLevel: "high" as const, isScoped: true };
     },
     getUserMessagesForForking() { record("getUserMessagesForForking"); return [{ entryId: "entry-1", text: "hello" }]; },
@@ -895,14 +895,40 @@ test("RPC model, state, thinking, and queue commands preserve direct session sem
 
   assert.deepEqual(value.calls, [
     { method: "setModel", args: [MODEL, { persist: false }] },
-    { method: "cycleModel", args: [] },
+    { method: "cycleModel", args: ["forward", {}] },
     { method: "setThinkingLevel", args: ["high"] },
-    { method: "cycleThinkingLevel", args: [] },
+    { method: "cycleThinkingLevel", args: [undefined] },
     { method: "getAvailableThinkingLevels", args: [] },
     { method: "setSteeringMode", args: ["one-at-a-time"] },
     { method: "setFollowUpMode", args: ["all"] },
     { method: "clearQueue", args: [] },
   ]);
+  await dispatcher.close();
+});
+
+test("RPC cycle preferences preserve typed options and reject malformed inputs before session calls", async () => {
+  const value = fixture();
+  const dispatcher = new RpcRuntimeDispatcher({ runtime: value.runtime, output(record) { value.outputs.push(record); } });
+  await dispatcher.start();
+  const models = [{ selector: "provider/model", thinkingLevel: "high" as const }];
+  const result = await dispatcher.dispatch({ type: "cycle_model", direction: "backward", models, persist: true });
+  assert.ok(result);
+  assert.equal(result.success, true);
+  await dispatcher.dispatch({ type: "cycle_thinking_level", persist: false });
+  assert.deepEqual(value.calls, [
+    { method: "cycleModel", args: ["backward", { models, persist: true }] },
+    { method: "cycleThinkingLevel", args: [{ persist: false }] },
+  ]);
+  for (const command of [
+    { type: "cycle_model", direction: "sideways" },
+    { type: "cycle_model", models: [{ selector: "provider/model", thinkingLevel: "unknown" }] },
+    { type: "cycle_thinking_level", persist: "false" },
+  ]) {
+    const rejected = await dispatcher.dispatch(command);
+    assert.ok(rejected);
+    assert.equal(rejected.success, false);
+  }
+  assert.equal(value.calls.length, 2);
   await dispatcher.close();
 });
 
@@ -1205,13 +1231,13 @@ test("RPC preserves extension shell transforms, terminal state, journal input, a
     options: Parameters<AgentSession["executeBash"]>[2];
   }> = [];
   const recorded: Array<{ command: string; result: AgentSessionBashResult }> = [];
-  const observed: RuntimeExtensionEventMap["event"][] = [];
+  const observed: RuntimePluginEventMap["event"][] = [];
   const sessionFixture = {
     cwd,
-    hasExtensionHandlers(event: string) {
+    hasPluginHandlers(event: string) {
       return event === "before_user_shell" || event === "user_shell";
     },
-    extensionRunner: {
+    pluginRunner: {
       async emitUserBash(event: { command: string }) {
         if (event.command === "outside") return { command: "outside transformed", cwd: join(cwd, "..") };
         if (event.command === "handled") {
@@ -1259,7 +1285,7 @@ test("RPC preserves extension shell transforms, terminal state, journal input, a
       },
       getRuntimeHost() {
         return {
-          async dispatch(event: "event", value: RuntimeExtensionEventMap["event"]) {
+          async dispatch(event: "event", value: RuntimePluginEventMap["event"]) {
             if (event === "event") observed.push(value);
           },
         };

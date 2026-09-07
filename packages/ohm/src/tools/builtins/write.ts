@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue } from "../../core/json.js";
+import type { JsonValue } from "../../core/json.js";
 import { dirname } from "node:path";
 import { Type, type Static } from "typebox";
 import { withFileMutation } from "../file-mutation-queue.js";
@@ -6,21 +6,14 @@ import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type S
 import { inputObject, stringInput } from "../input.js";
 import { atomicWritePath, displayToolPath, resolveToolPath } from "../paths.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import type { HarnessTool, ResourceClaim, ToolContext, ToolResult } from "../types.js";
-
-const schema = {
-  type: "object",
-  required: ["path", "content"],
-  properties: {
-    path: { type: "string", description: "Target file path. It can be absolute or relative to the workspace." },
-    content: { type: "string", description: "Complete text for the target file." },
-  },
-} satisfies JsonObject;
 
 const writeParameters = Type.Object({
   path: Type.String({ description: "Target file path. It can be absolute or relative to the workspace." }),
-  content: Type.String({ description: "Complete text for the target file." }),
+  content: Type.String({ description: "Complete replacement text, not a patch or text to append." }),
 });
+const schema = providerInputSchema(writeParameters);
 
 export type WriteToolInput = Static<typeof writeParameters>;
 export interface WriteOperations {
@@ -39,9 +32,9 @@ export class WriteTool implements HarnessTool {
 
   readonly definition = {
     name: "write",
-    description: "Store complete text in one file. The operation replaces an existing file or creates a new file and its parent directories.",
+    description: "Write the complete contents of one file, replacing all existing text. Creates the file and missing parent directories if needed; it does not append or apply a patch.",
     promptSnippet: "Store a complete file",
-    promptGuidelines: ["Use write for a new file or when all existing content must be replaced."],
+    promptGuidelines: ["Use write for a new file or an intentional whole-file replacement. Use edit for partial changes to an existing file."],
     inputSchema: schema,
   };
 

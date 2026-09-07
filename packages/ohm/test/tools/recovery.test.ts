@@ -3,7 +3,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import { DirectProcessRunner } from "../../src/process/index.js";
 
-import type { ToolDefinition } from "../../src/extensions/direct.js";
+import type { ToolDefinition } from "../../src/plugins/direct.js";
 import {
   createHarnessToolFromDefinition,
   createToolDefinitionFromAgentTool,
@@ -46,7 +46,7 @@ function customTool(
 }
 
 function noExtensionContext(): never {
-  throw new Error("Extension context is not used by this fixture");
+  throw new Error("Plugin context is not used by this fixture");
 }
 
 test("tool registries resolve omitted recovery conservatively and retain explicit contracts", async () => {

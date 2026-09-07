@@ -8,7 +8,7 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
 import type { JsonValue } from "../../src/core/json.js";
-import { DefaultPackageManager, getExtensionTempFolder } from "../../src/core/package-manager.js";
+import { DefaultPackageManager, getPluginTempFolder } from "../../src/core/package-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 
 const capturedChildOutput = new Promise<boolean>((resolve) => {
@@ -411,7 +411,7 @@ test("temporary extension storage is private on POSIX systems", async (context) 
     return;
   }
   const value = await fixture("permissions");
-  const temporaryRoot = getExtensionTempFolder(value.agentDir);
+  const temporaryRoot = getPluginTempFolder(value.agentDir);
   const mode = (await stat(temporaryRoot)).mode & 0o777;
 
   assert.equal(mode, 0o700);

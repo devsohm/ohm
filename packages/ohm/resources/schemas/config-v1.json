@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json",
+  "$id": "https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/packages/ohm/resources/schemas/config-v1.json",
   "title": "ohm configuration",
   "description": "Editor schema for ohm user and trusted-project config.json files. Null inherits from the lower-precedence scope or the runtime default.",
   "type": "object",
@@ -35,7 +35,8 @@
             "source": { "type": "string", "pattern": "\\S" },
             "autoload": { "type": "boolean" },
             "manifest": { "const": "legacy" },
-            "extensions": { "type": "array", "items": { "type": "string" } },
+            "entrypoints": { "type": "array", "items": { "type": "string" } },
+            "extensions": { "type": "array", "items": { "type": "string" }, "deprecated": true, "description": "Compatibility alias for entrypoints. Conflicting dual values are rejected at runtime." },
             "prompts": { "type": "array", "items": { "type": "string" } },
             "skills": { "type": "array", "items": { "type": "string" } },
             "themes": { "type": "array", "items": { "type": "string" } }
@@ -67,7 +68,7 @@
   },
   "properties": {
     "$schema": {
-      "const": "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json"
+      "const": "https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/packages/ohm/resources/schemas/config-v1.json"
     },
     "lastChangelogVersion": { "$ref": "#/$defs/nullableString" },
     "defaultProvider": { "$ref": "#/$defs/nullableString" },
@@ -202,9 +203,15 @@
     "shellCommandPrefix": { "$ref": "#/$defs/nullableString" },
     "npmCommand": { "$ref": "#/$defs/nullableStringArray" },
     "collapseChangelog": { "$ref": "#/$defs/nullableBoolean" },
-    "packages": {
+    "plugins": {
       "type": ["array", "null"],
       "items": { "$ref": "#/$defs/packageSource" }
+    },
+    "packages": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/packageSource" },
+      "deprecated": true,
+      "description": "Compatibility alias for plugins. Conflicting dual values are rejected at runtime. Settings writes persist only plugins."
     },
     "extensions": { "$ref": "#/$defs/nullableStringArray" },
     "skills": { "$ref": "#/$defs/nullableStringArray" },

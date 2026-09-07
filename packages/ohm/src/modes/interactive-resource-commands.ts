@@ -1,12 +1,12 @@
 import { optionalProperties } from "../core/optional-properties.js";
 import type { ImageBlock } from "../core/types.js";
-import { renderExtensionCommand, renderExtensionPrompt } from "../extensions/templates.js";
-import type { ExtensionPromptTemplate, ExtensionSlashCommand } from "../extensions/types.js";
+import { renderPluginCommand, renderPluginPrompt } from "../plugins/templates.js";
+import type { PluginPromptTemplate, PluginSlashCommand } from "../plugins/types.js";
 import type { AgentSession } from "../service/agent-session.js";
 
 export interface InteractiveResourceCatalog {
-  command(name: string): ExtensionSlashCommand | undefined;
-  prompt(name: string): ExtensionPromptTemplate | undefined;
+  command(name: string): PluginSlashCommand | undefined;
+  prompt(name: string): PluginPromptTemplate | undefined;
 }
 
 export interface InteractiveResourceSlash {
@@ -18,7 +18,7 @@ export interface InteractiveResourceSlash {
 }
 
 export interface InteractiveResourceSession {
-  extensionRunner: { getRuntimeHost(): { hasCommand(name: string): boolean } };
+  pluginRunner: { getRuntimeHost(): { hasCommand(name: string): boolean } };
   promptTemplates: readonly { name: string }[];
   settingsManager: { getEnableSkillCommands(): boolean };
   resourceLoader: { getSkills(): { skills: readonly { name: string }[] } };
@@ -40,14 +40,14 @@ export function resolveInteractiveResourceSlash(
 ): InteractiveResourceSlash | undefined {
   const parsed = parseResourceSlash(input);
   if (parsed === undefined) return undefined;
-  const runtime = session.extensionRunner.getRuntimeHost();
+  const runtime = session.pluginRunner.getRuntimeHost();
   if (runtime.hasCommand(parsed.name)) return { kind: "runtime", ...parsed, prompt: parsed.input };
   const staticCommand = catalog?.command(parsed.name);
   if (staticCommand !== undefined) {
     return {
       kind: "static-command",
       ...parsed,
-      prompt: renderExtensionCommand(staticCommand, parsed.args),
+      prompt: renderPluginCommand(staticCommand, parsed.args),
     };
   }
   const staticPrompt = catalog?.prompt(parsed.name);
@@ -55,7 +55,7 @@ export function resolveInteractiveResourceSlash(
     return {
       kind: "static-prompt",
       ...parsed,
-      prompt: renderExtensionPrompt(staticPrompt, parsed.args),
+      prompt: renderPluginPrompt(staticPrompt, parsed.args),
     };
   }
   if (session.promptTemplates.some((prompt) => prompt.name === parsed.name)) {

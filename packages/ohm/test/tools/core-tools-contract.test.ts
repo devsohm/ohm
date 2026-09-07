@@ -7,7 +7,7 @@ import test from "node:test";
 import type { CommandResult, CommandSpec, ProcessRunner } from "../../src/process/types.js";
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import { isJsonObject, type JsonValue } from "../../src/core/json.js";
-import { STRING_VALUE } from "../../src/core/value-schemas.js";
+import { NUMBER_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
 import { Check } from "typebox/value";
 import { DirectProcessRunner } from "../../src/process/index.js";
 import {
@@ -574,6 +574,31 @@ test("bash returns a metadata-complete error result for non-zero exits and ignor
   assert.equal(failure.metadata.exitCode, 7);
 });
 
+test("read pagination preserves empty lines, CRLF, Unicode and trailing newlines", async (t) => {
+  const workspace = await fixture();
+  t.after(async () => await workspace.close());
+  const cases = [
+    { text: "", offset: 1, limit: 1, content: "", totalLines: 1, totalBytes: 0 },
+    { text: "\n", offset: 1, limit: 1, content: "\n\n[1 lines remain. Continue at offset=2.]", totalLines: 2, totalBytes: 0, nextOffset: 2 },
+    { text: "\n", offset: 2, limit: 1, content: "", totalLines: 2, totalBytes: 0 },
+    { text: "é\r\n😀\r\n\nend\n", offset: 2, limit: 2, content: "😀\r\n\n\n[2 lines remain. Continue at offset=4.]", totalLines: 5, totalBytes: 6, nextOffset: 4 },
+    { text: "é\r\n😀\r\n\nend\n", offset: 3, limit: Number.MAX_SAFE_INTEGER, content: "\nend\n", totalLines: 5, totalBytes: 5 },
+    { text: "first\nlast", offset: 2, limit: 1, content: "last", totalLines: 2, totalBytes: 4 },
+  ];
+  for (const item of cases) {
+    const tool = new ReadTool({ operations: { async access() {}, async readFile() { return Buffer.from(item.text); } } });
+    const result = await tool.execute({ path: "page.txt", offset: item.offset, limit: item.limit }, workspace.context);
+    assert.equal(result.content, item.content);
+    assert.ok(isJsonObject(result.metadata));
+    assert.equal(result.metadata.totalLines, item.totalLines);
+    assert.equal(result.metadata.totalBytes, item.totalBytes);
+    assert.equal(result.metadata.nextOffset, item.nextOffset);
+    await assert.rejects(tool.execute({ path: "page.txt", offset: item.totalLines + 1 }, workspace.context), {
+      message: `Cannot start at line ${item.totalLines + 1}; this file contains ${item.totalLines} lines`,
+    });
+  }
+});
+
 test("read truncates at 2,000 complete lines and provides an exact offset", async (t) => {
   const workspace = await fixture();
   t.after(async () => await workspace.close());
@@ -588,6 +613,41 @@ test("read truncates at 2,000 complete lines and provides an exact offset", asyn
   const rest = await new ReadTool().execute({ path: "large.txt", offset: 2001 }, workspace.context);
   assert.match(rest.content, /^line-2001\n/u);
   assert.match(rest.content, /line-2500$/u);
+});
+
+test("read byte-limited pages resume without skipping partial UTF-8, CRLF or empty lines", async (t) => {
+  const workspace = await fixture();
+  t.after(async () => await workspace.close());
+  const cases = [
+    { text: `a\n${"b".repeat(51_200)}\ntail`, first: "a", shownLines: 1 },
+    { text: `é\r\n${"😀".repeat(12_799)}é\r\ntail`, first: "é\r", shownLines: 1 },
+    { text: `\n${"b".repeat(51_200)}\ntail`, first: "", shownLines: 1 },
+    { text: `${"a".repeat(51_199)}\ntail`, first: "a".repeat(51_199), shownLines: 1 },
+    { text: `${"a".repeat(51_200)}\ntail`, first: "a".repeat(51_200), shownLines: 1 },
+    { text: `${"a".repeat(51_199)}\n\ntail`, first: `${"a".repeat(51_199)}\n`, shownLines: 2 },
+  ];
+  for (const item of cases) {
+    const tool = new ReadTool({ operations: { async access() {}, async readFile() { return Buffer.from(`skip\n${item.text}`); } } });
+    const first = await tool.execute({ path: "bytes.txt", offset: 2 }, workspace.context);
+    assert.ok(isJsonObject(first.metadata) && isJsonObject(first.metadata.truncation));
+    assert.equal(first.metadata.truncation.content, item.first);
+    assert.equal(first.metadata.shownLines, item.shownLines);
+    assert.equal(first.metadata.truncation.outputLines, item.shownLines);
+    assert.equal(first.metadata.truncation.outputBytes, Buffer.byteLength(item.first));
+    assert.equal(first.metadata.totalBytes, Buffer.byteLength(item.text));
+    assert.equal(first.metadata.nextOffset, 2 + item.shownLines);
+    const pages = [item.first];
+    let offset = 2 + item.shownLines;
+    for (;;) {
+      const page = await tool.execute({ path: "bytes.txt", offset }, workspace.context);
+      assert.ok(isJsonObject(page.metadata));
+      pages.push(isJsonObject(page.metadata.truncation) ? String(page.metadata.truncation.content) : page.content);
+      if (page.metadata.nextOffset === undefined) break;
+      assert.ok(Check(NUMBER_VALUE, page.metadata.nextOffset) && page.metadata.nextOffset > offset);
+      offset = page.metadata.nextOffset;
+    }
+    assert.equal(pages.join("\n"), item.text);
+  }
 });
 
 test("read never returns a partial ordinary line or executable advice for one oversized line", async (t) => {
@@ -703,17 +763,17 @@ test("edit and write serialize aliases of the same physical file", async (t) => 
   assert.equal(await readFile(path, "utf8"), "ALPHA\nBETA\n");
 });
 
-test("an aborted write retains its mutation lane until the underlying write settles", async (t) => {
-  const workspace = await fixture();
-  t.after(async () => await workspace.close());
-  const path = join(workspace.root, "ordered-write.txt");
-  const started = deferred();
-  const release = deferred();
-  let writes = 0;
-  const tool = new WriteTool({
-    operations: {
-      async mkdir() {},
-      async writeFile(target, content) {
+for (const kind of ["write", "edit"] as const) {
+  test(`an aborted ${kind} retains its mutation lane until the underlying write settles`, async (t) => {
+    const workspace = await fixture();
+    t.after(async () => await workspace.close());
+    const path = join(workspace.root, `ordered-${kind}.txt`);
+    if (kind === "edit") await writeFile(path, "alpha\nbeta\n", "utf8");
+    const started = deferred();
+    const release = deferred();
+    let writes = 0;
+    const operations = {
+      async writeFile(target: string, content: string) {
         writes += 1;
         if (writes === 1) {
           started.resolve();
@@ -721,63 +781,34 @@ test("an aborted write retains its mutation lane until the underlying write sett
         }
         await writeFile(target, content, "utf8");
       },
-    },
+    };
+    const tool = kind === "write"
+      ? new WriteTool({ operations: { ...operations, async mkdir() {} } })
+      : new EditTool({
+        operations: {
+          ...operations,
+          async access() {},
+          async readFile(target) { return await readFile(target); },
+        },
+      });
+    const controller = new AbortController();
+    const first = tool.execute(kind === "write"
+      ? { path, content: "first" }
+      : { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { ...workspace.context, signal: controller.signal });
+    await started.promise;
+    controller.abort();
+    const second = tool.execute(kind === "write"
+      ? { path, content: "second" }
+      : { path, edits: [{ oldText: "beta", newText: "BETA" }] }, workspace.context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(writes, 1);
+
+    release.resolve();
+    await Promise.all([first, second]);
+    assert.equal(writes, 2);
+    assert.equal(await readFile(path, "utf8"), kind === "write" ? "second" : "ALPHA\nBETA\n");
   });
-  const controller = new AbortController();
-  const first = tool.execute({ path, content: "first" }, { ...workspace.context, signal: controller.signal });
-  await started.promise;
-  controller.abort();
-  const second = tool.execute({ path, content: "second" }, workspace.context);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(writes, 1);
-
-  release.resolve();
-  await Promise.all([first, second]);
-  assert.equal(writes, 2);
-  assert.equal(await readFile(path, "utf8"), "second");
-});
-
-test("an aborted edit retains its mutation lane until the underlying write settles", async (t) => {
-  const workspace = await fixture();
-  t.after(async () => await workspace.close());
-  const path = join(workspace.root, "ordered-edit.txt");
-  await writeFile(path, "alpha\nbeta\n", "utf8");
-  const started = deferred();
-  const release = deferred();
-  let writes = 0;
-  const tool = new EditTool({
-    operations: {
-      async access() {},
-      async readFile(target) { return await readFile(target); },
-      async writeFile(target, content) {
-        writes += 1;
-        if (writes === 1) {
-          started.resolve();
-          await release.promise;
-        }
-        await writeFile(target, content, "utf8");
-      },
-    },
-  });
-  const controller = new AbortController();
-  const first = tool.execute({
-    path,
-    edits: [{ oldText: "alpha", newText: "ALPHA" }],
-  }, { ...workspace.context, signal: controller.signal });
-  await started.promise;
-  controller.abort();
-  const second = tool.execute({
-    path,
-    edits: [{ oldText: "beta", newText: "BETA" }],
-  }, workspace.context);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(writes, 1);
-
-  release.resolve();
-  await Promise.all([first, second]);
-  assert.equal(writes, 2);
-  assert.equal(await readFile(path, "utf8"), "ALPHA\nBETA\n");
-});
+}
 
 test("direct bash inherits ordinary environment variables", async (t) => {
   const workspace = await fixture();

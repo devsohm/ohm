@@ -104,8 +104,8 @@ async function withEnvironment<T>(value: MeasurementFixture, operation: () => Pr
 function runtimeOptions(workspace: string) {
   return {
     workspace,
-    extensions: true,
-    extensionRuntime: true,
+    pluginCode: true,
+    pluginRuntime: true,
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -142,8 +142,8 @@ async function startupSample(extensionCount: number): Promise<number> {
       const started = performance.now();
       runtime = await loadRuntime(runtimeOptions(value.workspace));
       const elapsed = performance.now() - started;
-      if (runtime.runtimeExtensions.commands().length !== extensionCount) {
-        throw new Error(`Startup fixture activated ${runtime.runtimeExtensions.commands().length} of ${extensionCount} commands`);
+      if (runtime.runtimePlugins.commands().length !== extensionCount) {
+        throw new Error(`Startup fixture activated ${runtime.runtimePlugins.commands().length} of ${extensionCount} commands`);
       }
       return elapsed;
     });
@@ -190,8 +190,8 @@ async function refreshSample(): Promise<number> {
       await runtime.refresh();
       const elapsed = performance.now() - started;
       const expected = LARGE_PACKAGE_ENTRY_COUNT * COMMANDS_PER_LARGE_ENTRY;
-      if (runtime.runtimeExtensions.commands().length !== expected) {
-        throw new Error(`Refresh fixture activated ${runtime.runtimeExtensions.commands().length} of ${expected} commands`);
+      if (runtime.runtimePlugins.commands().length !== expected) {
+        throw new Error(`Refresh fixture activated ${runtime.runtimePlugins.commands().length} of ${expected} commands`);
       }
       return elapsed;
     });

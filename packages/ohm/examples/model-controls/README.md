@@ -3,7 +3,7 @@
 This example reads and changes host-owned model state.
 
 ```text
-ohm install ./packages/ohm/examples/model-controls
+ohm plugins install ./packages/ohm/examples/model-controls
 ```
 
 `/example-model` reports the active provider, model, number of models in the

@@ -1,18 +1,18 @@
-# MCP stdio tools extension
+# MCP stdio tools plugin
 
 This example package adapts one MCP stdio server into model-callable ohm
-tools. The extension owns discovery, registration, the bounded stdio protocol
+tools. The plugin owns discovery, registration, the bounded stdio protocol
 adapter, and the managed-process lifecycle. It uses only ordinary
 `registerTool` handles plus `ohm.processes`; it never imports
 `node:child_process` or opens a shell. Installing or removing this package adds
 or removes all MCP behavior.
 
 ```text
-ohm install ./packages/ohm/examples/mcp-stdio
+ohm plugins install ./packages/ohm/examples/mcp-stdio
 ```
 
 The bundled configuration starts a deterministic fixture server. Copy the
-package, then edit [`extensions/server.mjs`](./extensions/server.mjs) before
+package, then edit [`src/server.mjs`](./src/server.mjs) before
 installing it to point `argv` at a real server. Keep untrusted arguments as
 separate argv entries. The fixture sets `env` to an empty record, and the
 adapter always starts the server with `inheritEnv: false`. Add only the explicit
@@ -47,7 +47,7 @@ When the server declares `tools.listChanged`, the adapter coalesces
 same-owner registration path for each selected tool. The active provider step
 retains its immutable tool registry and a later step observes the replacements.
 Refresh and host close dispose the generation's tool handles and managed
-process tree automatically. Tool changes are intentionally extension-owned and
+process tree automatically. Tool changes are intentionally plugin-owned and
 are not presented as a host-level server catalog transaction.
 
 Run the package-local protocol and lifecycle checks with:

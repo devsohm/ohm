@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import type { JsonValue } from "../../src/core/json.js";
+import { OHM_VERSION } from "../../src/version.js";
 
 import {
   ANTHROPIC_OAUTH_CALLBACK_PORT,
@@ -195,9 +196,9 @@ test("GitHub Copilot login requires its own client ID and explicit experimental 
     "https://api.github.com/copilot_internal/v2/token",
   ]);
   const serviceRequest = requests[2];
-  assert.equal(serviceRequest?.headers.get("user-agent"), "ohm/0.1.1");
-  assert.equal(serviceRequest?.headers.get("editor-version"), "ohm/0.1.1");
-  assert.equal(serviceRequest?.headers.get("editor-plugin-version"), "ohm/0.1.1");
+  assert.equal(serviceRequest?.headers.get("user-agent"), `ohm/${OHM_VERSION}`);
+  assert.equal(serviceRequest?.headers.get("editor-version"), `ohm/${OHM_VERSION}`);
+  assert.equal(serviceRequest?.headers.get("editor-plugin-version"), `ohm/${OHM_VERSION}`);
   assert.equal(serviceRequest?.headers.get("copilot-integration-id"), "ohm");
   assert.equal(credential.provider, "github-copilot");
   assert.equal(credential.clientId, GITHUB_CLIENT_ID);

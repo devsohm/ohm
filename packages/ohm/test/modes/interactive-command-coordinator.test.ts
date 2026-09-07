@@ -14,6 +14,8 @@ function commandHandlers<TImage>(
 ): InteractiveCommandHandlers<TImage> {
   return {
     atlas: handler,
+    actions: handler,
+    inspect: handler,
     cancel: handler,
     changelog: handler,
     clone: handler,

@@ -17,7 +17,7 @@ function resourceRows(label: string, values: readonly string[], maximum = 12): s
 /** Render the resource provenance reported by the interactive `/resources` command. */
 export function renderInteractiveResourceReport(session: AgentSession, cwd: string): string {
   const loader = session.resourceLoader;
-  const commands = session.extensionRunner.getRegisteredCommands();
+  const commands = session.pluginRunner.getRegisteredCommands();
   const prompts = loader.getPrompts();
   const skills = loader.getSkills();
   const themes = loader.getThemes();
@@ -28,11 +28,11 @@ export function renderInteractiveResourceReport(session: AgentSession, cwd: stri
     ...prompts.diagnostics,
     ...skills.diagnostics,
     ...themes.diagnostics,
-    ...session.extensionRunner.getCommandDiagnostics(),
+    ...session.pluginRunner.getCommandDiagnostics(),
   ];
   return [
     "Loaded resources",
-    ...resourceRows("Extensions", session.extensionRunner.getExtensionPaths().map((path) => resourcePath(path, cwd))),
+    ...resourceRows("Plugin entrypoints", session.pluginRunner.getPluginPaths().map((path) => resourcePath(path, cwd))),
     ...resourceRows("Commands", commands.map((command) =>
       `/${command.invocationName} ← ${source(command.sourceInfo)}`)),
     ...resourceRows("Prompts", prompts.prompts.map((prompt) =>

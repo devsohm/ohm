@@ -1,4 +1,5 @@
 import {
+  PLUGIN_AUTHOR_COMMANDS,
   MANAGEMENT_CLI_COMMANDS,
   MANAGEMENT_CLI_OPTIONS,
   type CliOptionMetadata,
@@ -44,7 +45,8 @@ export function findLeadingManagementCommand(argv: readonly string[]): string | 
     const argument = argv[index] ?? "";
     if (argument === "--") return undefined;
     if (!argument.startsWith("-") || argument === "-") {
-      return COMMANDS.has(argument) ? argument : undefined;
+      if (!COMMANDS.has(argument)) return undefined;
+      return argument;
     }
     const equals = argument.startsWith("--") ? argument.indexOf("=") : -1;
     const token = equals < 0 ? argument : argument.slice(0, equals);
@@ -64,7 +66,7 @@ export function parseManagementArguments(argv: string[]): ManagementArguments {
   const positionals: string[] = [];
   const setFlag = (name: string, value: string | boolean): void => {
     if (!KNOWN_FLAGS.has(name)) throw new Error(`Unknown flag --${name}`);
-    if (name === "extension" && Value.Check(STRING_VALUE, value)) {
+    if (name === "plugin" && Value.Check(STRING_VALUE, value)) {
       const existing = flags.get(name);
       if (existing === undefined) flags.set(name, [value]);
       else if (Array.isArray(existing)) existing.push(value);
@@ -87,9 +89,11 @@ export function parseManagementArguments(argv: string[]): ManagementArguments {
     }
     if (argument.startsWith("--")) {
       const equals = argument.indexOf("=");
-      const name = argument.slice(2, equals < 0 ? undefined : equals);
-      if (name === "") throw new Error("Empty flag name");
-      if (!KNOWN_FLAGS.has(name)) throw new Error(`Unknown flag --${name}`);
+      const token = equals < 0 ? argument : argument.slice(0, equals);
+      if (token === "--") throw new Error("Empty flag name");
+      const option = OPTIONS_BY_TOKEN.get(token);
+      if (option === undefined) throw new Error(`Unknown flag ${token}`);
+      const name = option.name;
       if (equals >= 0) {
         const value = argument.slice(equals + 1);
         setFlag(name, value);
@@ -97,7 +101,7 @@ export function parseManagementArguments(argv: string[]): ManagementArguments {
       else if (BOOLEAN_FLAGS.has(name)) setFlag(name, true);
       else {
         const value = argv[index + 1];
-        if (value === undefined || value.startsWith("-")) throw new Error(`--${name} requires a value`);
+        if (value === undefined || value.startsWith("-")) throw new Error(`${token} requires a value`);
         setFlag(name, value);
         index += 1;
       }
@@ -125,7 +129,16 @@ export function parseManagementArguments(argv: string[]): ManagementArguments {
         if (KNOWN_FLAGS.has(name) && !allowed.has(name)) throw new Error(`--${name} is not valid for ${first}`);
       }
     }
-    return { command: first, positionals: positionals.slice(1), flags, source: [...argv] };
+    const args = positionals.slice(1);
+    if (first === "plugins") {
+      const action = args[0] ?? "list";
+      const authorActions: readonly string[] = PLUGIN_AUTHOR_COMMANDS;
+      const selected = authorActions.includes(action) ? ["author", ...args]
+        : action === "list" ? ["packages", ...args.slice(1)]
+          : action === "resources" ? ["list", ...args.slice(1)] : args;
+      return { command: "plugins", positionals: selected, flags, source: [...argv] };
+    }
+    return { command: first, positionals: args, flags, source: [...argv] };
   }
   return {
     command: process.stdin.isTTY && !flags.has("print") && !flags.has("json") ? "chat" : "run",

@@ -7,7 +7,7 @@ import test from "node:test";
 import type { EventEnvelope } from "../../src/core/events.js";
 import { isJsonObject } from "../../src/core/json.js";
 import { NUMBER_VALUE } from "../../src/core/value-schemas.js";
-import { loadDirectExtensions, type RuntimeExtensionEventMap } from "../../src/extensions/runtime.js";
+import { loadDirectPlugins, type RuntimePluginEventMap } from "../../src/plugins/runtime.js";
 import {
   beginInteractiveShellPresentation,
   type InteractiveShellHost,
@@ -159,9 +159,9 @@ test("handled user_bash metadata reaches the durable bash message boundary", asy
   const workspace = await mkdtemp(join(tmpdir(), "ohm-interactive-shell-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
   const fullOutputPath = join(workspace, "full-output.log");
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "synthetic-shell",
       factory(ohm) {
         ohm.on("user_bash", () => ({
@@ -219,7 +219,7 @@ test("handled user_bash metadata reaches the durable bash message boundary", asy
 test("handled shell signals and timeouts stay aligned through persistence and the user_shell event", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-interactive-shell-terminal-state-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const observed: Array<RuntimeExtensionEventMap["event"]> = [];
+  const observed: Array<RuntimePluginEventMap["event"]> = [];
   const host: InteractiveShellHost = {
     async reduceBeforeUserShell({ command }: { command: string }) {
       return command === "signal"

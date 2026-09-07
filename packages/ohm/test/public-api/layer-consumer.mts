@@ -2,7 +2,7 @@ import { SecretRedactor, type AuthCredential } from "ohm/auth";
 import { SettingsManager, type Settings } from "ohm/config";
 import { deriveContextBudget, estimateToolDefinitionTokens, type ContextBudget } from "ohm/context";
 import { HarnessError, type RuntimeEvent } from "ohm/core";
-import { defineTool, type ExtensionFactory } from "ohm/extensions";
+import { defineTool, type PluginFactory } from "ohm/plugins";
 import { createImagesModels, type ImagesModels } from "ohm/images";
 import {
   RpcClient,
@@ -27,7 +27,7 @@ import {
 } from "ohm/serve";
 import {
   SessionManager,
-  type ExtensionSessionProvenance,
+  type PluginSessionProvenance,
   type ReadonlySessionManager,
   type SessionBranchQuery,
   type SessionEntry,
@@ -104,7 +104,7 @@ export interface LayerConsumerContracts {
   auth: AuthCredential;
   config: Settings;
   context: ContextBudget;
-  extension: ExtensionFactory;
+  extension: PluginFactory;
   images: ImagesModels;
   command: RpcCommand;
   response: RpcResponse;
@@ -123,7 +123,7 @@ export interface LayerConsumerContracts {
     options: StartServeServerOptions;
   };
   entry: SessionEntry;
-  extensionSessionProvenance: ExtensionSessionProvenance;
+  extensionSessionProvenance: PluginSessionProvenance;
   branchQuery: SessionBranchQuery;
   tool: HarnessTool;
   tui: Theme & { view?: RuntimeUiView };

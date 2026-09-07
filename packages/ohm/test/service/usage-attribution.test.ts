@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Type } from "typebox";
-import { Value } from "typebox/value";
 
 import { SettingsManager } from "../../src/core/settings-manager.js";
+import { isJsonObject } from "../../src/core/json.js";
 import type {
   AdapterEvent,
   ModelInfo,
@@ -14,8 +13,8 @@ import type {
   ProviderAdapter,
   ProviderRequest,
 } from "../../src/core/types.js";
-import { loadDirectExtensions } from "../../src/extensions/runtime.js";
-import { extensionUsage } from "../../src/extensions/session-contract.js";
+import { loadDirectPlugins } from "../../src/plugins/runtime.js";
+import { extensionUsage } from "../../src/plugins/session-contract.js";
 import type { Usage } from "@ohm/kernel";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { AgentSession } from "../../src/service/agent-session.js";
@@ -23,16 +22,6 @@ import { SessionManager } from "../../src/storage/session-manager.js";
 
 const observedAt = "2026-07-20T00:00:00.000Z";
 const supported = { value: "supported", source: "provider", observedAt } as const;
-const PERSISTED_COMMIT_VALUE = Type.Object({
-  changes: Type.Optional(Type.Array(Type.Object({
-    type: Type.Optional(Type.String()),
-    node: Type.Optional(Type.Object({
-      nodeType: Type.Optional(Type.String()),
-      summary: Type.Optional(Type.Object({ usage: Type.Optional(Type.Unknown()) }, { additionalProperties: true })),
-      context: Type.Optional(Type.Object({ usage: Type.Optional(Type.Unknown()) }, { additionalProperties: true })),
-    }, { additionalProperties: true })),
-  }, { additionalProperties: true }))),
-}, { additionalProperties: true });
 
 function usage(
   inputTokens: number,
@@ -138,18 +127,16 @@ test("generated branch summaries persist their own usage on the reachable summar
 
   const file = manager.getSessionFile();
   assert.ok(file);
-  const persisted = (await readFile(file, "utf8")).trim().split("\n").slice(1)
-    .map((line) => {
-      const value: unknown = JSON.parse(line);
-      if (!Value.Check(PERSISTED_COMMIT_VALUE, value)) throw new Error("Persisted commit fixture is invalid");
-      return value;
-    });
-  const summary = persisted
-    .flatMap((commit) => commit.changes ?? [])
-    .find((change) =>
-      change.type === "conversation_node"
-      && (change.node?.nodeType === "branch_summary" || change.node?.nodeType === "extension_context"));
-  assert.deepEqual(summary?.node?.summary?.usage ?? summary?.node?.context?.usage, generatedUsage);
+  const snapshot = SessionManager.open(file, undefined, undefined, { readOnly: true });
+  const node = [...snapshot.getV4State().commits.values()]
+    .flatMap((commit) => commit.changes)
+    .filter((change) => change.type === "conversation_node")
+    .map((change) => change.node)
+    .find((entry) => entry.nodeType === "branch_summary" || entry.nodeType === "extension_context");
+  assert.ok(node);
+  const summary = node.nodeType === "branch_summary" ? node.summary : node.context;
+  assert.ok(isJsonObject(summary));
+  assert.deepEqual(summary.usage, generatedUsage);
 });
 
 test("tool-result extensions observe, replace, persist, and count tool usage once", async (context) => {
@@ -159,10 +146,10 @@ test("tool-result extensions observe, replace, persist, and count tool usage onc
   const original = usage(1, 2, 3, 4, 0.1);
   const patched = usage(5, 6, 7, 8, 0.9);
   let observed: Usage | undefined;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "usage-extension",
       factory(api) {
         api.registerTool({
@@ -187,7 +174,7 @@ test("tool-result extensions observe, replace, persist, and count tool usage onc
     sessionManager: manager,
     providers: new ProviderRegistry([provider]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: host.tools(),
   });
   context.after(async () => await session.close());

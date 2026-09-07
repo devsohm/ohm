@@ -13,16 +13,16 @@ import type { ResourceLoader } from "../../src/core/resource-loader.js";
 import type { AdapterEvent, ProviderAdapter, ProviderRequest } from "../../src/core/types.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import {
-  createExtensionRuntime,
-  ensureExtensionRuntimeHost,
-  projectLoadedExtensionHost,
-} from "../../src/extensions/compat.js";
+  createPluginRuntime,
+  ensurePluginRuntimeHost,
+  projectLoadedPluginHost,
+} from "../../src/plugins/compat.js";
 import {
-  loadDirectExtensions,
-  type RuntimeExtensionEvent,
-  type RuntimeExtensionEventMap,
-  type RuntimeExtensionHost,
-} from "../../src/extensions/runtime.js";
+  loadDirectPlugins,
+  type RuntimePluginEvent,
+  type RuntimePluginEventMap,
+  type RuntimePluginHost,
+} from "../../src/plugins/runtime.js";
 import { InteractiveMode } from "../../src/modes/interactive-mode.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
 import {
@@ -90,7 +90,7 @@ function constructionRuntime(settings: SettingsManager): AgentSessionRuntime {
 }
 
 function instrumentUiSetter<Handler>(
-  host: RuntimeExtensionHost,
+  host: RuntimePluginHost,
   name: string,
   setter: (handler: Handler | undefined) => void,
   observe: (handler: Handler | undefined) => void,
@@ -201,8 +201,8 @@ test("interactive mode keeps acknowledged actions and picker ingress on its term
 
 test("streaming TUI context updates do not rescan the session graph", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "ohm-interactive-context-stream-"));
-  const extensionRuntime = createExtensionRuntime();
-  const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+  const pluginRuntime = createPluginRuntime();
+  const pluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
   const loader: ResourceLoader = {
     async refresh() {},
     extendResources() {},
@@ -212,7 +212,7 @@ test("streaming TUI context updates do not rescan the session graph", async () =
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
-    getExtensions: () => extensionsResult,
+    getPlugins: () => pluginsResult,
   };
   const models = new ModelRegistry(createModels());
   await models.refresh({ allowNetwork: false });
@@ -222,7 +222,7 @@ test("streaming TUI context updates do not rescan the session graph", async () =
     providers: new ProviderRegistry(),
     modelRegistry: models,
     resourceLoader: loader,
-    extensionsResult,
+    pluginsResult,
     workspace: cwd,
     agentDirectory: join(cwd, ".agent"),
     settingsManager: SettingsManager.inMemory(),
@@ -290,6 +290,9 @@ test("streaming TUI context updates do not rescan the session graph", async () =
   output.isTTY = false;
   const terminal = new TuiController({ input, output, mode: "accessible", handleSignals: false });
   const contexts: TuiContext[] = [];
+  const histories: Array<Parameters<TuiController["setTranscriptHistory"]>[0]> = [];
+  const setTranscriptHistory = terminal.setTranscriptHistory.bind(terminal);
+  terminal.setTranscriptHistory = (history) => { histories.push(history); setTranscriptHistory(history); };
   const setContext = terminal.setContext.bind(terminal);
   terminal.setContext = (value) => {
     contexts.push(value);
@@ -299,6 +302,7 @@ test("streaming TUI context updates do not rescan the session graph", async () =
 
   try {
     await mode.init();
+    assert.ok(histories.at(-1), "the ready-made SDK host did not bind durable history");
     statsReads = 0;
     contextReads = 0;
     for (let sequence = 1; sequence <= 128; sequence += 1) {
@@ -330,8 +334,10 @@ test("streaming TUI context updates do not rescan the session graph", async () =
     await waitFor(() => contextReads === 1, "a durable session append did not refresh context usage");
     assert.equal(statsReads, 0);
     assert.equal(contexts.at(-1)?.contextTokens, 321);
+    assert.equal((await histories.at(-1)!.search("done", {}, new AbortController().signal)).matches.length, 1);
   } finally {
     mode.stop();
+    assert.equal(histories.at(-1), undefined, "the ready-made SDK host retained history after stop");
     await runtime.dispose();
     await rm(cwd, { recursive: true, force: true });
   }
@@ -346,8 +352,8 @@ test("interactive startup does not retain a stale session subscription after ado
     providerId: string,
     modelId: string,
   ): Promise<AgentSession> => {
-    const extensionRuntime = createExtensionRuntime();
-    const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+    const pluginRuntime = createPluginRuntime();
+    const pluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
     const loader: ResourceLoader = {
       async refresh() {},
       extendResources() {},
@@ -357,7 +363,7 @@ test("interactive startup does not retain a stale session subscription after ado
       getThemes: () => ({ themes: [], diagnostics: [] }),
       getPrompts: () => ({ prompts: [], diagnostics: [] }),
       getSkills: () => ({ skills: [], diagnostics: [] }),
-      getExtensions: () => extensionsResult,
+      getPlugins: () => pluginsResult,
     };
     const directModels = createModels();
     directModels.setProvider(createProvider({
@@ -389,7 +395,7 @@ test("interactive startup does not retain a stale session subscription after ado
       providers: new ProviderRegistry(),
       modelRegistry: models,
       resourceLoader: loader,
-      extensionsResult,
+      pluginsResult,
       workspace: cwd,
       agentDirectory: agentDir,
       settingsManager: SettingsManager.inMemory({ keybindings: { "app.model.select": keybinding } }),
@@ -424,15 +430,15 @@ test("interactive startup does not retain a stale session subscription after ado
   let signalInitialBind!: () => void;
   const initialBindStarted = new Promise<void>((resolve) => { signalInitialBind = resolve; });
   const initialBindRelease = new Promise<void>((resolve) => { releaseInitialBind = resolve; });
-  const bindExtensions = initial.bindExtensions.bind(initial);
+  const bindPlugins = initial.bindPlugins.bind(initial);
   let observedInitialBindSignal: AbortSignal | undefined;
-  Object.defineProperty(initial, "bindExtensions", {
+  Object.defineProperty(initial, "bindPlugins", {
     configurable: true,
-    value: async (...args: Parameters<AgentSession["bindExtensions"]>) => {
+    value: async (...args: Parameters<AgentSession["bindPlugins"]>) => {
       observedInitialBindSignal = args[1];
       signalInitialBind();
       await initialBindRelease;
-      await bindExtensions(...args);
+      await bindPlugins(...args);
     },
   });
 
@@ -459,13 +465,13 @@ test("interactive startup does not retain a stale session subscription after ado
     pickerModels.push(items.map((item) => item.id));
     setModelPickerItems(items);
   };
-  const replacementHost = replacement.extensionRunner.getRuntimeHost();
-  let uiHandler: Parameters<RuntimeExtensionHost["setUiHandler"]>[0];
-  let advancedUiHandler: Parameters<RuntimeExtensionHost["setAdvancedUiHandler"]>[0];
-  let nativeUiHandler: Parameters<RuntimeExtensionHost["setNativeUiHandler"]>[0];
-  let unsafeTerminalHandler: Parameters<RuntimeExtensionHost["setUnsafeTerminalHandler"]>[0];
-  let interactiveUiHandler: Parameters<RuntimeExtensionHost["setInteractiveUiHandler"]>[0];
-  let directUiHandler: Parameters<RuntimeExtensionHost["setDirectUiHandler"]>[0];
+  const replacementHost = replacement.pluginRunner.getRuntimeHost();
+  let uiHandler: Parameters<RuntimePluginHost["setUiHandler"]>[0];
+  let advancedUiHandler: Parameters<RuntimePluginHost["setAdvancedUiHandler"]>[0];
+  let nativeUiHandler: Parameters<RuntimePluginHost["setNativeUiHandler"]>[0];
+  let unsafeTerminalHandler: Parameters<RuntimePluginHost["setUnsafeTerminalHandler"]>[0];
+  let interactiveUiHandler: Parameters<RuntimePluginHost["setInteractiveUiHandler"]>[0];
+  let directUiHandler: Parameters<RuntimePluginHost["setDirectUiHandler"]>[0];
   instrumentUiSetter(
     replacementHost,
     "setUiHandler",
@@ -551,7 +557,7 @@ test("interactive startup does not retain a stale session subscription after ado
 
     const directUiBeforeStop = directUiHandler;
     mode.stop();
-    assert.equal(replacement.extensionRunner.hasUI(), false);
+    assert.equal(replacement.pluginRunner.hasUI(), false);
     assert.equal(uiHandler, undefined);
     assert.equal(advancedUiHandler, undefined);
     assert.equal(nativeUiHandler, undefined);
@@ -571,19 +577,19 @@ test("interactive startup does not retain a stale session subscription after ado
 test("interactive mode retries initialization, binds extensions, accepts native input, and stops cleanly", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "ohm-interactive-mode-"));
   try {
-    const extensionRuntime = createExtensionRuntime();
-    const extensionHost = ensureExtensionRuntimeHost(extensionRuntime, cwd);
-    const themeChanges: Array<RuntimeExtensionEventMap[RuntimeExtensionEvent]> = [];
-    Object.defineProperty(extensionHost, "dispatch", {
+    const pluginRuntime = createPluginRuntime();
+    const pluginHost = ensurePluginRuntimeHost(pluginRuntime, cwd);
+    const themeChanges: Array<RuntimePluginEventMap[RuntimePluginEvent]> = [];
+    Object.defineProperty(pluginHost, "dispatch", {
       configurable: true,
-      value: async <Event extends RuntimeExtensionEvent>(
+      value: async <Event extends RuntimePluginEvent>(
         event: Event,
-        value: RuntimeExtensionEventMap[Event],
+        value: RuntimePluginEventMap[Event],
       ) => {
         if (event === "theme_change") themeChanges.push(value);
       },
     });
-    const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+    const pluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
     const skillPath = join(cwd, "skills", "review", "SKILL.md");
     const triageSkillPath = join(cwd, "skills", "triage", "SKILL.md");
     const promptPath = join(cwd, "prompts", "review.md");
@@ -600,7 +606,7 @@ test("interactive mode retries initialization, binds extensions, accepts native 
       },
     };
     const loader: ResourceLoader = {
-      getExtensions: () => extensionsResult,
+      getPlugins: () => pluginsResult,
       getSkills: () => ({
         skills: [
           {
@@ -666,7 +672,7 @@ test("interactive mode retries initialization, binds extensions, accepts native 
       providers: new ProviderRegistry(),
       modelRegistry: models,
       resourceLoader: loader,
-      extensionsResult,
+      pluginsResult,
       workspace: cwd,
       agentDirectory: join(cwd, ".agent"),
       settingsManager: settings,
@@ -674,16 +680,16 @@ test("interactive mode retries initialization, binds extensions, accepts native 
     });
     let bindAttempts = 0;
     let failNextBind = true;
-    const bindExtensions = session.bindExtensions.bind(session);
-    Object.defineProperty(session, "bindExtensions", {
+    const bindPlugins = session.bindPlugins.bind(session);
+    Object.defineProperty(session, "bindPlugins", {
       configurable: true,
-      value: async (...args: Parameters<AgentSession["bindExtensions"]>) => {
+      value: async (...args: Parameters<AgentSession["bindPlugins"]>) => {
         bindAttempts += 1;
         if (failNextBind) {
           failNextBind = false;
           throw new Error("temporary extension bind failure");
         }
-        await bindExtensions(...args);
+        await bindPlugins(...args);
       },
     });
     const runtime = new AgentSessionRuntime(
@@ -741,7 +747,7 @@ test("interactive mode retries initialization, binds extensions, accepts native 
     assert.equal(bindAttempts, 2);
     const extensionErrorSecret = "sk-proj-interactive-mode-redaction-1234567890";
     defaultSecretRedactor.register(extensionErrorSecret);
-    session.extensionRunner.emitError({
+    session.pluginRunner.emitError({
       extensionPath: `/extensions/before-${extensionErrorSecret}-after.mjs`,
       event: "input",
       error: `extension-before-${extensionErrorSecret}-after`,
@@ -996,7 +1002,7 @@ test("interactive mode retries initialization, binds extensions, accepts native 
     await waitFor(() => modelRefreshFinished, "background local model refresh did not settle");
     Object.defineProperty(models, "refresh", { configurable: true, value: originalModelRefresh });
 
-    const host = session.extensionRunner.getRuntimeHost();
+    const host = session.pluginRunner.getRuntimeHost();
     const originalRunShortcut = host.runShortcut.bind(host);
     let shortcutStarts = 0;
     let shortcutAborts = 0;
@@ -1306,10 +1312,10 @@ test("public interactive mode executes idle and active extension resources and q
   const handlerArgs: string[] = [];
   const idleHandlerArgs: string[] = [];
   const preflightInputs: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "public-active-resource",
       factory(api) {
         api.registerCommand("idle-resource", {
@@ -1330,7 +1336,7 @@ test("public interactive mode executes idle and active extension resources and q
       },
     }],
   });
-  const extensionsResult = projectLoadedExtensionHost(host);
+  const pluginsResult = projectLoadedPluginHost(host);
   const loader: ResourceLoader = {
     async refresh() {},
     extendResources() {},
@@ -1340,7 +1346,7 @@ test("public interactive mode executes idle and active extension resources and q
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
-    getExtensions: () => extensionsResult,
+    getPlugins: () => pluginsResult,
   };
   const model: ProviderModel = {
     id: "active-model",
@@ -1396,7 +1402,7 @@ test("public interactive mode executes idle and active extension resources and q
     providers: new ProviderRegistry([provider]),
     modelRegistry: models,
     resourceLoader: loader,
-    extensionsResult,
+    pluginsResult,
     workspace: cwd,
     agentDirectory: agentDir,
     settingsManager: SettingsManager.inMemory(),
@@ -1419,7 +1425,7 @@ test("public interactive mode executes idle and active extension resources and q
   output.rows = 30;
   output.isTTY = false;
   const terminal = new TuiController({ input, output, mode: "accessible", handleSignals: false });
-  const extensionCatalog = {
+  const pluginCatalog = {
     command(name: string) {
       return name === "static-command"
         ? {
@@ -1443,7 +1449,7 @@ test("public interactive mode executes idle and active extension resources and q
         : undefined;
     },
   };
-  const mode = new InteractiveMode(runtime, { terminal, extensionCatalog });
+  const mode = new InteractiveMode(runtime, { terminal, pluginCatalog });
   const requestText = (request: ProviderRequest): string => request.messages
     .filter((message) => message.role === "user")
     .flatMap((message) => message.content)
@@ -1504,10 +1510,10 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
     let holdResourceRefresh = false;
     let releaseResourceRefresh: (() => void) | undefined;
     let includeReviewPrompt = true;
-    const extensionRuntime = createExtensionRuntime();
-    const extensionHost = ensureExtensionRuntimeHost(extensionRuntime, cwd);
+    const pluginRuntime = createPluginRuntime();
+    const pluginHost = ensurePluginRuntimeHost(pluginRuntime, cwd);
     const advancedUiGeneration = new AbortController();
-    extensionHost.applyAdvancedUi({
+    pluginHost.applyAdvancedUi({
       extensionId: "refresh-fixture",
       sourcePath: "<test:refresh-fixture>",
       ownerKey: "refresh-fixture:owner",
@@ -1515,12 +1521,12 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
       type: "tool_output_expanded",
       expanded: true,
     });
-    const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+    const pluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
     const reviewSkillPath = join(agentDir, "skills", "review", "SKILL.md");
     const reviewPromptPath = join(agentDir, "prompts", "review.md");
     const loader: ResourceLoader = {
       supportsTransactionalRefresh: true,
-      getExtensions: () => extensionsResult,
+      getPlugins: () => pluginsResult,
       getSkills: () => ({
         skills: [{
           name: "review",
@@ -1588,7 +1594,7 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
       providers: new ProviderRegistry(),
       modelRegistry: models,
       resourceLoader: loader,
-      extensionsResult,
+      pluginsResult,
       workspace: cwd,
       agentDirectory: agentDir,
       settingsManager: settings,
@@ -1654,7 +1660,7 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
     assert.equal(terminal.getToolOutputExpanded(), true);
     assert.equal(advancedUiBindings.length, 1);
     assert.equal(advancedUiBindings[0]?.signal.aborted, false);
-    extensionHost.applyAdvancedUi({
+    pluginHost.applyAdvancedUi({
       extensionId: "refresh-fixture",
       sourcePath: "<test:refresh-fixture>",
       ownerKey: "refresh-fixture:owner",
@@ -1665,7 +1671,7 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
     assert.equal(terminal.getToolOutputExpanded(), false);
     assert.equal(terminal.selectedThemeName(), "mono");
     assert.deepEqual(terminal.keybindingsManager().getKeys("app.model.select"), ["alt+k"]);
-    const uiBeforeRefresh = session.extensionRunner.getUIContext();
+    const uiBeforeRefresh = session.pluginRunner.getUIContext();
     await writeFile(join(agentDir, "config.json"), JSON.stringify({
       keybindings: { "app.model.select": "alt+j" },
     }));
@@ -1697,15 +1703,15 @@ test("interactive mode loads config keybindings and refreshes them on refresh", 
     assert.equal(advancedUiBindings[0]?.signal.aborted, true, "refresh retained the initial advanced UI binding");
     assert.equal(advancedUiBindings[1]?.signal.aborted, true, "refresh retained a live advanced UI binding");
     assert.equal(advancedUiBindings[2]?.signal.aborted, false);
-    assert.match(refreshPresentation[0]?.[0] ?? "", /keyboard mappings, extensions, skills, prompt templates, themes, and instruction files/u);
+    assert.match(refreshPresentation[0]?.[0] ?? "", /plugins, keyboard mappings, and instruction files/u);
     assert.equal(refreshPresentation[0]?.[1], "refresh");
     assert.deepEqual(refreshPresentation.at(-1), [undefined, undefined]);
     assert.deepEqual(modelRefreshes.at(-1), { force: false, allowNetwork: false });
     assert.equal(operatorPreferences.at(-1)?.fullscreenScrollbar, "auto");
     assert.equal(terminal.selectedThemeName(), "signal");
     assert.equal(terminal.getEditorText(), "preserved refresh draft");
-    assert.notEqual(session.extensionRunner.getUIContext(), uiBeforeRefresh);
-    assert.equal(session.extensionRunner.hasUI(), true);
+    assert.notEqual(session.pluginRunner.getUIContext(), uiBeforeRefresh);
+    assert.equal(session.pluginRunner.hasUI(), true);
     assert.equal(terminal.getToolOutputExpanded(), false, "refresh discarded the latest advanced UI state");
     input.write(" remains editable");
     await waitFor(() => terminal.getEditorText().endsWith(" remains editable"), "terminal input stayed blocked after refresh");

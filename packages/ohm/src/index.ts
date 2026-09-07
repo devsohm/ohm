@@ -1,4 +1,5 @@
 export { SecretRedactor } from "./auth/redaction.js";
+export type { SessionWireEvent } from "./interfaces/session-wire.js";
 export { HarnessError } from "./core/errors.js";
 export {
   type ObservabilityArea,
@@ -76,6 +77,7 @@ export {
   parseModelReasoningReference,
 } from "./providers/registry.js";
 export { AgentSession } from "./service/agent-session.js";
+export { inspectAgentSession, type AgentSessionInspection } from "./service/session-inspection.js";
 export {
   HARNESS_RESOURCE_CATALOG_LIMITS,
   HARNESS_RESOURCE_CATALOG_SCHEMA_VERSION,
@@ -89,6 +91,7 @@ export {
 } from "./service/transcript.js";
 export { createHarnessRuntime } from "./public-runtime.js";
 export {
+  createServeSessionRuntime,
   startServeServer,
   type ServeCreateSessionRequest,
   type ServeOpenSessionRequest,
@@ -102,7 +105,7 @@ export { SessionManager } from "./storage/session-manager.js";
 export { WorkspaceBoundary } from "./tools/paths.js";
 export { ExternalToolBackend } from "./tools/backend.js";
 export { OHM_VERSION } from "./version.js";
-export { extensionGalleryInstallSource, parseExtensionGalleryIndex } from "./extensions/gallery.js";
+export { pluginGalleryInstallSource, parsePluginGalleryIndex } from "./plugins/gallery.js";
 export {
   PROJECT_PACKAGE_DECLARATION,
   PROJECT_PACKAGE_INSTALL_ROOT,
@@ -111,7 +114,7 @@ export {
   parseProjectPackageDeclaration,
   parseProjectPackageLock,
   projectPackageDeclarationSha256,
-} from "./extensions/project-packages.js";
+} from "./plugins/project-packages.js";
 export type {
   InstalledProjectPackage,
   ProjectPackageCatalogEntry,
@@ -129,7 +132,7 @@ export type {
   ProjectPackageReconcileResult,
   ProjectPackageResolvedSource,
   ProjectPackageUpdateOptions,
-} from "./extensions/project-packages.js";
+} from "./plugins/project-packages.js";
 
 // The package root retains convenient aliases. The focused subpaths below
 // remain available for consumers that prefer narrower dependency boundaries.
@@ -155,7 +158,7 @@ export {
 export {
   DefaultResourceLoader,
   loadProjectContextFiles,
-  type ResourceExtensionsResult,
+  type ResourcePluginsResult,
   type ResourceLoader,
 } from "./core/resource-loader.js";
 export {
@@ -371,10 +374,10 @@ export {
   type AgentTool,
 } from "./tools/direct-tool.js";
 export {
-  createExtensionRuntime,
-  discoverAndLoadExtensions,
-  ExtensionRunner,
-} from "./extensions/compat.js";
+  createPluginRuntime,
+  discoverAndLoadPlugins,
+  PluginRunner,
+} from "./plugins/compat.js";
 export {
   AgentSessionRuntime,
   createAgentSessionRuntime,
@@ -417,9 +420,9 @@ export {
   BorderedLoader,
   CustomEditor,
   DynamicBorder,
-  ExtensionEditorComponent,
-  ExtensionInputComponent,
-  ExtensionSelectorComponent,
+  PluginEditorComponent,
+  PluginInputComponent,
+  PluginSelectorComponent,
   FooterComponent,
   LoginDialogComponent,
   ModelSelectorComponent,
@@ -457,7 +460,7 @@ export { runPrintMode, type PrintModeOptions } from "./modes/print-mode.js";
 export { runRpcMode } from "./modes/rpc-mode.js";
 export { main, type MainOptions } from "./cli/main.js";
 export { parseArgs, type Args } from "./cli/args.js";
-export type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "./interfaces/rpc-extension-ui.js";
+export type { RpcPluginUIRequest, RpcPluginUIResponse } from "./interfaces/rpc-plugin-ui.js";
 
 export type { AgentRunResult, QueuedRunMessage, QueueMode } from "./core/agent.js";
 export type {
@@ -470,7 +473,7 @@ export type {
   HarnessResourceCatalog,
   HarnessResourceCatalogSources,
   HarnessResourceDiagnostic,
-  HarnessResourceExtension,
+  HarnessResourcePlugin,
   HarnessResourceModel,
   HarnessResourceOwner,
   HarnessResourcePackage,
@@ -486,7 +489,7 @@ export type {
 export type {
   HarnessTranscriptEntry,
   HarnessTranscriptEntryBase,
-  HarnessTranscriptExtensionEntry,
+  HarnessTranscriptPluginEntry,
   HarnessTranscriptImage,
   HarnessTranscriptMessageEntry,
   HarnessTranscriptPage,
@@ -508,12 +511,12 @@ export type {
   CacheWasteTotals,
 } from "./core/cache-diagnostics.js";
 export type {
-  ExtensionGalleryContributionCounts,
-  ExtensionGalleryIndex,
-  ExtensionGalleryMedia,
-  ExtensionGalleryPackage,
-  ExtensionGallerySource,
-} from "./extensions/gallery.js";
+  PluginGalleryContributionCounts,
+  PluginGalleryIndex,
+  PluginGalleryMedia,
+  PluginGalleryPackage,
+  PluginGallerySource,
+} from "./plugins/gallery.js";
 export type {
   AssistantImages,
   ClipboardBackend,
@@ -663,9 +666,9 @@ export type {
 } from "./net/fetch.js";
 export type {
   RpcBashExecutionUpdate,
-  RpcExtensionErrorEvent,
-  RpcExtensionUiRequest,
-  RpcExtensionUiResponse,
+  RpcPluginErrorEvent,
+  RpcPluginUiRequest,
+  RpcPluginUiResponse,
   RpcCommand,
   RpcCommandType,
   RpcInputRecord,
@@ -678,7 +681,7 @@ export type {
   RpcSlashCommand,
   RpcTreePage,
 } from "./interfaces/index.js";
-export * from "./extensions/direct.js";
+export * from "./plugins/direct.js";
 export type {
   CommandResult,
   CommandSpec,
@@ -693,9 +696,12 @@ export type {
   AgentSessionEventListener,
   AgentSessionInputImage,
   AgentSessionModel,
+  AgentSessionModelCycleOptions,
   AgentSessionModelCycleResult,
   AgentSessionModelMutationOptions,
   AgentSessionOptions,
+  AgentSessionOwnership,
+  AgentSessionRefreshOptions,
   AgentSessionPromptOptions,
   AgentSessionReplacedContext,
   AgentSessionRun,
@@ -704,7 +710,7 @@ export type {
   AgentSessionToolInfo,
   AgentSessionTreeNavigationResult,
   AgentSessionUsageBreakdownEntry,
-  ExtensionBindings,
+  PluginBindings,
 } from "./service/agent-session.js";
 export type {
   NewSessionOptions,

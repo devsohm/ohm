@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import test from "node:test";
 
-import { cellWidth, splitGraphemes } from "@ohm/terminal";
+import { cellWidth, splitGraphemes, wrapTextWithAnsi } from "@ohm/terminal";
 
 import { TuiController } from "../../src/tui/controller.js";
 import { MAX_TERMINAL_IMAGE_AGGREGATE_BYTES } from "../../src/tui/terminal-image.js";
@@ -276,6 +276,22 @@ function request(view: TuiViewState, overrides: Partial<TuiFrameProjectionReques
   };
 }
 
+test("semantic footer preserves the draft and bounded frame at short terminal heights", async () => {
+  const { projectRichTuiFrame } = await richFrameProjector();
+  for (const columns of [40, 80, 120]) for (const rows of [1, 2, 4, 8, 14]) for (const color of [false, true]) {
+    const frame = projectRichTuiFrame(request({
+      ...baseView(), context: { ...baseView().context, contextTokens: 95, contextWindowTokens: 100 },
+    }, { size: { columns, rows }, color, unicode: color, theme: createTheme("signal", { color, unicode: color }) }));
+    assert.ok(frame, `${columns}x${rows}`);
+    const lines = stripAnsi(frame.text).split("\n");
+    assert.ok(lines.length <= rows, `${columns}x${rows}: ${lines.length}`);
+    for (const line of lines) assert.ok(cellWidth(line) <= columns);
+    assert.ok(frame.cursor.row >= 1 && frame.cursor.row <= rows);
+    assert.match(lines[frame.cursor.row - 1]!, /a🙂b/u);
+    if (!color) assert.equal(frame.text.includes("\u001b"), false);
+  }
+});
+
 test("the rich projector hides cache hit telemetry while compaction is active", async () => {
   const { projectRichTuiFrame } = await richFrameProjector();
   const view = baseView();
@@ -296,20 +312,21 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
   const frame = projectRichTuiFrame(request(baseView()));
   assert.ok(frame);
   assert.match(frame.text, terminalPattern("\\u001b\\[48;5;236m", "u"));
+  assert.deepEqual(stripAnsi(frame.text).split("\n").slice(0, 3).map((line) => line.trimEnd()), ["", " hello", ""]);
   const plain = stripAnsi(frame.text);
   assert.match(plain, /ctx 25\.0%\/100/u);
   assert.match(plain, /in 18/u);
   assert.match(plain, /out 4/u);
-  assert.match(plain, /R6/u);
-  assert.match(plain, /W2/u);
+  assert.match(plain, /read 6/u);
+  assert.match(plain, /write 2/u);
   assert.match(plain, /cache hit 75\.0%/u);
   assert.match(plain, /\$0\.010/u);
   assert.doesNotMatch(plain, /cache in|cache out/u);
   const lines = plain.split("\n");
-  const editorRow = lines.findIndex((line) => line.includes("› a🙂b"));
+  const editorRow = lines.findIndex((line) => line.includes("a🙂b"));
   assert.deepEqual(frame.cursor, {
     row: editorRow + 1,
-    column: cellWidth("› a🙂") + 1,
+    column: 2 + cellWidth("a🙂") + 1,
   });
 
   const padded = projectRichTuiFrame(request(baseView(), { editorPaddingX: 2 }));
@@ -319,7 +336,7 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
   assert.ok(paddedEditorRow >= 0);
   assert.deepEqual(padded.cursor, {
     row: paddedEditorRow + 1,
-    column: 2 + cellWidth("› a🙂") + 1,
+    column: 4 + cellWidth("a🙂") + 1,
   });
 
   const thinkingView: TuiViewState = {
@@ -473,7 +490,7 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
     "… Thinking",
     "  Before answer.",
     "",
-    "Answer boundary.",
+    "ohm   Answer boundary.",
     "",
     "… Thinking",
     "  After answer.",
@@ -498,11 +515,11 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
     { id: "failed", kind: "tool", title: "failed-tool", status: "failed", text: "" },
     { id: "in-doubt", kind: "tool", title: "in-doubt-tool", status: "in_doubt", text: "" },
   ]);
-  assert.match(toolStates, /… pending-tool · queued/u);
-  assert.match(toolStates, /▸ running-tool · running/u);
-  assert.match(toolStates, /✓ completed-tool · done/u);
-  assert.match(toolStates, /✗ failed-tool · failed/u);
-  assert.match(toolStates, /… in-doubt-tool · outcome unknown/u);
+  assert.match(toolStates, /… pending-tool  queued/u);
+  assert.match(toolStates, /▸ running-tool  running/u);
+  assert.match(toolStates, /✓ completed-tool  done/u);
+  assert.match(toolStates, /✗ failed-tool  failed/u);
+  assert.match(toolStates, /… in-doubt-tool  outcome unknown/u);
 
   assert.equal(transcriptOnly([
     { id: "status", kind: "status", text: "Ready" },
@@ -580,12 +597,14 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
     ...baseView(),
     backgroundCells: [
       { row: 1, column: 20, text: "X" },
+      { row: 3, column: 20, text: "X" },
       { row: 3, column: 50, text: "B" },
     ],
   }));
   assert.ok(withBackground);
   const backgroundLines = stripAnsi(withBackground.text).split("\n");
-  assert.equal(backgroundLines[1]?.includes("X"), false);
+  assert.equal(backgroundLines[1]?.[20], " ");
+  assert.equal(backgroundLines[3]?.[20], "X");
   assert.equal(backgroundLines[3]?.[50], "B");
   assert.ok(projectRichTuiFrame(request(baseView(), { codeBlockIndent: "  " })));
   const fencedCode = projectRichTuiFrame(request({
@@ -625,7 +644,7 @@ test("the rich projector preserves user color, cursor geometry, telemetry, and e
   assert.ok(plainFrame);
   assert.equal(plainFrame.text.includes("\u001b"), false);
   assert.match(plainFrame.text, /- Ask ohm/u);
-  assert.match(plainFrame.text, /> a🙂b/u);
+  assert.match(plainFrame.text, /^> a🙂b$/mu);
   assert.ok(plainFrame.transcriptNavigation?.pointerRegion?.scrollbar);
 
   const croppedSingleEntry = projectRichTuiFrame(request(baseView(), { size: { columns: 60, rows: 8 } }));
@@ -754,7 +773,7 @@ test("the rich projector translates, crops, and masks persistent component point
   const compactLines = stripAnsi(compact.text).split("\n");
   const compactPointer = compact[INTERNAL_TUI_PERSISTENT_POINTER_MAP];
   assert.equal(compactPointer?.rows.some((target) =>
-    compactLines[target.row]?.includes("earlier extension rows")) ?? false, false);
+    compactLines[target.row]?.includes("earlier plugin rows")) ?? false, false);
   assert.ok((compactPointer?.rows ?? []).every((target) =>
     target.row >= 0 && target.row < compactLines.length));
 });
@@ -811,7 +830,7 @@ test("the rich projector bounds long drafts, prompts, queues, and aggregate exte
   assert.ok(extensionFrame);
   const extensionText = stripAnsi(extensionFrame.text);
   assert.ok(extensionText.split("\n").length <= 24);
-  assert.equal(extensionText.match(/… 15 earlier extension rows/gu)?.length, 4);
+  assert.equal(extensionText.match(/… 15 earlier plugin rows/gu)?.length, 4);
   assert.match(extensionText, /HEADER-3-3/u);
   assert.match(extensionText, /WIDGET-3-3/u);
   assert.match(extensionText, /BELOW-3-3/u);
@@ -840,9 +859,9 @@ test("the rich projector bounds long drafts, prompts, queues, and aggregate exte
   assert.ok(runtimeFrame);
   const runtimeLines = stripAnsi(runtimeFrame.text).split("\n");
   assert.equal(runtimeLines.length, 24);
-  assert.match(runtimeLines[0] ?? "", /… 7 earlier extension rows/u);
+  assert.match(runtimeLines[0] ?? "", /… 7 earlier plugin rows/u);
   assert.match(runtimeLines[1] ?? "", /RUNTIME-HEADER-1-3/u);
-  assert.match(runtimeFrame.text, /… 14 earlier extension rows/u);
+  assert.match(runtimeFrame.text, /… 13 earlier plugin rows/u);
   assert.match(runtimeFrame.text, /runtime-23/u);
   assert.match(runtimeLines[runtimeFrame.cursor.row - 1] ?? "", /runtime-draft-15/u);
   assert.match(runtimeFrame.text, /RUNTIME-FOOTER-1-3/u);
@@ -876,10 +895,9 @@ test("the rich projector bounds long drafts, prompts, queues, and aggregate exte
   }));
   assert.ok(asciiFrame);
   assert.equal(asciiFrame.text.includes("\u001b"), false);
-  assert.match(asciiFrame.text, /\.\.\. 15 earlier extension rows/u);
+  assert.match(asciiFrame.text, /\.\.\. 15 earlier plugin rows/u);
   assert.match(asciiFrame.text, /Attachments \| image \(image\/png\)/u);
-  assert.match(asciiFrame.text, /\+ read \| done/u);
-  assert.match(asciiFrame.text, /> fixture/u);
+  assert.match(asciiFrame.text, /\+ read  fixture  done/u);
   assert.doesNotMatch(asciiFrame.text, /…|·|✓|▸|─/u);
   assert.ok(asciiFrame.transcriptNavigation?.pointerRegion?.scrollbar);
 });
@@ -898,13 +916,13 @@ test("the rich projector navigates exact visual rows inside one tall entry", asy
   assert.ok(frame);
   assert.deepEqual(frame.transcriptNavigation, {
     totalRows: 30,
-    startRow: 26,
-    viewportRows: 4,
+    startRow: 25,
+    viewportRows: 5,
     messageRows: [],
-    pointerRegion: { top: 0, bottom: 3 },
+    pointerRegion: { top: 0, bottom: 4 },
   });
-  assert.match(stripAnsi(frame.text), /ROW-26[\s\S]*ROW-29/u);
-  assert.doesNotMatch(stripAnsi(frame.text), /ROW-25/u);
+  assert.match(stripAnsi(frame.text), /ROW-25[\s\S]*ROW-29/u);
+  assert.doesNotMatch(stripAnsi(frame.text), /ROW-24/u);
   const scrolled = projectRichTuiFrame(request({
     ...baseView(),
     transcript,
@@ -945,6 +963,36 @@ test("the rich projector navigates exact visual rows inside one tall entry", asy
   assert.ok(prompts);
   assert.equal(prompts.transcriptNavigation?.totalRows, 10);
   assert.deepEqual(prompts.transcriptNavigation?.messageRows, [0, 7]);
+});
+
+test("cold retained transcript projection formats status only for the visible shell", async () => {
+  const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
+  const baseTheme = createTheme("signal", { color: true, unicode: true });
+  let statusSuccessReads = 0;
+  const theme = {
+    ...baseTheme,
+    codes: {
+      ...baseTheme.codes,
+      get success() { statusSuccessReads += 1; return baseTheme.codes.success; },
+    },
+  };
+  const shell = request({ ...baseView(), transcript: [] }, {
+    theme, transcriptRevision: 1, size: { columns: 120, rows: 40 },
+  });
+  internalCreateRichTuiFrameProjector()(shell);
+  const shellReads = statusSuccessReads;
+  assert.ok(shellReads > 0, "the fixture must format successful status fields");
+  statusSuccessReads = 0;
+  const transcript = Array.from({ length: 200 }, (_, index): TuiViewState["transcript"][number] => ({
+    id: `status-count-${index}`, kind: index % 2 === 0 ? "user" : "assistant", text: `Message ${index}`,
+  }));
+  const populated = { ...shell, view: { ...shell.view, transcript } };
+  const retained = internalCreateRichTuiFrameProjector();
+  assert.match(stripAnsi(retained(populated).text), /Message 199/u);
+  assert.equal(statusSuccessReads, shellReads, "transcript chunks must not format discarded status rows");
+  statusSuccessReads = 0;
+  retained({ ...populated, view: { ...populated.view, editorText: "new draft", editorCursor: 9 } });
+  assert.equal(statusSuccessReads, shellReads);
 });
 
 test("the retained native projector windows a bounded transcript without changing frame semantics", async () => {
@@ -1061,13 +1109,15 @@ test("retained completed tools reuse both explicit global expansion variants", a
 test("a near-budget Ctrl+O expansion preserves the collapsed render working set", async () => {
   const { internalCreateRichTuiFrameProjector } = await richFrameProjector();
   const theme = createTheme("mono", { color: false, unicode: true });
+  // Saturate alternate renders while leaving the expanded layout itself below
+  // its separate 8 MiB cap. The appended result must not cross that second cap.
   const detail = Array.from(
     { length: 120 },
-    (_, index) => `near-budget-detail-${index + 1} ${"x".repeat(445)}`,
+    (_, index) => `near-budget-detail-${index + 1} ${"x".repeat(448)}`,
   ).join("\n");
   let detailReads = 0;
   const transcript = (expanded: boolean): TuiViewState["transcript"] => Array.from(
-    { length: 145 },
+    { length: 147 },
     (_, index) => {
       const entry: TuiViewState["transcript"][number] = {
         id: `near-budget-tool-${index}`,
@@ -1127,6 +1177,7 @@ test("a near-budget Ctrl+O expansion preserves the collapsed render working set"
   });
   assert.ok(detailReads > expandedReads, "fixture did not reach the retained render cache budget");
   const saturatedReads = detailReads;
+  let appendedDetailReads = 0;
   const appendedTool = (): TuiViewState["transcript"][number] => {
     const entry: TuiViewState["transcript"][number] = {
       id: "near-budget-appended-tool",
@@ -1141,7 +1192,8 @@ test("a near-budget Ctrl+O expansion preserves the collapsed render working set"
       enumerable: false,
       get() {
         detailReads += 1;
-        return detail;
+        appendedDetailReads += 1;
+        return "newly appended result";
       },
     });
     return entry;
@@ -1156,24 +1208,36 @@ test("a near-budget Ctrl+O expansion preserves the collapsed render working set"
     transcriptRevision: 5,
     view: { ...expanded.view, transcript: appended() },
   });
-  const appendedReads = detailReads;
-  assert.ok(appendedReads > saturatedReads);
+  const appendedReads = appendedDetailReads;
+  assert.ok(detailReads > saturatedReads);
+  assert.equal(appendedReads, 1, "fixture overflowed the retained layout into a second render");
   projector({
     ...expanded,
     transcriptRevision: 6,
     view: { ...expanded.view, transcript: transcript(true) },
   });
-  assert.equal(detailReads, appendedReads);
+  assert.equal(appendedDetailReads, appendedReads);
   projector({
     ...expanded,
     transcriptRevision: 7,
     view: { ...expanded.view, transcript: appended() },
   });
   assert.equal(
-    detailReads,
+    appendedDetailReads,
     appendedReads,
     "a newly appended key was starved after retained render cache saturation",
   );
+  const revisitedReads = detailReads;
+  for (const transcriptOffset of [120, 0, 240, 120]) {
+    const revisited = projector({
+      ...expanded,
+      transcriptRevision: 7,
+      view: { ...expanded.view, transcript: appended(), transcriptOffset, editorText: "draft" },
+    });
+    assert.ok(revisited);
+    assert.match(stripAnsi(revisited.text), /near-budget-detail/u);
+  }
+  assert.equal(detailReads, revisitedReads, "scrolling back to warmed history rerendered source detail");
 });
 
 test("tool-tail expansion retains unrelated history and both completed variants", async () => {
@@ -1485,7 +1549,7 @@ test("the retained native projector keeps reused provider call IDs as distinct t
       text: summary,
     })),
   }, { transcriptRevision: 1 }));
-  assert.equal(stripAnsi(frame.text).match(/✓ read · done/gu)?.length, 2);
+  assert.equal(stripAnsi(frame.text).match(/✓ read[^\n]*done/gu)?.length, 2);
   assert.match(stripAnsi(frame.text), /first[\s\S]*second/u);
 });
 
@@ -1541,11 +1605,8 @@ test("the rich projector keeps built-in tool details collapsed until Ctrl+O expa
   }));
   assert.ok(collapsed);
   const collapsedText = stripAnsi(collapsed.text);
-  assert.match(collapsedText, /✓ read · done/u);
-  assert.match(collapsedText, /↳ lines 1-20/u);
-  assert.match(collapsedText, /line-2/u);
-  assert.doesNotMatch(collapsedText, /line-3/u);
-  assert.match(collapsedText, /… Ctrl\+O details/u);
+  assert.match(collapsedText, /✓ read  lines 1-20  done/u);
+  assert.doesNotMatch(collapsedText, /line-\d|Ctrl\+O/u);
   assert.doesNotMatch(collapsedText, /(?:^|\n)│/u);
 
   const expanded = projectRichTuiFrame(request({
@@ -1604,9 +1665,7 @@ test("the rich projector keeps built-in tool details collapsed until Ctrl+O expa
     }],
   }, { transcriptOptions: { expandKeyHint: "Ctrl+O" } }));
   const collapsedCardText = stripAnsi(collapsedCard.text);
-  assert.match(collapsedCardText, /✓ context · compacted/u);
-  assert.match(collapsedCardText, /Context compacted · 50,000 tokens before · cache\s+retained/u);
-  assert.match(collapsedCardText, /… Ctrl\+O details/u);
+  assert.match(collapsedCardText, /✓ context  Context compacted · 50,000 tokens[^\n]*compacted/u);
   assert.doesNotMatch(collapsedCardText, /Retained summary body/u);
   assert.doesNotMatch(collapsedCardText, /(?:^|\n)│/u);
 
@@ -1823,7 +1882,7 @@ test("the rich projector composes extension transcript renderers, images, and ru
   const extensionText = stripAnsi(extensionTranscript.text);
   assert.match(extensionText, /CUSTOM TOOL CALL[\s\S]*CUSTOM TOOL RESULT[\s\S]*CUSTOM SESSION ENTRY/u);
   assert.doesNotMatch(extensionText, /built-in tool output|built-in session output|owner\.extension/u);
-  assert.match(extensionText, /✓ fixture · done/u);
+  assert.match(extensionText, /✓ fixture  done/u);
   assert.doesNotMatch(extensionText, /(?:^|\n)│/u);
   assert.match(extensionText, /─ Ask ohm /u);
 
@@ -1836,6 +1895,7 @@ test("the rich projector composes extension transcript renderers, images, and ru
       title: "fixture",
       status: "completed",
       text: "INHERITED TOOL RESULT",
+      expanded: true,
     }],
   }, {
     transcriptOptions: {
@@ -1895,6 +1955,7 @@ test("the rich projector composes extension transcript renderers, images, and ru
       title: "read",
       status: "completed",
       text: "tool image result",
+      expanded: true,
       images: [{
         key: "tool-image-entry:0",
         block: { type: "image", mediaType: "image/png", data: imageData },
@@ -1920,7 +1981,7 @@ test("the rich projector composes extension transcript renderers, images, and ru
     },
   }));
   const toolImageText = stripAnsi(toolImage.text);
-  assert.match(toolImageText, /✓ read · done/u);
+  assert.match(toolImageText, /✓ read[^\n]*done/u);
   assert.match(toolImageText, /tool image result/u);
   assert.match(toolImageText, /\[Image: image\/png 20x10\]/u);
   assert.doesNotMatch(toolImageText, /(?:^|\n)│/u);
@@ -2050,7 +2111,7 @@ test("the rich projector composes extension transcript renderers, images, and ru
   }));
   const recoveredText = stripAnsi(invalidExtension.text);
   assert.match(recoveredText, /hello/u);
-  assert.match(recoveredText, /Extension UI unavailable; core view preserved/u);
+  assert.match(recoveredText, /Plugin UI unavailable; core view preserved/u);
   assert.match(recoveredText, /─ Ask ohm /u);
 
   const recoveredFrame = projectRichTuiFrame(request({
@@ -2059,9 +2120,41 @@ test("the rich projector composes extension transcript renderers, images, and ru
   }));
   const recoveredFrameText = stripAnsi(recoveredFrame.text);
   assert.match(recoveredFrameText, /hello/u);
-  assert.match(recoveredFrameText, /Display extension unavailable; core view preserved/u);
+  assert.match(recoveredFrameText, /Display plugin unavailable; core view preserved/u);
   assert.match(recoveredFrameText, /─ Ask ohm /u);
   assert.doesNotMatch(recoveredFrameText, /(?:^|\n)│/u);
+});
+
+test("rich Thinking Markdown omits only its synthetic speaker gutter at narrow and colored widths", async () => {
+  const { projectRichTuiFrame } = await richFrameProjector();
+  for (const columns of [8, 16, 40]) {
+    for (const color of [true, false]) {
+      const projected = projectRichTuiFrame(request({
+        ...baseView(),
+        transcript: [
+          { id: "reasoning", kind: "reasoning", text: "**Plan**\n\nOHM\n\n```ts\nconst x = 1;\n```\n\nLast line.", expanded: true },
+          { id: "answer", kind: "assistant", text: "Done" },
+        ],
+      }, {
+        size: { columns, rows: 120 },
+        theme: createTheme("signal", { color, unicode: true }),
+        color,
+        thinkingExpanded: true,
+        transcriptOptions: { transformMarkdown: (value) => value },
+      }));
+      const lines = projected.text.split("\n");
+      const plain = lines.map(stripAnsi);
+      assert.ok(plain.some((line) => line.trim() === "Plan"), `width ${columns}, color ${color}: ${plain.join("\n")}`);
+      assert.ok(plain.some((line) => line.trim() === "OHM"), "literal reasoning content is retained");
+      assert.ok(plain.some((line) => line.trim() === (columns >= 16 ? "ohm   Done" : "· Done")));
+      assert.equal(plain.join("\n").match(/OHM/gu)?.length, 1);
+      for (const line of lines) {
+        assert.ok(cellWidth(line) <= columns);
+        assert.equal(wrapTextWithAnsi(`${line}\nprobe`, 1000).at(-1), "probe");
+      }
+      if (!color) assert.equal(projected.text, stripAnsi(projected.text));
+    }
+  }
 });
 
 test("the rich projector preserves hidden thinking, status, Markdown, prompts, and raw overlay contracts", async () => {
@@ -2090,8 +2183,8 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
       active: true,
       status: "working",
       activity: { phase: "Provider work", startedAt: 0 },
-      extensionStatus: "Extension ready",
-      workingMessage: "Extension work",
+      extensionStatus: "Plugin ready",
+      workingMessage: "Plugin work",
       workingVisible: true,
     },
     workingIndicator: { frames: [".", "o"], intervalMs: 80 },
@@ -2099,9 +2192,9 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
   assert.ok(status);
   const statusText = stripAnsi(status.text);
   assert.match(statusText, /Provider work/u);
-  assert.match(statusText, /Extension ready/u);
-  assert.match(statusText, /Extension work/u);
-  assert.equal(statusText.match(/Extension work/gu)?.length, 1);
+  assert.match(statusText, /Plugin ready/u);
+  assert.match(statusText, /Plugin work/u);
+  assert.equal(statusText.match(/Plugin work/gu)?.length, 1);
 
   const defaultWorking = projectRichTuiFrame(request({
     ...baseView(),
@@ -2181,7 +2274,7 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
   }, { transcriptOptions: { hyperlinks: true } }));
   assert.ok(markdown);
   const markdownText = stripAnsi(markdown.text);
-  assert.match(markdownText, /✓ read · done/u);
+  assert.match(markdownText, /✓ read  done/u);
   assert.match(markdownText, /emphasis and removed and <https:\/\/example\.test>/u);
   assert.doesNotMatch(markdownText, /\*emphasis\*|~~removed~~/u);
   assert.ok(markdown.text.includes("\u001b]8;;https://example.test"));
@@ -2204,6 +2297,7 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
     { thinkingExpanded: true },
   ));
   assert.match(stripAnsi(expandedLiveMarkdownThinking.text), /Live reasoning/u);
+  assert.doesNotMatch(stripAnsi(expandedLiveMarkdownThinking.text), /\bohm   /u);
 
   const thinkingTransforms: Array<{ messageType: string; isStreaming: boolean; availableWidth: number }> = [];
   const markdownThinking = projectRichTuiFrame(request({
@@ -2231,6 +2325,7 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
   assert.match(markdownThinkingText, /Reasoned with <https:\/\/example\.test\/evidence>/u);
   assert.doesNotMatch(markdownThinkingText, /\*\*Reasoned\*\*/u);
   assert.doesNotMatch(markdownThinkingText, /(?:^|\n)│|╭|╰/u);
+  assert.doesNotMatch(markdownThinkingText, /\bohm   /u);
   assert.ok(markdownThinking.text.includes("\u001b]8;;https://example.test/evidence"));
   assert.deepEqual(thinkingTransforms, [{
     messageType: "assistant-thinking",
@@ -2240,14 +2335,17 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
 
   const prompt = projectRichTuiFrame(request({
     ...baseView(),
+    context: { ...baseView().context, active: true, activity: { phase: "Provider work", startedAt: Date.now() } },
     inputPrompt: "First question\nSecond question\u001b]2;owned\u0007",
   }));
   assert.ok(prompt);
   const promptText = stripAnsi(prompt.text);
   assert.match(promptText, /─ Ask ohm /u);
   assert.match(promptText, /First question[\s\S]*Second question/u);
+  assert.match(promptText, /Waiting for input/u);
+  assert.doesNotMatch(promptText, /Provider work/u);
   assert.doesNotMatch(promptText, /owned/u);
-  assert.equal(promptText.split("\n")[prompt.cursor.row - 1]?.includes("› a🙂b"), true);
+  assert.equal(promptText.split("\n")[prompt.cursor.row - 1]?.includes("a🙂b"), true);
 
   const rawOverlay = projectRichTuiFrame(request({
     ...baseView(),
@@ -2260,7 +2358,7 @@ test("the rich projector preserves hidden thinking, status, Markdown, prompts, a
     }],
   }));
   assert.ok(rawOverlay);
-  assert.match(stripAnsi(rawOverlay.text).split("\n")[0] ?? "", /^X   BBBB/u);
+  assert.match(stripAnsi(rawOverlay.text).split("\n")[0] ?? "", /^X     BBBBBBBB/u);
 
   const overflow = projectRichTuiFrame(request({
     ...baseView(),
@@ -2313,7 +2411,7 @@ test("the rich controller keeps one terminal owner across cropped tool history a
   controller.notify("Interrupted", "warning");
   controller.renderNow();
   assert.match(viewport(), /! warning Interrupted/u);
-  assert.match(viewport(), /… read-19 · queued[\s\S]*fixture-19\.txt/u);
+  assert.match(viewport(), /… read-19[^\n]*fixture-19\.txt[^\n]*queued/u);
   assert.doesNotMatch(viewport(), /read-0 · pending/u);
   assert.match(viewport(), /─ Ask ohm /u);
   assert.equal(getEventListeners(input, "data").length, 1);
@@ -2590,7 +2688,7 @@ test("the native rich prefix invalidates tool state, detail, size, and theme cha
   }, 3));
   controller.renderNow();
   assert.match(viewport(), /read .* done/u);
-  assert.match(viewport(), /cache-final-output/u);
+  assert.doesNotMatch(viewport(), /cache-final-output/u);
   assert.doesNotMatch(viewport(), /read .* running/u);
 
   controller.renderNow();

@@ -4,8 +4,8 @@ import type { Readable } from "node:stream";
 import { Check } from "typebox/value";
 
 import { BOOLEAN_VALUE, STRING_VALUE } from "../core/value-schemas.js";
-import { RpcExtensionUiBridge } from "../interfaces/rpc-extension-ui.js";
-import { boundedRpcErrorMessage, createRpcExtensionErrorEvent } from "../interfaces/rpc-error.js";
+import { RpcPluginUiBridge } from "../interfaces/rpc-plugin-ui.js";
+import { boundedRpcErrorMessage, createRpcPluginErrorEvent } from "../interfaces/rpc-error.js";
 import { takeOverStdout, flushRawStdout, restoreStdout } from "../interfaces/output-guard.js";
 import { RpcRuntimeDispatcher } from "../interfaces/rpc-runtime.js";
 import {
@@ -14,7 +14,7 @@ import {
   RpcWriter,
   type ParsedRpcInput,
 } from "../interfaces/rpc.js";
-import type { RpcExtensionUiResponse, RpcResponse } from "../interfaces/rpc-protocol.js";
+import type { RpcPluginUiResponse, RpcResponse } from "../interfaces/rpc-protocol.js";
 import {
   type AgentSessionRuntime,
 } from "../service/agent-session-runtime.js";
@@ -50,7 +50,7 @@ interface RpcInputEnvelope {
   error?: unknown;
 }
 
-function extensionUiResponse(record: ParsedRpcInput): RpcExtensionUiResponse | undefined {
+function extensionUiResponse(record: ParsedRpcInput): RpcPluginUiResponse | undefined {
   if (record.type !== "extension_ui_response") return undefined;
   if (!Check(STRING_VALUE, record.id)) throw new Error("RPC extension UI response ID must be a string");
   if ("value" in record && Check(STRING_VALUE, record.value)) {
@@ -153,7 +153,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
   takeOverStdout();
   const writer = new RpcWriter();
   const lifecycle = new AbortController();
-  const bridge = new RpcExtensionUiBridge({ async emit(request) { await writer.send(request); } });
+  const bridge = new RpcPluginUiBridge({ async emit(request) { await writer.send(request); } });
   let shutdownRequested = false;
   let shuttingDown = false;
   let shutdownFlight: Promise<never> | undefined;
@@ -175,7 +175,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
     async bindSession(session) {
       unsubscribeSettled();
       const ui = bridge.context("runtime", "runtime", lifecycle.signal);
-      await session.bindExtensions({
+      await session.bindPlugins({
         mode: "rpc",
         uiContext: ui,
         commandContextActions: createAgentSessionRuntimeCommandActions(runtimeHost, session),
@@ -185,7 +185,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
           if (session.isIdle) void shutdown();
         },
         onError(error) {
-          void writer.send(createRpcExtensionErrorEvent(error)).catch(() => undefined);
+          void writer.send(createRpcPluginErrorEvent(error)).catch(() => undefined);
         },
       });
       unsubscribeSettled = session.subscribe((event) => {
@@ -316,8 +316,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
   const submit = (line: string): void => {
     if (shuttingDown || inputOverloaded || line.trim() === "") return;
     let record: ParsedRpcInput;
+    let extensionResponse: RpcPluginUiResponse | undefined;
     try {
       record = parseRpcInput(line);
+      extensionResponse = extensionUiResponse(record);
     } catch (error) {
       const backlog = pendingInputs.length - pendingOffset;
       if (backlog >= MAX_PENDING_RPC_COMMANDS) {
@@ -332,7 +334,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
       drainPendingInputs();
       return;
     }
-    const extensionResponse = extensionUiResponse(record);
     if (extensionResponse !== undefined) {
       try { bridge.handle(extensionResponse); }
       catch (error) { startPriority({ error }); }

@@ -44,7 +44,7 @@ test("built CLI full viewport renders commands, closes settings, and restores th
     workspace,
     "--offline",
     "--no-browser",
-    "--no-extensions",
+    "--no-plugin-code",
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -89,7 +89,7 @@ test("built CLI full viewport renders commands, closes settings, and restores th
   await waitForOutput(read, resourcesOffset, "Project packages (0)");
   const resourcesOutput = read().slice(resourcesOffset);
   assert.match(resourcesOutput, /Loaded resources/u);
-  assert.match(resourcesOutput, /Extensions \(0\)/u);
+  assert.match(resourcesOutput, /Plugin entrypoints \(0\)/u);
   assert.match(resourcesOutput, /Commands \(0\)/u);
   assert.match(resourcesOutput, /Prompts \(0\)/u);
   assert.match(resourcesOutput, /Skills \(0\)/u);

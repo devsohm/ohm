@@ -655,21 +655,6 @@ function validateResourceClaims<Value>(value: Value): ResourceClaim[] {
   });
 }
 
-function executionWaves(prepared: Prepared[]): Prepared[][] {
-  const waves: Prepared[][] = [];
-  let wave: Prepared[] = [];
-  for (const item of prepared) {
-    if (wave.some((scheduled) => resourcesConflict(scheduled.resources, item.resources))) {
-      waves.push(wave);
-      wave = [item];
-      continue;
-    }
-    wave.push(item);
-  }
-  if (wave.length > 0) waves.push(wave);
-  return waves;
-}
-
 export class ToolCoordinator {
   #registry: ToolRegistry;
   readonly #observer: ToolCoordinatorObserver;
@@ -844,6 +829,7 @@ export class ToolCoordinator {
     const finalized = new Set<number>();
     const notified = new Set<number>();
     const prepared: Prepared[] = [];
+    let throwBatchFailure: (() => never) | undefined;
     const callIds = new Set<string>();
     const duplicateCallIds = new Set<string>();
     let batchProgressUpdates = 0;
@@ -911,6 +897,7 @@ export class ToolCoordinator {
     ): Promise<void> => {
       if (this.#observer.dispatching !== undefined) {
         await settleWithSignal(context.signal, () => this.#observer.dispatching!(invocation, invocationContext));
+        throwBatchFailure?.();
       }
       if (observer.dispatching !== undefined) {
         await settleWithSignal(context.signal, () => observer.dispatching!(invocation, invocationContext));
@@ -953,10 +940,15 @@ export class ToolCoordinator {
     }
 
     const completeImmediate = async (entry: ToolInvocationResult): Promise<void> => {
-      const completed = finalize(entry);
-      results.set(completed.invocation.index, completed);
-      finalized.add(completed.invocation.index);
-      await notifyCompleted(completed);
+      try {
+        const completed = finalize(entry);
+        results.set(completed.invocation.index, completed);
+        finalized.add(completed.invocation.index);
+        await notifyCompleted(completed);
+      } catch (error) {
+        throwBatchFailure ??= () => { throw error; };
+        throwBatchFailure();
+      }
     };
 
     for (const invocation of invocations) {
@@ -964,7 +956,7 @@ export class ToolCoordinator {
         this.#activeNames.has(invocation.name) &&
         this.#registry.get(invocation.name)?.executionMode === "sequential"
       ) {
-        await runPreparedWaves(this);
+        await runPreparedBatch(this);
       }
       let effective: ToolInvocation = {
         callId: invocation.callId,
@@ -977,6 +969,7 @@ export class ToolCoordinator {
       let receiving = false;
       let started = false;
       let starting = false;
+      let sequential = false;
       let recoveryMode: ToolRecoveryMode = "never_repeat";
       const receive = async (value: ToolInvocation): Promise<void> => {
         receiving = true;
@@ -1139,8 +1132,9 @@ export class ToolCoordinator {
           recoveryMode,
         };
         prepared.push(item);
-        if (item.executionMode === "sequential") await runPreparedWaves(this);
+        sequential = item.executionMode === "sequential";
       } catch (error) {
+        throwBatchFailure?.();
         context.signal.throwIfAborted();
         if (starting || receiving) throw error;
         if (!started) await start(observable);
@@ -1154,6 +1148,7 @@ export class ToolCoordinator {
           ),
         });
       }
+      if (sequential) await runPreparedBatch(this);
     }
 
     async function runPrepared(coordinator: ToolCoordinator, item: Prepared): Promise<ToolInvocationResult> {
@@ -1302,6 +1297,7 @@ export class ToolCoordinator {
               authorizationRejected = true;
               result = toolError("Tool authorization failed");
             }
+            throwBatchFailure?.();
             if (result === undefined) {
               if (authorization?.decision === "deny") {
                 authorizationRejected = true;
@@ -1311,19 +1307,23 @@ export class ToolCoordinator {
                   resourceLease = coordinator.#resourceArbiter === undefined
                     ? undefined
                     : await coordinator.#resourceArbiter.acquire(item.resources, context.signal);
+                  throwBatchFailure?.();
                   await notifyDispatching(
                     { ...item.invocation, recoveryMode: item.recoveryMode },
                     invocationContext,
                   );
+                  throwBatchFailure?.();
                   context.signal.throwIfAborted();
-                  dispatchSettlement = Promise.resolve().then(async () => item.backend === undefined
+                  // Invoke before yielding again so the fatal check fences the raw effect.
+                  dispatchSettlement = (async () => item.backend === undefined
                     ? await item.tool.execute(item.invocation.input, invocationContext)
                     : await item.backend.execute({
                       invocation: item.invocation,
                       workspace: invocationContext.workspace.root,
-                    }, invocationContext));
+                    }, invocationContext))();
                   result = await settleWithSignal(context.signal, () => dispatchSettlement!);
                 } catch (error) {
+                  throwBatchFailure?.();
                   context.signal.throwIfAborted();
                   result = toolError(
                     `Tool failed: ${errorMessage(error)}`,
@@ -1359,6 +1359,9 @@ export class ToolCoordinator {
           });
           await notifyDurableCompleted(completedResult);
           finalized.add(item.invocation.index);
+          } catch (error) {
+            throwBatchFailure ??= () => { throw error; };
+            throw error;
           } finally {
             try {
               if (dispatchSettlement !== undefined && completedResult === undefined) {
@@ -1394,15 +1397,32 @@ export class ToolCoordinator {
           return completedResult;
     }
 
-    async function runPreparedWaves(coordinator: ToolCoordinator): Promise<void> {
+    async function runPreparedBatch(coordinator: ToolCoordinator): Promise<void> {
       const scheduled = prepared.splice(0);
-      for (const wave of executionWaves(scheduled)) {
-        const completed = await Promise.all(wave.map(async (item) => await runPrepared(coordinator, item)));
-        for (const result of completed) results.set(result.invocation.index, result);
+      const pending: Promise<ToolInvocationResult>[] = [];
+      for (const [index, item] of scheduled.entries()) {
+        const dependencies = scheduled.slice(0, index).flatMap((earlier, earlierIndex) =>
+          resourcesConflict(earlier.resources, item.resources) ? [pending[earlierIndex]!] : []);
+        pending.push(Promise.all(dependencies).then(async () => {
+          throwBatchFailure?.();
+          return await runPrepared(coordinator, item);
+        }).catch((error) => {
+          throwBatchFailure ??= () => { throw error; };
+          return throwBatchFailure();
+        }));
       }
+      let completed: ToolInvocationResult[];
+      try {
+        completed = await Promise.all(pending);
+      } catch (error) {
+        // Retain batch ownership until every started raw effect has settled.
+        await Promise.allSettled(pending);
+        throw error;
+      }
+      for (const result of completed) results.set(result.invocation.index, result);
     }
 
-    await runPreparedWaves(this);
+    await runPreparedBatch(this);
 
     const ordered = invocations.map((invocation) => results.get(invocation.index) ?? {
       invocation,

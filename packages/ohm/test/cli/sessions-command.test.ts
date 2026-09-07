@@ -8,7 +8,9 @@ import test from "node:test";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
-import { inspectSessionFiles } from "../../src/cli/sessions-command.js";
+import { inspectSessionFiles, runSessionsCommand } from "../../src/cli/sessions-command.js";
+import { parseManagementArguments } from "../../src/cli/management-args.js";
+import { SessionManager } from "../../src/storage/session-manager.js";
 import { TrustStore } from "../../src/config/trust.js";
 
 const DOCTOR_REPORT_VALUE = Type.Object({
@@ -98,6 +100,29 @@ test("session doctor reports complete-line corruption while accepting an incompl
   assert.deepEqual(report.invalid.map((entry) => entry.path), [corrupt]);
   assert.match(report.invalid[0]?.error ?? "", /line 2 is not valid JSON/u);
   assert.match(await readFile(corrupt, "utf8"), /\{broken\n$/u);
+});
+
+test("session doctor validates SQLite and legacy input without modifying either journal", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-session-doctor-sqlite-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const saved = SessionManager.create(root, root, { id: "saved" });
+  saved.appendSessionInfo("SQLite history");
+  const path = saved.getSessionFile()!;
+  saved.closeV4Store();
+  const before = await readFile(path);
+  const legacy = await writeCorruptSession(root, root, "legacy");
+  const legacyBefore = await readFile(legacy);
+  const report = await inspectSessionFiles({ workspace: root, sessionDirectory: root });
+  assert.equal(report.checked, 2);
+  assert.equal(report.valid, 1);
+  assert.deepEqual(report.invalid.map((entry) => entry.path), [legacy]);
+  assert.deepEqual(await readFile(path), before);
+  assert.deepEqual(await readFile(legacy), legacyBefore);
+});
+
+test("unsupported session actions recommend the current read-only doctor command", async () => {
+  await assert.rejects(runSessionsCommand(parseManagementArguments(["sessions", "rebuild"])),
+    /use `ohm sessions doctor` to validate SQLite and legacy JSONL journals/u);
 });
 
 test("session doctor uses CLI, environment, and effective settings directory precedence", async (context) => {

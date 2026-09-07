@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ModelInfo } from "../../src/core/types.js";
-import { ExtensionCatalog } from "../../src/extensions/catalog.js";
-import type { ExtensionBundle, ExtensionMetadata } from "../../src/extensions/types.js";
+import { PluginCatalog } from "../../src/plugins/catalog.js";
+import type { PluginBundle, PluginMetadata } from "../../src/plugins/types.js";
 import {
   HARNESS_RESOURCE_CATALOG_LIMITS,
   buildHarnessResourceCatalog,
@@ -41,8 +41,8 @@ function model(id: string, provider: string): ModelInfo {
   };
 }
 
-function extensionCatalog(): ExtensionCatalog {
-  const metadata: ExtensionMetadata[] = [{
+function extensionCatalog(): PluginCatalog {
+  const metadata: PluginMetadata[] = [{
     id: "fixture",
     name: "Fixture",
     version: "1.0.0",
@@ -56,7 +56,7 @@ function extensionCatalog(): ExtensionCatalog {
     precedence: 2,
     contributions: { skillRoots: 0, prompts: 1, commands: 1, themes: 1, runtime: 1 },
   }];
-  const bundle: ExtensionBundle = {
+  const bundle: PluginBundle = {
     skillRoots: [],
     prompts: [{
       id: "private-prompt",
@@ -82,7 +82,7 @@ function extensionCatalog(): ExtensionCatalog {
     }],
     runtime: [{ extensionId: "fixture", sourcePath: "/private/runtime.mjs", sha256: HASH }],
   };
-  return new ExtensionCatalog(metadata, [{
+  return new PluginCatalog(metadata, [{
     severity: "warning",
     code: "FIXTURE_WARNING",
     message: "Fixture is untrusted",
@@ -189,7 +189,13 @@ test("resource catalog is deterministic, callback-free, and omits private conten
     disabledResources: ["command:fixture-command"],
     resolved: { kind: "local", path: "packages/fixture", manifestSha256: HASH, contentSha256: HASH },
   });
-  assert.deepEqual(parseHarnessResourceCatalog(catalog), catalog);
+  assert.equal(catalog.schemaVersion, 1);
+  assert.deepEqual(Object.keys(catalog.commands), ["builtins", "runtimeExtensions", "extensionTemplates"]);
+  assert.equal(catalog.diagnostics.some((entry) => entry.code === "RUNTIME_EXTENSION"), true);
+  assert.deepEqual(parseHarnessResourceCatalog({
+    ...catalog,
+    commands: { builtins: catalog.commands.builtins, runtimeExtensions: [], extensionTemplates: [] },
+  }), catalog);
   assert.deepEqual(second, buildHarnessResourceCatalog({
     tools: [extensionTool, read],
     toolOwner: (value) => value === extensionTool ? { kind: "extension", extensionId: "fixture" } : { kind: "builtin" },
@@ -221,7 +227,7 @@ test("resource catalog applies deterministic entry, schema, and byte bounds", ()
 });
 
 test("resource catalog preserves invocation-only package and extension scope", () => {
-  const extensions = new ExtensionCatalog([{
+  const extensions = new PluginCatalog([{
     id: "temporary",
     name: "Temporary",
     scope: "invocation",

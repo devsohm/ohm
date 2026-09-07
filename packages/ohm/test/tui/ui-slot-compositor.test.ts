@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ExtensionUISlotCompositor,
-  MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS_PER_PATH,
-  MAX_EXTENSION_UI_SLOT_CONTRIBUTION_BYTES,
+  PluginUISlotCompositor,
+  MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS_PER_PATH,
+  MAX_PLUGIN_UI_SLOT_CONTRIBUTION_BYTES,
 } from "../../src/tui/ui-slot-compositor.js";
 
 test("UI slots compose by placement, order, owner load, and registration order", () => {
-  const slots = new ExtensionUISlotCompositor();
+  const slots = new PluginUISlotCompositor();
   const a1 = {};
   const a2 = {};
   const b1 = {};
@@ -30,7 +30,7 @@ test("UI slots compose by placement, order, owner load, and registration order",
 });
 
 test("UI slot replacement falls back deterministically and rejected updates retain the winner", () => {
-  const slots = new ExtensionUISlotCompositor();
+  const slots = new PluginUISlotCompositor();
   const lower = {};
   const winner = {};
   slots.set("owner-a", "session.footer", "lower", {
@@ -62,7 +62,7 @@ test("UI slot replacement falls back deterministically and rejected updates reta
 });
 
 test("UI slots reject replacement at editor boundaries and enforce explicit bounds", () => {
-  const slots = new ExtensionUISlotCompositor();
+  const slots = new PluginUISlotCompositor();
   assert.throws(() => slots.set("owner", "session.afterEditor", "bad", {
     lines: ["bad"],
     placement: "replace",
@@ -72,17 +72,17 @@ test("UI slots reject replacement at editor boundaries and enforce explicit boun
     order: 1.5,
   }, {}), /must be an integer/u);
   assert.throws(() => slots.set("owner", "session.header", "bad", {
-    lines: ["x".repeat(MAX_EXTENSION_UI_SLOT_CONTRIBUTION_BYTES + 1)],
+    lines: ["x".repeat(MAX_PLUGIN_UI_SLOT_CONTRIBUTION_BYTES + 1)],
   }, {}), /limited to 16384 bytes/u);
 
-  for (let index = 0; index < MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS_PER_PATH; index += 1) {
+  for (let index = 0; index < MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS_PER_PATH; index += 1) {
     slots.set("owner", "session.header", `item-${index}`, { lines: [`item ${index}`] }, {});
   }
   assert.throws(() => slots.set("owner", "session.header", "overflow", { lines: ["overflow"] }, {}), /limited to 16 contributions/u);
 });
 
 test("a failed downstream publication can roll back one compositor mutation", () => {
-  const slots = new ExtensionUISlotCompositor();
+  const slots = new PluginUISlotCompositor();
   const first = {};
   slots.set("owner", "session.header", "header", { lines: ["first"] }, first);
   const rollback = slots.set("owner", "session.header", "header", { lines: ["candidate"] }, {});

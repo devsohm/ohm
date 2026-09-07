@@ -401,7 +401,7 @@ test("prepared macOS purge retains its private helper through removal and dispos
   await mkdir(dirname(helperPath), { recursive: true });
   await writeFile(helperPath, [
     `#!${process.execPath}`,
-    'const { appendFileSync } = require("node:fs");',
+    'const { appendFileSync } = process.getBuiltinModule("node:fs");',
     'let input = "";',
     'process.stdin.setEncoding("utf8");',
     'process.stdin.on("data", (chunk) => { input += chunk; });',
@@ -470,7 +470,7 @@ test("prepared macOS purge preserves both purge and retained-helper cleanup fail
   });
   await writeFile(helperPath, [
     `#!${process.execPath}`,
-    'const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");',
+    'const { appendFileSync, readFileSync, writeFileSync } = process.getBuiltinModule("node:fs");',
     `const countPath = ${JSON.stringify(countPath)};`,
     'let count = 0;',
     'try { count = Number(readFileSync(countPath, "utf8")); } catch {}',

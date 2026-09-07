@@ -27,7 +27,7 @@
   <path d="M56 92h176v18H56m58-18v18m58-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
 
   <rect class="card" x="56" y="142" width="520" height="110"/>
-  <text class="label" x="86" y="186">V4 JSONL file order</text>
+  <text class="label" x="86" y="186">V4 journal commit order</text>
   <text class="detail" x="86" y="216">session header · commit 1 · commit 2 · …</text>
   <text class="detail" x="86" y="242">nodes · operation · queue · effects · head</text>
 

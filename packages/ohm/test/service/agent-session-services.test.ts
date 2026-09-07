@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { AuthStorage } from "../../src/auth/auth-storage.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import { getExtensionRuntimeHost } from "../../src/extensions/compat.js";
+import { getPluginRuntimeHost } from "../../src/plugins/compat.js";
 import { providerFromAdapter } from "../../src/providers/internal-runtime-bridge.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
 import { createModels } from "../../src/providers/models.js";
@@ -39,16 +39,16 @@ test("service composition contains hostile extension flag diagnostics without re
   const modelRuntime = await ModelRuntime.create({ models: createModels(), modelsPath: null });
   context.after(async () => await modelRuntime.close());
 
-  const extensionFlagValues = new Map<string, boolean>();
+  const pluginFlagValues = new Map<string, boolean>();
   // SAFETY: This hardening test intentionally injects a hostile non-string key at the typed flag boundary.
-  extensionFlagValues.set(hostileName as string, true);
+  pluginFlagValues.set(hostileName as string, true);
   const services = await createAgentSessionServices({
     cwd,
     agentDir,
     modelRuntime,
     settingsManager: SettingsManager.inMemory(),
-    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true },
-    extensionFlagValues,
+    resourceLoaderOptions: { noPluginCode: true, noSkills: true, noPromptTemplates: true, noThemes: true },
+    pluginFlagValues,
   });
 
   assert.deepEqual(services.diagnostics, [{ type: "error", message: "[Thrown object]" }]);
@@ -66,7 +66,7 @@ test("service composition returns the public agent-session result contract", asy
     agentDir,
     modelRuntime: await ModelRuntime.create({ models: createModels(), modelsPath: null }),
     settingsManager: SettingsManager.inMemory(),
-    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true },
+    resourceLoaderOptions: { noPluginCode: true, noSkills: true, noPromptTemplates: true, noThemes: true },
   });
   const result = await createAgentSessionFromServices({
     services,
@@ -75,8 +75,8 @@ test("service composition returns the public agent-session result contract", asy
   });
   context.after(async () => await result.session.close());
 
-  assert.deepEqual(Object.keys(result).sort(), ["extensionsResult", "modelFallbackMessage", "session"]);
-  assert.equal(result.extensionsResult, services.resourceLoader.getExtensions());
+  assert.deepEqual(Object.keys(result).sort(), ["modelFallbackMessage", "pluginsResult", "session"]);
+  assert.equal(result.pluginsResult, services.resourceLoader.getPlugins());
   assert.equal("services" in result, false);
   assert.equal("diagnostics" in result, false);
 });
@@ -97,7 +97,7 @@ test("service composition forwards the caller-owned provider wire lifecycle", as
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      extensionFactories: [{
+      pluginFactories: [{
         name: "service-provider-wire",
         factory(api) {
           api.on("before_provider_headers", (event) => {
@@ -109,9 +109,9 @@ test("service composition forwards the caller-owned provider wire lifecycle", as
     },
   });
   const wire = new ProviderWireInterceptorRegistry();
-  const extensionHost = getExtensionRuntimeHost(services.resourceLoader.getExtensions().runtime);
-  assert.ok(extensionHost);
-  assert.equal(extensionHost.hasListeners("before_provider_headers"), true);
+  const pluginHost = getPluginRuntimeHost(services.resourceLoader.getPlugins().runtime);
+  assert.ok(pluginHost);
+  assert.equal(pluginHost.hasListeners("before_provider_headers"), true);
   const result = await createAgentSessionFromServices({
     services,
     sessionManager: SessionManager.inMemory(cwd),
@@ -167,7 +167,7 @@ test("service model configuration is separate from the CLI-owned catalog", async
     agentDir,
     modelRuntime,
     settingsManager: SettingsManager.inMemory(),
-    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true },
+    resourceLoaderOptions: { noPluginCode: true, noSkills: true, noPromptTemplates: true, noThemes: true },
   });
 
   assert.equal(services.modelRuntime.getModel("service-custom", "service-model")?.id, "service-model");
@@ -226,7 +226,7 @@ test("service composition forwards the host-owned tool backend", async (context)
     agentDir,
     modelRuntime,
     settingsManager: SettingsManager.inMemory(),
-    resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true },
+    resourceLoaderOptions: { noPluginCode: true, noSkills: true, noPromptTemplates: true, noThemes: true },
   });
   const requests: string[] = [];
   const toolBackend: ToolExecutionBackend = {

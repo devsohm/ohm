@@ -21,22 +21,18 @@ import type {
   ProviderHeaders,
 } from "@ohm/models";
 
-import { defaultSecretRedactor } from "../auth/redaction.js";
+import { boundedRedactedMessage } from "../core/bounded-diagnostic.js";
 import { errorMessage } from "../core/errors.js";
 import { isObjectValue, STRING_VALUE } from "../core/value-schemas.js";
-import type { ExtensionProviderConfig } from "../extensions/model-boundary.js";
+import type { PluginProviderConfig } from "../plugins/model-boundary.js";
 import type { ModelRuntime, ModelRuntimeAuthOverrides } from "./model-compat.js";
 import { Value } from "typebox/value";
 
-export type ProviderConfigInput = ExtensionProviderConfig;
+export type ProviderConfigInput = PluginProviderConfig;
 
 export type ResolvedRequestAuth =
   | { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }
   | { ok: false; error: string };
-
-const MAX_AUTHENTICATION_ERROR_BYTES = 4_096;
-const MAX_REGISTERED_SECRET_BYTES = 64 * 1_024;
-const AUTHENTICATION_ERROR_TRUNCATION = "...";
 
 function cleanHeaders(headers: ProviderHeaders | undefined): Record<string, string> | undefined {
   if (headers === undefined) return undefined;
@@ -46,85 +42,14 @@ function cleanHeaders(headers: ProviderHeaders | undefined): Record<string, stri
   return Object.keys(selected).length === 0 ? undefined : selected;
 }
 
-function inputPrefix(value: string): string {
-  let end = Math.min(value.length, MAX_AUTHENTICATION_ERROR_BYTES + MAX_REGISTERED_SECRET_BYTES);
-  if (
-    end < value.length
-    && end > 0
-    && /[\uD800-\uDBFF]/u.test(value[end - 1]!)
-    && /[\uDC00-\uDFFF]/u.test(value[end]!)
-  ) end -= 1;
-  return value.slice(0, end);
-}
-
-function utf8Prefix(value: string, maximumBytes: number): string {
-  const bytes = Buffer.from(value, "utf8");
-  if (bytes.length <= maximumBytes) return value;
-  let end = maximumBytes;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString("utf8");
-}
-
 function authenticationError<Input>(error: Input): string {
   let source = errorMessage(error);
   if (isObjectValue(error) && !isProxy(error)) {
     const cause = Reflect.getOwnPropertyDescriptor(error, "cause");
     if (cause !== undefined && "value" in cause && cause.value !== undefined) source = errorMessage(cause.value);
   }
-  const retained = inputPrefix(source);
-  const redacted = defaultSecretRedactor.redact(retained);
-  const truncated = retained.length < source.length
-    || Buffer.byteLength(redacted, "utf8") > MAX_AUTHENTICATION_ERROR_BYTES;
-  if (!truncated) return redacted;
-  return `${utf8Prefix(
-    redacted,
-    MAX_AUTHENTICATION_ERROR_BYTES - AUTHENTICATION_ERROR_TRUNCATION.length,
-  )}${AUTHENTICATION_ERROR_TRUNCATION}`;
+  return boundedRedactedMessage(source);
 }
-
-type CatalogCapability = Pick<ModelRuntime,
-  | "getModels"
-  | "getAvailableSnapshot"
-  | "getModel"
-  | "getProviders"
-  | "getProvider"
-  | "getError"
-  | "refresh"
-  | "refreshConfig"
->;
-
-type AuthenticationCapability = Pick<ModelRuntime,
-  | "checkAuth"
-  | "hasConfiguredAuth"
-  | "isUsingOAuth"
-  | "isSubscription"
-  | "getProviderAuthStatus"
-  | "getCompatibilityRequestConfig"
-  | "getAuth"
-  | "setRuntimeApiKey"
-  | "removeRuntimeApiKey"
-  | "listCredentials"
-  | "login"
-  | "logout"
->;
-
-type ProviderCapability = Pick<ModelRuntime,
-  | "getRegisteredProviderConfig"
-  | "getRegisteredProviderIds"
-  | "getRegisteredNativeProvider"
-  | "registerProvider"
-  | "registerNativeProvider"
-  | "unregisterProvider"
->;
-
-type GenerationCapability = Pick<ModelRuntime,
-  | "stream"
-  | "complete"
-  | "streamSimple"
-  | "completeSimple"
->;
-
-type LifecycleCapability = Pick<ModelRuntime, "close" | "internalRegistry" | "models">;
 
 /**
  * Synchronous catalog view over the public model runtime.
@@ -133,58 +58,50 @@ type LifecycleCapability = Pick<ModelRuntime, "close" | "internalRegistry" | "mo
  * call `refresh()` when a caller needs a newer provider or authentication view.
  */
 export class ModelRegistry {
-  readonly #catalog: CatalogCapability;
-  readonly #authentication: AuthenticationCapability;
-  readonly #providers: ProviderCapability;
-  readonly #generation: GenerationCapability;
-  readonly #lifecycle: LifecycleCapability;
+  readonly #runtime: ModelRuntime;
 
   constructor(runtime: ModelRuntime) {
-    this.#catalog = runtime;
-    this.#authentication = runtime;
-    this.#providers = runtime;
-    this.#generation = runtime;
-    this.#lifecycle = runtime;
+    this.#runtime = runtime;
   }
 
-  getAll(): Model<Api>[] { return [...this.#catalog.getModels()]; }
-  getModels(providerId?: string): readonly Model<Api>[] { return [...this.#catalog.getModels(providerId)]; }
-  getAvailable(): Model<Api>[] { return [...this.#catalog.getAvailableSnapshot()]; }
-  getAvailableSnapshot(): readonly Model<Api>[] { return [...this.#catalog.getAvailableSnapshot()]; }
+  getAll(): Model<Api>[] { return [...this.#runtime.getModels()]; }
+  getModels(providerId?: string): readonly Model<Api>[] { return [...this.#runtime.getModels(providerId)]; }
+  getAvailable(): Model<Api>[] { return [...this.#runtime.getAvailableSnapshot()]; }
+  getAvailableSnapshot(): readonly Model<Api>[] { return [...this.#runtime.getAvailableSnapshot()]; }
   find(providerId: string, modelId: string): Model<Api> | undefined {
-    return this.#catalog.getModel(providerId, modelId);
+    return this.#runtime.getModel(providerId, modelId);
   }
   getModel(providerId: string, modelId: string): Model<Api> | undefined {
-    return this.#catalog.getModel(providerId, modelId);
+    return this.#runtime.getModel(providerId, modelId);
   }
-  getProviders(): readonly Provider[] { return [...this.#catalog.getProviders()]; }
-  getProvider(providerId: string): Provider | undefined { return this.#catalog.getProvider(providerId); }
+  getProviders(): readonly Provider[] { return [...this.#runtime.getProviders()]; }
+  getProvider(providerId: string): Provider | undefined { return this.#runtime.getProvider(providerId); }
   getProviderDisplayName(providerId: string): string {
-    return this.#catalog.getProvider(providerId)?.name ?? providerId;
+    return this.#runtime.getProvider(providerId)?.name ?? providerId;
   }
-  getError(): string | undefined { return this.#catalog.getError(); }
+  getError(): string | undefined { return this.#runtime.getError(); }
   refresh(options?: ModelsRefreshOptions): Promise<ModelsRefreshResult> {
-    return this.#catalog.refresh(options);
+    return this.#runtime.refresh(options);
   }
-  refreshConfig(): Promise<void> { return this.#catalog.refreshConfig(); }
+  refreshConfig(): Promise<void> { return this.#runtime.refreshConfig(); }
 
   checkAuth(providerId: string): Promise<AuthCheck | undefined> {
-    return this.#authentication.checkAuth(providerId);
+    return this.#runtime.checkAuth(providerId);
   }
   hasConfiguredAuth(providerOrModel: string | Model<Api>): boolean {
-    return this.#authentication.hasConfiguredAuth(providerOrModel);
+    return this.#runtime.hasConfiguredAuth(providerOrModel);
   }
   isUsingOAuth(providerOrModel: string | Model<Api>): boolean {
-    return this.#authentication.isUsingOAuth(providerOrModel);
+    return this.#runtime.isUsingOAuth(providerOrModel);
   }
   isSubscription(providerOrModel: string | Model<Api>): boolean {
-    return this.#authentication.isSubscription(providerOrModel);
+    return this.#runtime.isSubscription(providerOrModel);
   }
   getProviderAuthStatus(providerId: string): ReturnType<ModelRuntime["getProviderAuthStatus"]> {
-    return this.#authentication.getProviderAuthStatus(providerId);
+    return this.#runtime.getProviderAuthStatus(providerId);
   }
   getCompatibilityRequestConfig(model: Model<Api>): { headers?: ProviderHeaders; authHeader: boolean } {
-    return this.#authentication.getCompatibilityRequestConfig(model);
+    return this.#runtime.getCompatibilityRequestConfig(model);
   }
   getAuth(model: Model<Api>, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
   getAuth(providerId: string, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
@@ -193,12 +110,12 @@ export class ModelRegistry {
     overrides?: ModelRuntimeAuthOverrides,
   ): Promise<AuthResult | undefined> {
     return Value.Check(STRING_VALUE, providerOrModel)
-      ? this.#authentication.getAuth(providerOrModel, overrides)
-      : this.#authentication.getAuth(providerOrModel, overrides);
+      ? this.#runtime.getAuth(providerOrModel, overrides)
+      : this.#runtime.getAuth(providerOrModel, overrides);
   }
   async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
     try {
-      const result = await this.#authentication.getAuth(model);
+      const result = await this.#runtime.getAuth(model);
       if (result !== undefined) {
         const headers = cleanHeaders(result.auth.headers);
         return {
@@ -208,7 +125,7 @@ export class ModelRegistry {
           ...optionalProperties(result.env === undefined ? undefined : { env: result.env }),
         };
       }
-      const fallback = this.#authentication.getCompatibilityRequestConfig(model);
+      const fallback = this.#runtime.getCompatibilityRequestConfig(model);
       if (fallback.authHeader) return { ok: false, error: `No API key found for ${model.provider}` };
       const headers = cleanHeaders(fallback.headers);
       return { ok: true, ...optionalProperties(headers === undefined ? undefined : { headers }) };
@@ -217,68 +134,68 @@ export class ModelRegistry {
     }
   }
   setRuntimeApiKey(providerId: string, apiKey: string, options?: ModelsRefreshOptions): Promise<void> {
-    return this.#authentication.setRuntimeApiKey(providerId, apiKey, options);
+    return this.#runtime.setRuntimeApiKey(providerId, apiKey, options);
   }
   removeRuntimeApiKey(providerId: string): Promise<void> {
-    return this.#authentication.removeRuntimeApiKey(providerId);
+    return this.#runtime.removeRuntimeApiKey(providerId);
   }
-  listCredentials(): Promise<readonly CredentialInfo[]> { return this.#authentication.listCredentials(); }
+  listCredentials(): Promise<readonly CredentialInfo[]> { return this.#runtime.listCredentials(); }
   login(providerId: string, type: AuthType | "provider_account", interaction: AuthInteraction): Promise<Credential> {
-    return this.#authentication.login(providerId, type, interaction);
+    return this.#runtime.login(providerId, type, interaction);
   }
-  logout(providerId: string): Promise<void> { return this.#authentication.logout(providerId); }
+  logout(providerId: string): Promise<void> { return this.#runtime.logout(providerId); }
 
-  getRegisteredProviderConfig(providerId: string): ExtensionProviderConfig | undefined {
-    return this.#providers.getRegisteredProviderConfig(providerId);
+  getRegisteredProviderConfig(providerId: string): PluginProviderConfig | undefined {
+    return this.#runtime.getRegisteredProviderConfig(providerId);
   }
-  getRegisteredProviderIds(): readonly string[] { return [...this.#providers.getRegisteredProviderIds()]; }
+  getRegisteredProviderIds(): readonly string[] { return [...this.#runtime.getRegisteredProviderIds()]; }
   getRegisteredNativeProvider(providerId: string): Provider | undefined {
-    return this.#providers.getRegisteredNativeProvider(providerId);
+    return this.#runtime.getRegisteredNativeProvider(providerId);
   }
   registerProvider(provider: Provider): void;
-  registerProvider(providerId: string, config: ExtensionProviderConfig): void;
-  registerProvider(providerOrId: Provider | string, config?: ExtensionProviderConfig): void {
+  registerProvider(providerId: string, config: PluginProviderConfig): void;
+  registerProvider(providerOrId: Provider | string, config?: PluginProviderConfig): void {
     if (!Value.Check(STRING_VALUE, providerOrId)) {
-      this.#providers.registerNativeProvider(providerOrId);
+      this.#runtime.registerNativeProvider(providerOrId);
       return;
     }
     if (config === undefined) throw new Error("Provider configuration is required");
-    this.#providers.registerProvider(providerOrId, config);
+    this.#runtime.registerProvider(providerOrId, config);
   }
-  registerNativeProvider(provider: Provider): void { this.#providers.registerNativeProvider(provider); }
-  unregisterProvider(providerId: string): void { this.#providers.unregisterProvider(providerId); }
+  registerNativeProvider(provider: Provider): void { this.#runtime.registerNativeProvider(provider); }
+  unregisterProvider(providerId: string): void { this.#runtime.unregisterProvider(providerId); }
 
   stream<TApi extends Api>(
     model: Model<TApi>,
     context: Context,
     options?: ModelsApiStreamOptions<TApi>,
   ): AssistantMessageEventStream {
-    return this.#generation.stream(model, context, options);
+    return this.#runtime.stream(model, context, options);
   }
   complete<TApi extends Api>(
     model: Model<TApi>,
     context: Context,
     options?: ModelsApiStreamOptions<TApi>,
   ): Promise<AssistantMessage> {
-    return this.#generation.complete(model, context, options);
+    return this.#runtime.complete(model, context, options);
   }
   streamSimple(
     model: Model<Api>,
     context: Context,
     options?: ModelsSimpleStreamOptions,
   ): AssistantMessageEventStream {
-    return this.#generation.streamSimple(model, context, options);
+    return this.#runtime.streamSimple(model, context, options);
   }
   completeSimple(
     model: Model<Api>,
     context: Context,
     options?: ModelsSimpleStreamOptions,
   ): Promise<AssistantMessage> {
-    return this.#generation.completeSimple(model, context, options);
+    return this.#runtime.completeSimple(model, context, options);
   }
 
-  close(): Promise<void> { return this.#lifecycle.close(); }
-  internalRegistry(): ReturnType<ModelRuntime["internalRegistry"]> { return this.#lifecycle.internalRegistry(); }
-  models(): ReturnType<ModelRuntime["models"]> { return this.#lifecycle.models(); }
+  close(): Promise<void> { return this.#runtime.close(); }
+  internalRegistry(): ReturnType<ModelRuntime["internalRegistry"]> { return this.#runtime.internalRegistry(); }
+  models(): ReturnType<ModelRuntime["models"]> { return this.#runtime.models(); }
   async [Symbol.asyncDispose](): Promise<void> { await this.close(); }
 }

@@ -41,8 +41,8 @@ strings.
 ## WSL
 
 The harness runs as a Linux process and stores Linux-side state by default. Clipboard acquisition can call detected
-Windows helpers. Keep live session JSONL files on a filesystem with reliable append and rename behavior. Do not edit
-an active session file from Windows.
+Windows helpers. Keep live SQLite session databases on a filesystem with reliable locking and synchronization,
+preferably inside the Linux filesystem. Do not edit an active database or its WAL sidecars from Windows.
 
 ## Termux and remote terminals
 

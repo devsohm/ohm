@@ -78,7 +78,7 @@ node packages/ohm/dist/bin/ohm.js --offline --no-session
 
 Keep provider credential variables unset for deterministic offline work.
 `--offline` prevents startup catalog refreshes and package network operations;
-it does not turn arbitrary extension or tool code into a sandbox.
+it does not turn arbitrary plugin or tool code into a sandbox.
 
 ## Install a private source build
 
@@ -109,7 +109,7 @@ Important bases:
 
 | Input | Resolution base |
 | --- | --- |
-| Invocation `--extension`, `--skill`, `--prompt-template`, and `--theme` paths | Launch workspace |
+| Invocation `--plugin`, `--skill`, `--prompt-template`, and `--theme` paths | Launch workspace |
 | User-scoped local resource paths in settings | ohm home |
 | Project-scoped local resource paths in settings | `WORKSPACE/.ohm` |
 | `OHM_HOME` | Used as supplied after `~` expansion; choose an absolute value for repeatable tests |
@@ -167,18 +167,13 @@ authorization.
 
 ## Optional adapter seams
 
-The repository keeps three extension points available without shipping their
+The repository keeps two integration points available without shipping their
 optional products:
 
 | Future component | Stable starting point |
 | --- | --- |
-| Durable session backend | Journal readers, writers, validation, and recovery state from `@ohm/kernel/session-v4` |
 | Behavioral evaluation runner | `createAgentSessionServices()` and `createAgentSessionFromServices()` from `ohm/sdk` |
 | Multi-process supervisor | `RpcClient` from `ohm/interfaces`, or the JSONL process at `ohm/rpc-entry` |
-
-A storage adapter must prove reopen, fork, branch selection, bounded reads,
-concurrent append ordering, and failure rollback. A failed durable write must
-not publish an entry or leaf change.
 
 An evaluation runner should use isolated workspace and agent directories,
 require an explicit provider and model, support prompt, refresh, cancellation,
@@ -186,14 +181,14 @@ and cleanup steps, and normalize results without adding scenario-specific
 runtime behavior.
 
 A process supervisor should test correlated responses, interleaved events,
-extension UI requests, paged history, child exit with pending requests, and
+plugin UI requests, paged history, child exit with pending requests, and
 bounded shutdown. It can use the existing RPC process or the authenticated
 loopback service. The service owns one process and is not a supervisor.
 
-The installed CLI intentionally uses its JSONL `SessionManager`. Connecting a
-future database-backed adapter to that CLI requires a small session-factory
-bridge; the neutral kernel storage contract does not require that database or
-bridge today.
+The CLI and SDK use SQLite through `SessionManager` for durable sessions, or
+in-memory sessions when persistence is disabled. JSONL is an import/export
+format, not a selectable live storage backend. A failed durable write must not
+publish an entry or leaf change.
 
 ## TUI debugging
 

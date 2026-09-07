@@ -305,6 +305,65 @@ test("built-in image models remain separate and resolve OpenRouter credentials",
   assert.equal((await models.getAuth(catalog[0]!))?.apiKey, "catalog-key");
 });
 
+test("image invocation credentials bypass an unavailable broker while preserving provider endpoint and headers", async () => {
+  const models = createImagesModels({
+    environment: {},
+    credentialBroker: { resolve: async () => { throw new Error("broker unavailable"); } },
+  });
+  models.setProvider(createImagesProvider({
+    id: "explicit", auth: { environmentVariables: ["IMAGES_KEY"] }, models: [imageModel("explicit")],
+    api: { generateImages: async (model) => result(model) },
+  }));
+  assert.equal((await models.getAuth("explicit", { apiKey: "request-key" }))?.apiKey, "request-key");
+  assert.equal((await models.getAuth("explicit", { env: { IMAGES_KEY: "env-key" } }))?.apiKey, "env-key");
+  models.setProvider(createImagesProvider({
+    id: "custom", models: [imageModel("custom")],
+    auth: { apiKey: { resolve: async ({ credential }) => ({ auth: {
+      apiKey: credential?.key ?? "fallback", baseUrl: "https://custom.example/v1", headers: { "x-account": "yes" },
+    } }) } },
+    api: { generateImages: async (model) => result(model) },
+  }));
+  assert.deepEqual((await models.getAuth("custom", { apiKey: "request-key" }))?.auth, {
+    apiKey: "request-key", baseUrl: "https://custom.example/v1", headers: { "x-account": "yes" },
+  });
+});
+
+test("synchronous image refresh failures retry and replaced providers own their pending refresh", async () => {
+  const models = createImagesModels();
+  let calls = 0;
+  models.setProvider({
+    id: "sync", name: "Sync", auth: {}, getModels: () => [],
+    refreshModels() { calls += 1; throw new Error("synchronous failure"); },
+    generateImages: async (model) => result(model),
+  });
+  await assert.rejects(models.refresh("sync"));
+  await assert.rejects(models.refresh("sync"));
+  assert.equal(calls, 2);
+
+  let releaseOld!: (models: ImagesModel[]) => void;
+  const oldGate = new Promise<ImagesModel[]>((resolve) => { releaseOld = resolve; });
+  models.setProvider(createImagesProvider({
+    id: "dynamic", auth: {}, models: [], refreshModels: () => oldGate,
+    api: { generateImages: async (model) => result(model) },
+  }));
+  const old = models.refresh("dynamic");
+  let releaseNew!: (models: ImagesModel[]) => void;
+  const newGate = new Promise<ImagesModel[]>((resolve) => { releaseNew = resolve; });
+  let newerCalls = 0;
+  models.setProvider(createImagesProvider({
+    id: "dynamic", auth: {}, models: [], refreshModels: async () => { newerCalls += 1; return newGate; },
+    api: { generateImages: async (model) => result(model) },
+  }));
+  const current = models.refresh("dynamic");
+  releaseOld([imageModel("dynamic", "old")]);
+  await old;
+  const duplicate = models.refresh("dynamic");
+  releaseNew([imageModel("dynamic", "new")]);
+  await Promise.all([current, duplicate]);
+  assert.equal(newerCalls, 1, "old finalizer must not erase a replacement's pending refresh");
+  assert.equal(models.getModel("dynamic", "new")?.id, "new");
+});
+
 test("the maintained image catalog is copied, typed, and omits unknown prices", () => {
   assert.deepEqual(getImageProviders(), ["openrouter"]);
   const catalog = getImageModels("openrouter");

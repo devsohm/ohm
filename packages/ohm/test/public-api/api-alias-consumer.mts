@@ -3,13 +3,15 @@ import type * as Auth from "ohm/auth";
 import type * as Config from "ohm/config";
 import type * as Context from "ohm/context";
 import type * as Core from "ohm/core";
-import type * as Extensions from "ohm/extensions";
+import type * as Extensions from "ohm/plugins";
 import type * as Images from "ohm/images";
 import type * as Interfaces from "ohm/interfaces";
 import type * as Modes from "ohm/modes";
 import type * as Process from "ohm/process";
 import type * as Providers from "ohm/providers";
 import type * as Service from "ohm/service";
+import type * as Sdk from "ohm/sdk";
+import { inspectAgentSession } from "ohm/sdk";
 import type * as Tools from "ohm/tools";
 import type * as Tui from "ohm/tui";
 import {
@@ -28,6 +30,16 @@ const effectiveApplicationBindings: KeybindingsConfig = applicationKeybindings.g
 const compatibleApplicationKeybindings = new applicationKeybindingsConstructor(TUI_KEYBINDINGS);
 compatibleApplicationKeybindings.matches("", "tui.input.submit");
 
+const pickerSnapshot = {
+  title: "Choose", query: "", selected: 0, items: [],
+} satisfies NonNullable<Tui.TuiViewState["overlay"]>;
+const labelPromptSnapshot = {
+  ...pickerSnapshot, promptMode: "input", queryLabel: "label> ", query: "bookmark",
+} satisfies NonNullable<Tui.TuiViewState["overlay"]>;
+const confirmationSnapshot = {
+  ...pickerSnapshot, promptMode: "confirmation", status: "Delete this session?",
+} satisfies NonNullable<Tui.TuiViewState["overlay"]>;
+
 type GenericName =
   | "AgentSessionConfig" | "AgentSessionRuntime" | "AgentSessionRuntimeDiagnostic" | "AgentSessionServices"
   | "AppKeybinding" | "Args" | "AssistantMessageComponent" | "BashExecutionComponent" | "BorderedLoader"
@@ -35,14 +47,14 @@ type GenericName =
   | "CompactionSummaryMessageComponent" | "CreateAgentSessionFromServicesOptions" | "CreateAgentSessionRuntimeFactory"
   | "CreateAgentSessionRuntimeResult" | "CreateAgentSessionServicesOptions" | "CreateModelRuntimeOptions"
   | "CustomEditor" | "CustomMessageComponent" | "CutPointResult" | "DEFAULT_COMPACTION_SETTINGS"
-  | "DEFAULT_MAX_BYTES" | "DEFAULT_MAX_LINES" | "DynamicBorder" | "EditDiffResult" | "ExtensionEditorComponent"
-  | "ExtensionInputComponent" | "ExtensionRunner" | "ExtensionSelectorComponent" | "FileOperations" | "FooterComponent"
+  | "DEFAULT_MAX_BYTES" | "DEFAULT_MAX_LINES" | "DynamicBorder" | "EditDiffResult" | "PluginEditorComponent"
+  | "PluginInputComponent" | "PluginRunner" | "PluginSelectorComponent" | "FileOperations" | "FooterComponent"
   | "GenerateBranchSummaryOptions" | "InteractiveMode" | "InteractiveModeOptions" | "LoginDialogComponent"
   | "MainOptions" | "ModelInfo" | "ModelRuntime" | "ModelRuntimeAuthOverrides"
   | "ModelSelectorComponent" | "OAuthSelectorComponent" | "ParsedSkillBlock" | "ProjectTrustDecision"
   | "ProjectTrustStore" | "ProjectTrustStoreEntry" | "ProjectTrustUpdate" | "PromptOptions" | "RenderDiffOptions"
-  | "ResizedImage" | "ResolveCliModelResult" | "RpcExtensionUIRequest"
-  | "RpcExtensionUIResponse" | "SessionSelectorComponent" | "SessionStats" | "SettingsCallbacks"
+  | "ResizedImage" | "ResolveCliModelResult" | "RpcPluginUIRequest"
+  | "RpcPluginUIResponse" | "SessionSelectorComponent" | "SessionStats" | "SettingsCallbacks"
   | "SettingsConfig" | "SettingsSelectorComponent" | "ShowImagesSelectorComponent" | "SkillInvocationMessageComponent"
   | "ThemeColor" | "ThemeSelectorComponent" | "ThinkingSelectorComponent" | "ToolExecutionComponent"
   | "ToolAuthorizationContext" | "ToolAuthorizationDecision" | "ToolAuthorizationHandler"
@@ -51,7 +63,7 @@ type GenericName =
   | "UserMessageComponent" | "UserMessageSelectorComponent" | "VERSION" | "VisualTruncateResult"
   | "calculateContextTokens" | "collectEntriesForBranchSummary" | "compact" | "convertToLlm" | "convertToPng"
   | "copyToClipboard" | "createAgentSessionFromServices" | "createAgentSessionRuntime" | "createAgentSessionServices"
-  | "createExtensionRuntime" | "discoverAndLoadExtensions" | "estimateTokens" | "findCutPoint" | "findTurnStartIndex"
+  | "createPluginRuntime" | "discoverAndLoadPlugins" | "estimateTokens" | "findCutPoint" | "findTurnStartIndex"
   | "formatDimensionNote" | "formatSize" | "generateBranchSummary" | "generateSummary" | "generateSummaryWithUsage"
   | "getDocsPath" | "getExamplesPath" | "getLanguageFromPath" | "getLastAssistantUsage" | "getMarkdownTheme"
   | "getPackageDir" | "getReadmePath" | "getSelectListTheme" | "getSettingsListTheme" | "getShellConfig"
@@ -91,6 +103,18 @@ const projectTrustReadsAsynchronously = true satisfies (
   ReturnType<InstanceType<typeof Root.ProjectTrustStore>["get"]> extends Promise<Root.ProjectTrustDecision> ? true : false
 );
 declare const interactiveMode: InstanceType<typeof Root.InteractiveMode>;
+declare const inspectSession: Root.AgentSession;
+const inspection: Root.AgentSessionInspection = inspectAgentSession(inspectSession);
+const sdkInspection: Sdk.AgentSessionInspection = inspection;
+const serviceInspection: Service.AgentSessionInspection = inspection;
+const authorizationScope: "model_requested_tools" = inspection.toolPolicy.authorization.scope;
+const authorizationMode: "default_allow" | "host_handler" = inspectSession.getToolPolicy().authorization.mode;
+const pluginToolCallGate: boolean = inspection.toolPolicy.dynamicGates.pluginToolCall;
+const agentBeforeToolCallGate: boolean = inspection.toolPolicy.dynamicGates.agentBeforeToolCall;
+const recordedFinishReason: Core.FinishReason | null | undefined = inspection.activity.operations[0]?.finishReason;
+const recordedErrorCategory: Core.AdapterError["category"] | null | undefined = inspection.activity.operations[0]?.errorCategory;
+void [authorizationScope, authorizationMode, pluginToolCallGate, agentBeforeToolCallGate, recordedFinishReason, recordedErrorCategory];
+const loadedExtensionPaths: string[] = inspectSession.getLoadedPlugins().map((extension) => extension.path);
 interactiveMode.renderInitialMessages();
 const pendingInteractiveInput: Promise<string> = interactiveMode.getUserInput();
 interactiveMode.clearEditor();
@@ -168,25 +192,23 @@ type LegacyMinimalRuntimeFactory = (
 const legacyRuntimeFactoryRemainsCompatible = true satisfies (
   LegacyMinimalRuntimeFactory extends Root.CreateAgentSessionRuntimeFactory ? true : false
 );
-declare const extensionApi: Extensions.ExtensionAPI;
-const durableJobStart: Promise<Extensions.ExtensionJobStatus> = extensionApi.jobs.start(
+declare const extensionApi: Extensions.PluginAPI;
+const durableJobStart: Promise<Extensions.PluginJobStatus> = extensionApi.jobs.start(
   { kind: "consumer.fixture", idempotencyKey: "stable" },
   ({ id, attempt, signal, replaceMetadata }) => {
     void [id, attempt, signal, replaceMetadata];
     return { accepted: true };
   },
 );
-const childSessionStart: Promise<Extensions.ExtensionChildSessionStatus> = extensionApi.childSessions.spawn({
-  model: "fixture-model",
-  thinkingLevel: "high",
-  tools: ["read"],
-});
 type PublicNames = RootNames | keyof typeof Auth | keyof typeof Config | keyof typeof Context | keyof typeof Core
   | keyof typeof Extensions | keyof typeof Images | keyof typeof Interfaces | keyof typeof Modes | keyof typeof Process
   | keyof typeof Providers | keyof typeof Service | keyof typeof Tools | keyof typeof Tui;
 declare const genericName: GenericName;
 declare const publicName: PublicNames;
 void [
+  sdkInspection,
+  serviceInspection,
+  loadedExtensionPaths,
   genericName,
   publicName,
   referenceRootValuesAreComplete,
@@ -208,6 +230,9 @@ void [
   rawTerminalKeybindings,
   applicationKeybindings,
   effectiveApplicationBindings,
+  pickerSnapshot,
+  labelPromptSnapshot,
+  confirmationSnapshot,
   modelAuthFreshness,
   cliModelInputContract,
   cliModelResultContract,
@@ -215,7 +240,6 @@ void [
   legacyRuntimeFactoryRemainsCompatible,
   runtimeFactoryScopeContract,
   durableJobStart,
-  childSessionStart,
 ];
 
 export type {
@@ -247,8 +271,8 @@ export type {
   RenderDiffOptions,
   ResizedImage,
   ResolveCliModelResult,
-  RpcExtensionUIRequest,
-  RpcExtensionUIResponse,
+  RpcPluginUIRequest,
+  RpcPluginUIResponse,
   SessionStats,
   SettingsCallbacks,
   SettingsConfig,

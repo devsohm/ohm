@@ -28,10 +28,10 @@ For a one-shot smoke test, use one visible, bounded shell operation:
 4. Run the requested smoke check.
 5. Stop only the captured process in guaranteed cleanup, including failure and cancellation paths.
 
-Never use a pattern-based kill, scan unrelated machine ports, silently leave a background process running, or claim a persistent server is managed after the tool call finishes. If the user needs a server to remain available, run it visibly in the foreground for them to control or build a reviewed host extension with explicit lifecycle ownership.
+Never use a pattern-based kill, scan unrelated machine ports, silently leave a background process running, or claim a persistent server is managed after the tool call finishes. If the user needs a server to remain available, run it visibly in the foreground for them to control or build a reviewed plugin with explicit lifecycle ownership.
 
 ## Respect operational authority
 
 Building and testing local project files does not authorize deployment, publication, infrastructure changes, release creation, remote messages, credential use, or destructive data operations. Perform those actions only when the user explicitly places them in scope, then follow the project's own release and rollback instructions.
 
-Keep project-specific cloud, deployment, and secret procedures in that project's instructions, skill, or extension. Do not turn this general workflow into a universal deployment engine.
+Keep project-specific cloud, deployment, and secret procedures in that project's instructions, skill, or plugin. Do not turn this general workflow into a universal deployment engine.

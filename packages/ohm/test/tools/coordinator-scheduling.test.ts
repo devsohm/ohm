@@ -53,7 +53,7 @@ async function toolContext(
   };
 }
 
-test("conflicting parallel tools execute in separate source-ordered waves", async (t) => {
+test("unrelated tools bypass blocked claims while conflicting calls retain source order", async (t) => {
   let releaseFirst!: () => void;
   const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
   let firstStarted!: () => void;
@@ -64,7 +64,11 @@ test("conflicting parallel tools execute in separate source-ordered waves", asyn
     validate() {},
     resources(input) {
       const id = fixtureId(input);
-      return [{ kind: "file", key: id === "c" ? "/workspace/other" : "/workspace/shared", mode: "write" }];
+      return [{
+        kind: "file",
+        key: id === "c" || id === "d" ? "/workspace/other" : "/workspace/shared",
+        mode: id === "a" || id === "e" ? "read" : "write",
+      }];
     },
     async execute(input) {
       const id = fixtureId(input);
@@ -82,13 +86,15 @@ test("conflicting parallel tools execute in separate source-ordered waves", asyn
     { callId: "call-a", name: "parallel", input: { id: "a" }, index: 0 },
     { callId: "call-b", name: "parallel", input: { id: "b" }, index: 1 },
     { callId: "call-c", name: "parallel", input: { id: "c" }, index: 2 },
+    { callId: "call-d", name: "parallel", input: { id: "d" }, index: 3 },
+    { callId: "call-e", name: "parallel", input: { id: "e" }, index: 4 },
   ], await toolContext(t));
 
   await within(firstEntered, "the first resource wave");
   await new Promise<void>((resolve) => setImmediate(resolve));
   let schedulingError: unknown;
   try {
-    assert.deepEqual(trace, ["start:a"]);
+    assert.deepEqual(trace, ["start:a", "start:c", "end:c", "start:d", "end:d"]);
   } catch (error) {
     schedulingError = error;
   } finally {
@@ -96,8 +102,9 @@ test("conflicting parallel tools execute in separate source-ordered waves", asyn
   }
   const results = await running;
   if (schedulingError !== undefined) throw schedulingError;
-  assert.ok(trace.indexOf("start:c") > trace.indexOf("end:a"));
-  assert.deepEqual(results.map((entry) => entry.result.content), ["a", "b", "c"]);
+  assert.ok(trace.indexOf("start:b") > trace.indexOf("end:a"));
+  assert.ok(trace.indexOf("start:e") > trace.indexOf("end:b"));
+  assert.deepEqual(results.map((entry) => entry.result.content), ["a", "b", "c", "d", "e"]);
 });
 
 test("cancellation in one resource wave prevents later waves from dispatching", async (t) => {
@@ -318,6 +325,40 @@ test("sequential tools are exclusive barriers between parallel waves", async (t)
   if (schedulingError !== undefined) throw schedulingError;
   assert.deepEqual(results.map((entry) => entry.result.content), ["a", "b", "sequential", "c", "d"]);
 });
+
+for (const first of ["sequential", "unknown"] as const) {
+  test(`${first} completion failure escapes request validation and prevents later tools`, async (t) => {
+    for (const failure of [new Error("completion failed"), undefined]) {
+      const executions: string[] = [];
+      const completions: string[] = [];
+      const names = [first, "later"];
+      const tools = names.filter((name) => name !== "unknown").map((name): HarnessTool => ({
+        definition: { name, description: `${name} fixture`, inputSchema: { type: "object" } },
+        executionMode: name === "sequential" ? "sequential" : "parallel",
+        validate() {},
+        resources() { return []; },
+        async execute() {
+          executions.push(name);
+          return { content: name, isError: false };
+        },
+      }));
+      const coordinator = new ToolCoordinator(new ToolRegistry(tools));
+      await assert.rejects(coordinator.execute(
+        names.map((name, index) => ({ callId: name, name, input: {}, index })),
+        await toolContext(t),
+        {
+          completed(entry) {
+            completions.push(entry.invocation.name);
+            if (completions.length === 1) throw failure;
+          },
+        },
+      ), (error) => error === failure);
+      assert.deepEqual(executions, first === "unknown" ? [] : [first]);
+      assert.deepEqual(completions, [first]);
+      assert.equal(coordinator.turnSnapshot().changed, false);
+    }
+  });
+}
 
 test("invalid resource claims fail before dispatch", async (t) => {
   let executions = 0;

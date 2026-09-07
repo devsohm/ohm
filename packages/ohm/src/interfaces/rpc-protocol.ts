@@ -1,18 +1,19 @@
 import type { AgentMessage } from "@ohm/kernel";
+import type { AgentSessionInspection } from "../service/session-inspection.js";
 import type { Api, ImageContent, Model } from "@ohm/models";
 
 import type { SourceInfo } from "../core/source-info.js";
-import type { CompactionResult } from "../extensions/direct.js";
+import type { CompactionResult } from "../plugins/direct.js";
 import type {
-	ExtensionWireServiceDescriptor,
-	ExtensionWireServiceRequest,
-	ExtensionWireServiceResponse,
-} from "../extensions/wire-services.js";
+	PluginWireServiceDescriptor,
+	PluginWireServiceRequest,
+	PluginWireServiceResponse,
+} from "../plugins/wire-services.js";
 import type {
-	ExtensionSessionProvenance,
+	PluginSessionProvenance,
 	SessionEntry,
 	SessionTreeNode,
-} from "../extensions/session-contract.js";
+} from "../plugins/session-contract.js";
 import type { ProviderModelThinkingLevel } from "../providers/models.js";
 import type {
 	PortablePresentationActionRequest,
@@ -21,6 +22,7 @@ import type {
 } from "./portable-presentation.js";
 import type {
 	AgentSessionBashResult,
+	AgentSessionModelCycleOptions,
 	AgentSessionRecoveryResult,
 	AgentSessionStats,
 	AgentSessionSuspendedRun,
@@ -36,7 +38,7 @@ export type RpcModel = Model<Api>;
 export type RpcAgentMessage =
 	| Exclude<AgentMessage, { role: "custom" }>
 	| (Extract<AgentMessage, { role: "custom" }> & {
-		provenance?: ExtensionSessionProvenance;
+		provenance?: PluginSessionProvenance;
 	});
 
 /** Public session entry with the RPC custom-message projection fully typed. */
@@ -66,9 +68,10 @@ type RpcCommandPayloads = {
 	get_recovery_status: object;
 	recover_interrupted_run: { resolutions?: RpcRecoveryResolution[] };
 	set_model: { provider: string; modelId: string };
-	cycle_model: object;
+	cycle_model: AgentSessionModelCycleOptions & { direction?: "forward" | "backward" };
 	get_available_models: object;
 	get_session_stats: object;
+	get_inspection: object;
 	export_html: { outputPath?: string };
 	switch_session: { sessionPath: string };
 	fork: { entryId: string };
@@ -83,7 +86,7 @@ type RpcCommandPayloads = {
 	set_follow_up_mode: { mode: "all" | "one-at-a-time" };
 	set_steering_mode: { mode: "all" | "one-at-a-time" };
 	get_available_thinking_levels: object;
-	cycle_thinking_level: object;
+	cycle_thinking_level: { persist?: boolean };
 	set_thinking_level: { level: ProviderModelThinkingLevel };
 	get_entries: { since?: string; afterSequence?: number; limit?: number };
 	get_tree: { cursor?: string; limit?: number };
@@ -94,7 +97,7 @@ type RpcCommandPayloads = {
 	get_portable_presentations: object;
 	presentation_action: PortablePresentationActionRequest;
 	get_extension_wire_services: object;
-	extension_wire_request: { request: ExtensionWireServiceRequest };
+	extension_wire_request: { request: PluginWireServiceRequest };
 };
 
 type RpcCommandOf<K extends keyof RpcCommandPayloads> = {
@@ -178,6 +181,7 @@ type RpcResponseData = {
 	compact: CompactionResult;
 	bash: AgentSessionBashResult;
 	get_session_stats: AgentSessionStats;
+	get_inspection: AgentSessionInspection;
 	export_html: { path: string };
 	switch_session: { cancelled: boolean };
 	fork: { text: string; cancelled: boolean };
@@ -190,8 +194,8 @@ type RpcResponseData = {
 	get_commands: { commands: RpcSlashCommand[] };
 	get_portable_presentations: { presentations: readonly PortablePresentationEvent[] };
 	presentation_action: PortablePresentationActionResult;
-	get_extension_wire_services: { services: readonly ExtensionWireServiceDescriptor[] };
-	extension_wire_request: ExtensionWireServiceResponse;
+	get_extension_wire_services: { services: readonly PluginWireServiceDescriptor[] };
+	extension_wire_request: PluginWireServiceResponse;
 };
 
 export type RpcPortablePresentationEvent = PortablePresentationEvent;
@@ -228,7 +232,7 @@ export type RpcResponse =
 			error: string;
 	  };
 
-type ExtensionUiPayloads = {
+type PluginUiPayloads = {
 	confirm: { title: string; message: string; timeout?: number };
 	select: { title: string; options: string[]; timeout?: number };
 	input: { title: string; placeholder?: string; timeout?: number };
@@ -245,16 +249,16 @@ type ExtensionUiPayloads = {
 	set_editor_text: { text: string };
 };
 
-export type RpcExtensionUiRequest = {
-	[K in keyof ExtensionUiPayloads]: {
+export type RpcPluginUiRequest = {
+	[K in keyof PluginUiPayloads]: {
 		type: "extension_ui_request";
 		id: string;
 		extensionId: string;
 		method: K;
-	} & ExtensionUiPayloads[K];
-}[keyof ExtensionUiPayloads];
+	} & PluginUiPayloads[K];
+}[keyof PluginUiPayloads];
 
-export interface RpcExtensionErrorEvent {
+export interface RpcPluginErrorEvent {
 	type: "extension_error";
 	extensionId: string;
 	extensionPath: string;
@@ -262,14 +266,14 @@ export interface RpcExtensionErrorEvent {
 	error: string;
 }
 
-type RpcExtensionUiReply<TPayload extends object> = {
+type RpcPluginUiReply<TPayload extends object> = {
 	type: "extension_ui_response";
 	id: string;
 } & TPayload;
 
-export type RpcExtensionUiResponse =
-	| RpcExtensionUiReply<{ value: string }>
-	| RpcExtensionUiReply<{ confirmed: boolean }>
-	| RpcExtensionUiReply<{ cancelled: true }>;
+export type RpcPluginUiResponse =
+	| RpcPluginUiReply<{ value: string }>
+	| RpcPluginUiReply<{ confirmed: boolean }>
+	| RpcPluginUiReply<{ cancelled: true }>;
 
-export type RpcInputRecord = RpcCommand | RpcExtensionUiResponse;
+export type RpcInputRecord = RpcCommand | RpcPluginUiResponse;

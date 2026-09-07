@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "description": "Trusted service, local event, and custom message example for ohm",
-  "ohm": { "extensions": ["extensions/index.mjs"] }
+  "ohm": { "entrypoints": ["src/index.mjs"] }
 }

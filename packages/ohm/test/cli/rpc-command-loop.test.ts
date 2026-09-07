@@ -13,7 +13,7 @@ import { parseArgs } from "../../src/cli/args.js";
 import { RpcRuntimeDispatcher, type RpcSessionRuntime } from "../../src/interfaces/rpc-runtime.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
 import { isJsonObject, type JsonObject } from "../../src/core/json.js";
-import type { RpcCommand, RpcExtensionUiResponse } from "../../src/interfaces/rpc-protocol.js";
+import type { RpcCommand, RpcPluginUiResponse } from "../../src/interfaces/rpc-protocol.js";
 import type { AgentSessionModel } from "../../src/service/agent-session.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
 
@@ -116,7 +116,7 @@ test("the installed RPC loop lets UI responses bypass saturated commands", async
     ]),
     writer: { async send() {} },
     bridge: {
-      handle(_response: RpcExtensionUiResponse) {
+      handle(_response: RpcPluginUiResponse) {
         uiResponses += 1;
         gate.resolve();
         return true;
@@ -235,8 +235,8 @@ test("the installed RPC loop bounds prompts before session admission", async (co
     credentialStore: new InMemoryCredentialStore(),
     projectTrusted: false,
     ephemeral: true,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills: false,
     promptTemplates: false,
     themes: false,

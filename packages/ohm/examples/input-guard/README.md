@@ -6,7 +6,7 @@ This example shows two separate controls:
 - a fail-closed guard for the built-in `bash` tool.
 
 ```text
-ohm install ./packages/ohm/examples/input-guard
+ohm plugins install ./packages/ohm/examples/input-guard
 ```
 
 It handles `/example-ignore`, shortens oversized submitted text, and blocks

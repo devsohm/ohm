@@ -64,7 +64,7 @@ test("persistent structural slots replace and dispose on abort, clear, and close
     render: () => line("FOOTER", "muted"),
     dispose: () => disposed.push("footer"),
   }), clear.signal);
-  controller.clearExtensionUi();
+  controller.clearPluginUi();
   assert.deepEqual(disposed, ["header-a", "header-b", "widget", "footer"]);
 
   controller.setPersistentComponent("header", "fixture:close", () => ({
@@ -117,7 +117,7 @@ test("streamed tool arguments reach the terminal before the canonical tool reque
   controller.renderNow();
 
   const partialFrame = stripAnsi(output.text);
-  assert.match(partialFrame, /read · receiving input[\s\S]*live\.ts/u);
+  assert.match(partialFrame, /read[^\n]*live\.ts[^\n]*receiving input/u);
   assert.doesNotMatch(partialFrame, /"path"/u);
 
   controller.render(envelope({
@@ -170,7 +170,8 @@ test("default extension cards render valid live input as a structured summary", 
   controller.renderNow();
 
   const liveFrame = stripAnsi(output.text);
-  assert.match(liveFrame, /custom_live · receiving input[\s\S]*first-delta/u);
+  assert.match(liveFrame, /custom_live[^\n]*receiving input/u);
+  assert.match(liveFrame, /first-delta/u);
   assert.doesNotMatch(liveFrame, /\{"query":"first-delta"\}/u);
   controller.close();
 });
@@ -189,7 +190,7 @@ test("large write streams keep one bounded visible card through every lifecycle 
   controller.render(envelope({ type: "tool_call_delta", index: 0, jsonFragment: rawArguments }, ++sequence));
   controller.renderNow();
   const streamed = stripAnsi(output.text);
-  assert.match(streamed, /write · receiving input[\s\S]*architecture\.html · receiving [\d,]+ argument bytes/u);
+  assert.match(streamed, /write[^\n]*architecture\.html · receiving [\d,]+ argument bytes[^\n]*receiving input/u);
   assert.doesNotMatch(streamed, /architecture-source-\d+/u);
   assert.doesNotMatch(streamed, /"content"/u);
 
@@ -221,7 +222,7 @@ test("large write streams keep one bounded visible card through every lifecycle 
   output.chunks.length = 0;
   controller.renderNow();
   const queued = stripAnsi(output.text);
-  assert.match(queued, /write · queued[\s\S]*architecture\.html · 120 lines · [\d,]+ bytes/u);
+  assert.match(queued, /write[^\n]*architecture\.html · 120 lines · [\d,]+ bytes[^\n]*queued/u);
   assert.doesNotMatch(queued, /"content"/u);
 
   controller.render(envelope({
@@ -302,7 +303,7 @@ test("write argument deltas update one bounded metadata card before execution st
   controller.render(envelope({ type: "assistant_started", step: 1 }, ++sequence));
   controller.render(envelope({ type: "tool_call_started", index: 0, name: "write" }, ++sequence));
   await tick();
-  assert.equal((viewport().match(/write · receiving input/gu)?.length ?? 0), 1);
+  assert.equal((viewport().match(/write[^\n]*receiving input/gu)?.length ?? 0), 1);
 
   const source = Array.from({ length: 16 }, (_, index) => `const line${String(index + 1).padStart(2, "0")} = ${index + 1};`);
   const fragments = [
@@ -322,7 +323,7 @@ test("write argument deltas update one bounded metadata card before execution st
       live = viewport();
       argumentBytes = Number(/receiving ([\d,]+) argument bytes/u.exec(live)?.[1]?.replaceAll(",", "") ?? 0);
     }
-    assert.equal((live.match(/write · receiving input/gu)?.length ?? 0), 1, `frame ${index + 1}`);
+    assert.equal((live.match(/write[^\n]*receiving input/gu)?.length ?? 0), 1, `frame ${index + 1}`);
     assert.ok(argumentBytes > previousArgumentBytes, `frame ${index + 1} did not advance its byte count`);
     previousArgumentBytes = argumentBytes;
     assert.doesNotMatch(live, /const line\d+ = \d+;/u);
@@ -330,12 +331,12 @@ test("write argument deltas update one bounded metadata card before execution st
   }
 
   const collapsed = viewport();
-  assert.match(collapsed, /Ctrl\+O details/u);
+  assert.doesNotMatch(collapsed, /Ctrl\+O details/u);
   assert.doesNotMatch(collapsed, /const line08 = 8;/u);
   input.write(Buffer.from([15]));
   await tick();
   const expanded = viewport();
-  assert.equal((expanded.match(/write · receiving input/gu)?.length ?? 0), 1);
+  assert.equal((expanded.match(/write[^\n]*receiving input/gu)?.length ?? 0), 1);
   assert.match(expanded, /const line08 = 8;/u);
   assert.match(expanded, /const line16 = 16;/u);
   assert.doesNotMatch(expanded, /Ctrl\+O details/u);

@@ -67,7 +67,7 @@ import {
   type ObservabilityMode,
   type ObservabilitySink,
 } from "../core/observability.js";
-import { BUILTIN_SLASH_COMMANDS } from "../core/slash-commands.js";
+import { runtimeDiscoveryView } from "../core/runtime-discovery.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import {
   ProviderCredentialStoreAdapter,
@@ -83,6 +83,9 @@ import {
 } from "../providers/index.js";
 import { openRouterBrowserAccount } from "../providers/openrouter-browser-auth.js";
 import { ModelRegistry } from "../providers/model-registry.js";
+import { loadRuntimeModelConfiguration, runtimeProviderConfiguration } from "../providers/model-runtime-config.js";
+import { RuntimeCredentialStore } from "../providers/runtime-credential-store.js";
+import { pluginModelRegistry } from "../plugins/model-boundary.js";
 import {
   OPENAI_CODEX_TRANSPORT_OBSERVER,
   runtimeOpenAICodexTransportObserver,
@@ -91,6 +94,7 @@ import {
 } from "../providers/openai-codex-observability.js";
 import {
   providerFromAdapter,
+  providerAdapterFromModels,
   providerModelFromInfo,
   providerModelToInfo,
 } from "../providers/internal-runtime-bridge.js";
@@ -106,32 +110,27 @@ import {
   AgentSession,
   createProviderAdapter,
   type AgentSessionOptions,
+  type AgentSessionOwnership,
   type RuntimeProviderConfig,
 } from "../service/index.js";
-import {
-  closeAgentSessionForReplacement,
-  markAgentSessionSharedStoreReplacement,
-} from "../service/agent-session-owner.js";
 import { runtimeProviderModelProtocolFamily } from "../service/internal-provider-protocol.js";
 import { SessionManager } from "../storage/index.js";
 import { bundledAuthoringResources } from "../prompts/resources.js";
 import {
-  ExtensionCatalog,
-  type ExtensionPromptTemplate,
-  type ExtensionTheme,
-} from "../extensions/index.js";
+  PluginCatalog,
+  type PluginPromptTemplate,
+  type PluginTheme,
+} from "../plugins/index.js";
 import {
-  appendDirectExtensions,
+  appendDirectPlugins,
   bindDirectProviderWireLifecycle,
-  loadDirectExtensions,
-  RuntimeExtensionHost,
-  type RuntimeDiscoverableResource,
+  loadDirectPlugins,
+  RuntimePluginHost,
   type RuntimeDirectPathMetadata,
-  type RuntimeInlineExtension,
-  type RuntimeDiscoveryView,
-} from "../extensions/runtime.js";
-import type { ExtensionCommandContextActions } from "../extensions/direct.js";
-import { extensionSessionManager } from "../extensions/session-contract.js";
+  type RuntimeInlinePlugin,
+} from "../plugins/runtime.js";
+import type { PluginCommandContextActions } from "../plugins/direct.js";
+import { pluginSessionManager } from "../plugins/session-contract.js";
 import { expandPath, agentPaths, type AgentPaths } from "./paths.js";
 import { createNetworkTransport, type NetworkTransport } from "../net/index.js";
 import { sha256 } from "../tools/hash.js";
@@ -179,19 +178,19 @@ export interface LoadedRuntime {
   providerWireLifecycle: ProviderWireLifecycleHost;
   sessionManager: SessionManager;
   session: AgentSession;
-  extensions: ExtensionCatalog;
-  runtimeExtensions: RuntimeExtensionHost;
+  plugins: PluginCatalog;
+  runtimePlugins: RuntimePluginHost;
   sessionDirectory?: string;
   generationSignal: AbortSignal;
   observability?: RuntimeObservability;
-  setExtensionShutdownHandler(handler: (() => void | Promise<void>) | undefined): void;
+  setPluginShutdownHandler(handler: (() => void | Promise<void>) | undefined): void;
   refresh(options?: RuntimeRefreshOptions): Promise<RuntimeRefreshResult>;
   close(): Promise<void>;
 }
 
 export interface RuntimeRefreshOptions {
   signal?: AbortSignal;
-  prepareExtensions?: (extensions: RuntimeExtensionHost) => void | Promise<void>;
+  preparePlugins?: (extensions: RuntimePluginHost) => void | Promise<void>;
   prepareSettings?: (settings: SettingsManager) => void | Promise<void>;
   onCommit?: () => void | Promise<void>;
   beforeSessionStart?: (session: AgentSession) => void | Promise<void>;
@@ -210,11 +209,13 @@ interface RuntimeOptions {
   credentialStore?: CredentialStore;
   projectTrusted?: boolean;
   ephemeral?: boolean;
-  extensions?: boolean;
-  extensionPaths?: readonly string[];
+  pluginCode?: boolean;
+  pluginPaths?: readonly string[];
   /** Trusted in-process extension factories supplied by the embedding caller. */
-  extensionFactories?: readonly RuntimeInlineExtension[];
-  extensionRuntime?: boolean;
+  pluginFactories?: readonly RuntimeInlinePlugin[];
+  pluginRuntime?: boolean;
+  /** CLI explicit package selection survives automatic discovery suppression. */
+  explicitPluginResources?: { skills: boolean; prompts: boolean; themes: boolean };
   skills?: boolean;
   skillPaths?: readonly string[];
   promptTemplates?: boolean;
@@ -237,7 +238,7 @@ interface RuntimeOptions {
   /** Session replacement reason supplied by an AgentSessionRuntime owner. */
   sessionStartEvent?: RuntimeSessionStartEvent;
   /** Already-active user and invocation extensions used for project trust. */
-  preactivatedRuntimeExtensions?: RuntimeExtensionHost;
+  preactivatedRuntimePlugins?: RuntimePluginHost;
   /** Invocation-scoped project trust policy shared across workspace changes. */
   projectTrustResolver?: ProjectTrustResolver;
   /** Caller-owned content-free observer. SDK callers remain no-op when omitted. */
@@ -252,7 +253,7 @@ interface RuntimeOptions {
 
 type OAuthRegistrationCatalog = Record<string, OAuthRegistrationConfig>;
 
-interface DirectExtensionSelection {
+interface DirectPluginSelection {
   paths: string[];
   metadata: Map<string, RuntimeDirectPathMetadata>;
 }
@@ -302,7 +303,7 @@ function storedModelCatalog(source: string, label: string): StoredModelCatalog {
   return { version: 1, savedAt: value.savedAt, providers };
 }
 
-function restoreExtensionCatalogProviders(
+function restorePluginCatalogProviders(
   currentSource: string,
   baselineSource: string | undefined,
   providerIds: readonly string[],
@@ -326,7 +327,7 @@ function restoreExtensionCatalogProviders(
   return JSON.stringify({ ...current, providers });
 }
 
-async function stageExtensionCatalogBaseline(
+async function stagePluginCatalogBaseline(
   store: FileModelCatalogStore,
   baselineSource: string | undefined,
   providerIds: readonly string[],
@@ -335,7 +336,7 @@ async function stageExtensionCatalogBaseline(
   const source = await store.read(RUNTIME_MODEL_CATALOG_MAX_BYTES);
   const basis = source ?? baselineSource;
   if (basis === undefined) return undefined;
-  const restored = restoreExtensionCatalogProviders(basis, baselineSource, providerIds);
+  const restored = restorePluginCatalogProviders(basis, baselineSource, providerIds);
   if (source === restored) return undefined;
   await store.write(restored);
   return { source };
@@ -359,8 +360,8 @@ interface RuntimeResourceGeneration {
   resourceLoader: ResourceLoader;
   network: NetworkTransport;
   providerWire: ProviderWireInterceptorRegistry;
-  extensions: ExtensionCatalog;
-  runtimeExtensions: RuntimeExtensionHost;
+  plugins: PluginCatalog;
+  runtimePlugins: RuntimePluginHost;
   sessionDirectory?: string;
   extraTools: NonNullable<AgentSessionOptions["tools"]>;
   toolBackend?: ToolExecutionBackend;
@@ -1107,7 +1108,7 @@ function agentSessionResources(
     providers: generation.providers,
     modelRegistry: generation.modelRegistry,
     resourceLoader: generation.resourceLoader,
-    extensionRunner: generation.runtimeExtensions,
+    pluginRunner: generation.runtimePlugins,
     providerWireLifecycle: generation.providerWire,
     ...optionalProperties(observability === undefined ? undefined : { observability }),
     providerDisplayNameOverride(provider, displayName) {
@@ -1146,10 +1147,10 @@ function cacheRetentionFromEnvironment(
 }
 
 function directResourceCatalog(
-  host: RuntimeExtensionHost,
+  host: RuntimePluginHost,
   loader: ResourceLoader,
-): ExtensionCatalog {
-  const entries = host.extensions();
+): PluginCatalog {
+  const entries = host.plugins();
   const ownerForPath = (path: string): string | undefined => {
     const target = resolve(path);
     return entries
@@ -1161,7 +1162,7 @@ function directResourceCatalog(
         resolve(right.resourceRoot ?? right.sourcePath).length
         - resolve(left.resourceRoot ?? left.sourcePath).length)[0]?.extensionId;
   };
-  const prompts: ExtensionPromptTemplate[] = loader.getPrompts().prompts.map((prompt) => ({
+  const prompts: PluginPromptTemplate[] = loader.getPrompts().prompts.map((prompt) => ({
     id: prompt.name,
     extensionId: ownerForPath(prompt.filePath) ?? "prompt-template",
     ...optionalProperties(prompt.description === undefined || prompt.description === "" ? undefined : { description: prompt.description }),
@@ -1170,7 +1171,7 @@ function directResourceCatalog(
     sha256: sha256(prompt.content),
     template: prompt.content,
   }));
-  const themes: ExtensionTheme[] = loader.getThemes().themes.map((theme) => ({
+  const themes: PluginTheme[] = loader.getThemes().themes.map((theme) => ({
     ...theme,
     extensionId: ownerForPath(theme.sourcePath) ?? theme.extensionId,
   }));
@@ -1199,11 +1200,11 @@ function directResourceCatalog(
       },
     };
   });
-  return new ExtensionCatalog(
+  return new PluginCatalog(
     metadata,
     host.diagnostics().map((diagnostic) => ({
       severity: "warning" as const,
-      code: "RUNTIME_EXTENSION_DIAGNOSTIC",
+      code: "RUNTIME_PLUGIN_DIAGNOSTIC",
       message: diagnostic.message,
       path: diagnostic.sourcePath,
       extensionId: diagnostic.extensionId,
@@ -1218,64 +1219,12 @@ function directResourceCatalog(
   );
 }
 
-export function runtimeDiscoveryView(host: RuntimeExtensionHost, loader: ResourceLoader): RuntimeDiscoveryView {
-  const maximumPerKind = 512;
-  const runtimeCommands = host.commands();
-  const prompts = loader.getPrompts().prompts;
-  const skills = loader.getSkills().skills;
-  const commandResources: RuntimeDiscoverableResource[] = [
-    ...BUILTIN_SLASH_COMMANDS.map((command): RuntimeDiscoverableResource => ({
-      kind: "command",
-      source: "builtin",
-      name: command.name,
-      ...optionalProperties(command.description === undefined ? undefined : { description: command.description }),
-      ...optionalProperties(command.argumentHint === undefined ? undefined : { argumentHint: command.argumentHint }),
-    })),
-    ...runtimeCommands.map((command): RuntimeDiscoverableResource => ({
-      kind: "command",
-      source: "runtime_extension",
-      name: command.name,
-      extensionId: command.extensionId,
-      ...optionalProperties(command.description === undefined ? undefined : { description: command.description }),
-      ...optionalProperties(command.argumentHint === undefined ? undefined : { argumentHint: command.argumentHint }),
-    })),
-  ];
-  const promptResources = prompts.map((prompt): RuntimeDiscoverableResource => ({
-    kind: "prompt",
-    name: prompt.name,
-    extensionId: prompt.sourceInfo.source,
-    ...optionalProperties(prompt.description === undefined || prompt.description === "" ? undefined : { description: prompt.description }),
-    ...optionalProperties(prompt.argumentHint === undefined ? undefined : { argumentHint: prompt.argumentHint }),
-  }));
-  const skillResources = skills.map((skill): RuntimeDiscoverableResource => ({
-    kind: "skill",
-    name: skill.name,
-    description: skill.description,
-    scope: skill.sourceInfo.scope === "user" ? "user" : "workspace",
-    trusted: true,
-    disableModelInvocation: skill.disableModelInvocation,
-  }));
-  return {
-    resources: [
-      ...commandResources.slice(0, maximumPerKind),
-      ...promptResources.slice(0, maximumPerKind),
-      ...skillResources.slice(0, maximumPerKind),
-    ],
-    truncated: commandResources.length > maximumPerKind
-      || promptResources.length > maximumPerKind
-      || skillResources.length > maximumPerKind,
-    omitted: {
-      commands: Math.max(0, commandResources.length - maximumPerKind),
-      prompts: Math.max(0, promptResources.length - maximumPerKind),
-      skills: Math.max(0, skillResources.length - maximumPerKind),
-    },
-  };
-}
+export { runtimeDiscoveryView };
 
-function directExtensionSelection(
+function directPluginSelection(
   resolved: readonly ResolvedPaths[],
   projectTrusted: boolean,
-): DirectExtensionSelection {
+): DirectPluginSelection {
   const paths: string[] = [];
   const metadata = new Map<string, RuntimeDirectPathMetadata>();
   for (const group of resolved) {
@@ -1295,11 +1244,11 @@ function directExtensionSelection(
 }
 
 export async function activatePackageCandidate(candidate: PackageActivationCandidate): Promise<void> {
-  const direct = directExtensionSelection([candidate.resources], candidate.projectTrusted);
+  const direct = directPluginSelection([candidate.resources], candidate.projectTrusted);
   if (direct.paths.length === 0) return;
-  let host: RuntimeExtensionHost | undefined;
+  let host: RuntimePluginHost | undefined;
   try {
-    host = await loadDirectExtensions(direct.paths, {
+    host = await loadDirectPlugins(direct.paths, {
       workspace: candidate.workspace,
       dataRoot: candidate.dataRoot,
       projectTrusted: candidate.projectTrusted,
@@ -1317,13 +1266,13 @@ export async function activatePackageCandidate(candidate: PackageActivationCandi
  * Project configuration, packages, extensions, prompts, skills, and themes are
  * intentionally not inspected here.
  */
-export async function preactivateProjectTrustExtensions(
-  paths: Pick<AgentPaths, "userExtensions" | "agentDirectory">,
+export async function preactivateProjectTrustPlugins(
+  paths: Pick<AgentPaths, "userPlugins" | "agentDirectory">,
   workspaceValue: string,
-  options: Pick<RuntimeOptions, "extensions" | "extensionPaths" | "extensionFactories" | "extensionRuntime" | "offline">,
+  options: Pick<RuntimeOptions, "pluginCode" | "pluginPaths" | "pluginFactories" | "pluginRuntime" | "offline">,
   signal?: AbortSignal,
-): Promise<RuntimeExtensionHost | undefined> {
-  if (options.extensionRuntime !== true) return undefined;
+): Promise<RuntimePluginHost | undefined> {
+  if (options.pluginRuntime !== true) return undefined;
   const workspace = await canonicalExistingPath(resolve(workspaceValue));
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: false });
   await refreshRuntimeSettings(settings);
@@ -1338,18 +1287,18 @@ export async function preactivateProjectTrustExtensions(
     }),
   });
   const selected: ResolvedPaths[] = [];
-  if (options.extensions === true) selected.push(await packages.resolve());
-  if ((options.extensionPaths?.length ?? 0) > 0) {
-    selected.push(await packages.resolveExtensionSources([...options.extensionPaths!], { temporary: true }));
+  if (options.pluginCode === true) selected.push(await packages.resolve());
+  if ((options.pluginPaths?.length ?? 0) > 0) {
+    selected.push(await packages.resolvePluginSources([...options.pluginPaths!], { temporary: true }));
   }
-  const direct = directExtensionSelection(selected, false);
+  const direct = directPluginSelection(selected, false);
   if (direct.paths.length > 128) throw new Error("At most 128 pre-trust runtime extensions may be loaded");
-  return await loadDirectExtensions(direct.paths, {
+  return await loadDirectPlugins(direct.paths, {
     workspace,
     dataRoot: join(paths.agentDirectory, "extension-data"),
     projectTrusted: false,
     directPathMetadata: direct.metadata,
-    inlineExtensions: options.extensionFactories ?? [],
+    inlinePlugins: options.pluginFactories ?? [],
     ...optionalProperties(signal === undefined ? undefined : { signal }),
   });
 }
@@ -1360,10 +1309,10 @@ async function loadResourceGeneration(
   broker: CredentialBroker,
   credentials: CredentialStore,
   storedCredentials: ProfiledRefreshingStoredCredentialSource,
-  options: Pick<RuntimeOptions, "projectTrusted" | "ephemeral" | "extensions" | "extensionPaths" | "extensionFactories" | "extensionRuntime" | "skills" | "skillPaths" | "promptTemplates" | "promptTemplatePaths" | "themes" | "themePaths" | "systemPrompt" | "appendSystemPrompt" | "sessionDirectory" | "offline" | "deferModelNetworkRefresh">,
+  options: Pick<RuntimeOptions, "projectTrusted" | "ephemeral" | "pluginCode" | "pluginPaths" | "pluginFactories" | "pluginRuntime" | "explicitPluginResources" | "skills" | "skillPaths" | "promptTemplates" | "promptTemplatePaths" | "themes" | "themePaths" | "systemPrompt" | "appendSystemPrompt" | "sessionDirectory" | "offline" | "deferModelNetworkRefresh" | "apiKey" | "apiKeyProvider">,
   reason: "startup" | "refresh" = "startup",
   signal?: AbortSignal,
-  preactivatedRuntimeExtensions?: RuntimeExtensionHost,
+  preactivatedRuntimePlugins?: RuntimePluginHost,
   codexTransportObserver?: OpenAICodexTransportObserver,
 ): Promise<RuntimeResourceGeneration> {
   signal?.throwIfAborted();
@@ -1372,6 +1321,11 @@ async function loadResourceGeneration(
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: requestedTrust });
   const trusted = settings.isProjectTrusted();
   await refreshRuntimeSettings(settings);
+  const providerConfigurationPath = join(paths.agentDirectory, "model-providers.json");
+  const providerConfiguration = await loadRuntimeModelConfiguration(providerConfigurationPath);
+  if (providerConfiguration.error !== undefined) {
+    throw new Error(`Provider configuration could not be loaded from ${providerConfigurationPath}`);
+  }
   const toolBackend: ToolExecutionBackend | undefined = undefined;
   const authoringResources = bundledAuthoringResources();
   const network = createNetworkTransport(networkOptions(settings, process.env));
@@ -1379,6 +1333,7 @@ async function loadResourceGeneration(
   const modelCatalogStore = new FileModelCatalogStore(paths.modelCatalog);
   const modelCatalogBaseline = await modelCatalogStore.read(RUNTIME_MODEL_CATALOG_MAX_BYTES).catch(() => undefined);
   const providers = new ProviderRegistry([], { catalogStore: modelCatalogStore });
+  const configuredProviderCleanups: Array<() => void> = [];
   const providerWire = new ProviderWireInterceptorRegistry();
   const authBindings: ProviderAuthBinding[] = [];
   const providerConfigs = configuredProviderConfigs(settings, process.env);
@@ -1410,58 +1365,58 @@ async function loadResourceGeneration(
       ...optionalProperties(signal === undefined ? undefined : { signal }),
     }),
   });
-  const automaticDirectResources = options.extensions === true
+  const automaticDirectResources = options.pluginCode === true
     ? await directPackages.resolve()
     : { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths;
-  const automaticPackageDiscovery = options.extensions === true
+  const automaticPackageDiscovery = options.pluginCode === true
     ? { diagnostics: directPackages.getDiagnostics(), resolved: automaticDirectResources }
     : undefined;
-  const directAdditionalSources = (options.extensionPaths ?? []).map((path) => expandPath(path, workspace));
+  const directAdditionalSources = (options.pluginPaths ?? []).map((path) => expandPath(path, workspace));
   const additionalDirectResources = directAdditionalSources.length === 0
     ? { extensions: [], skills: [], prompts: [], themes: [] } satisfies ResolvedPaths
-    : await directPackages.resolveExtensionSources(directAdditionalSources, { temporary: true });
-  const direct = directExtensionSelection(
-    options.extensionRuntime === true ? [automaticDirectResources, additionalDirectResources] : [],
+    : await directPackages.resolvePluginSources(directAdditionalSources, { temporary: true });
+  const direct = directPluginSelection(
+    options.pluginRuntime === true ? [automaticDirectResources, additionalDirectResources] : [],
     trusted,
   );
   if (direct.paths.length > 128) throw new Error("At most 128 runtime extensions may be loaded");
-  let runtimeExtensions: RuntimeExtensionHost;
-  if (options.extensionRuntime === true) {
-    if (preactivatedRuntimeExtensions === undefined) {
-      runtimeExtensions = await loadDirectExtensions(direct.paths, {
+  let runtimePlugins: RuntimePluginHost;
+  if (options.pluginRuntime === true) {
+    if (preactivatedRuntimePlugins === undefined) {
+      runtimePlugins = await loadDirectPlugins(direct.paths, {
         workspace,
         dataRoot: join(paths.agentDirectory, "extension-data"),
         projectTrusted: trusted,
         directPathMetadata: direct.metadata,
-        inlineExtensions: options.extensionFactories ?? [],
+        inlinePlugins: options.pluginFactories ?? [],
         ...optionalProperties(signal === undefined ? undefined : { signal }),
         ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
       });
     } else {
-      runtimeExtensions = preactivatedRuntimeExtensions;
-      runtimeExtensions.setHostContext({ projectTrusted: trusted });
-      const activePaths = new Set(runtimeExtensions.extensions().map((entry) => entry.sourcePath));
+      runtimePlugins = preactivatedRuntimePlugins;
+      runtimePlugins.setHostContext({ projectTrusted: trusted });
+      const activePaths = new Set(runtimePlugins.plugins().map((entry) => entry.sourcePath));
       const additional = direct.paths.filter((path) => !activePaths.has(path));
-      await appendDirectExtensions(runtimeExtensions, additional, {
+      await appendDirectPlugins(runtimePlugins, additional, {
         workspace,
         dataRoot: join(paths.agentDirectory, "extension-data"),
         directPathMetadata: direct.metadata,
         ...optionalProperties(signal === undefined ? undefined : { signal }),
         ...optionalProperties(reason === "refresh" || directAdditionalSources.length > 0 ? { activationFailure: "throw" as const } : undefined),
       });
-		runtimeExtensions.reorderCommittedExtensions(direct.paths);
+		runtimePlugins.reorderCommittedPlugins(direct.paths);
     }
   } else {
-    if (preactivatedRuntimeExtensions !== undefined) {
-      throw new Error("Preactivated extensions require extensionRuntime");
+    if (preactivatedRuntimePlugins !== undefined) {
+      throw new Error("Preactivated extensions require pluginRuntime");
     }
-    runtimeExtensions = new RuntimeExtensionHost(workspace, {
+    runtimePlugins = new RuntimePluginHost(workspace, {
       dataRoot: join(paths.agentDirectory, "extension-data"),
       projectTrusted: trusted,
     });
   }
   const extensionCatalogProviderIds = [...new Set(
-    runtimeExtensions.directProviderRegistrations().map((registration) => registration.name),
+    runtimePlugins.directProviderRegistrations().map((registration) => registration.name),
   )];
   const auth = new ProviderAuthRegistry({
     bindings: authBindings,
@@ -1469,8 +1424,8 @@ async function loadResourceGeneration(
     environment: process.env,
     store: credentials,
   });
-  const extraTools = runtimeExtensions.tools();
-  const bindLiveRegistrations = (): void => runtimeExtensions.setLiveRegistrationHandler({
+  const extraTools = runtimePlugins.tools();
+  const bindLiveRegistrations = (): void => runtimePlugins.setLiveRegistrationHandler({
     registerTool(tool) {
       if (extraTools.some((entry) => entry.definition.name === tool.definition.name)) {
         throw new Error(`Runtime extension tool is already registered: ${tool.definition.name}`);
@@ -1499,15 +1454,20 @@ async function loadResourceGeneration(
   const close = async (): Promise<void> => {
     if (closed) return;
     closed = true;
-    const providerAdapters = providers.list();
     abortController.abort(new Error("Runtime resource generation closed"));
     const failures: unknown[] = [];
     try {
-      await runtimeExtensions.close();
-      await providers.settlePersistence();
+      await runtimePlugins.close();
     } catch (error) {
       failures.push(error);
     }
+    for (const cleanup of configuredProviderCleanups.reverse()) {
+      try { cleanup(); }
+      catch (error) { failures.push(error); }
+    }
+    try { await providers.settlePersistence(); }
+    catch (error) { failures.push(error); }
+    const providerAdapters = providers.list();
     const providerDisposals = providerAdapters.flatMap((provider) =>
       provider.dispose === undefined
         ? []
@@ -1519,7 +1479,7 @@ async function loadResourceGeneration(
     const results = await Promise.allSettled([...providerDisposals, network.close()]);
     for (const result of results) if (result.status === "rejected") failures.push(result.reason);
     try {
-      await stageExtensionCatalogBaseline(
+      await stagePluginCatalogBaseline(
         modelCatalogStore,
         modelCatalogBaseline,
         extensionCatalogProviderIds,
@@ -1534,8 +1494,10 @@ async function loadResourceGeneration(
     providers.configureModels(configuredModelsWithMaintainedCatalog([]));
     const providerShellPath = settings.getShellPath();
     const directCredentials = new ProviderCredentialStoreAdapter(credentials);
+    const runtimeCredentials = new RuntimeCredentialStore(directCredentials);
+    if (options.apiKey !== undefined) runtimeCredentials.setApiKey(options.apiKeyProvider ?? "openai", options.apiKey);
     const directModels = createModels({
-      credentials: directCredentials,
+      credentials: runtimeCredentials,
       modelsStore: new FileProviderModelsStore(join(paths.agentDirectory, "models-store.json")),
       authContext: defaultProviderAuthContext(process.env, {
         ...optionalProperties(providerShellPath === undefined ? undefined : { shellPath: providerShellPath }),
@@ -1641,6 +1603,33 @@ async function loadResourceGeneration(
       directCredentials,
       storedCredentials,
     );
+    const configuredModels = pluginModelRegistry(modelRegistry);
+    for (const [providerId, definition] of providerConfiguration.providers) {
+      const configuration = runtimeProviderConfiguration(
+        providerId,
+        definition,
+        configuredModels.getAll(),
+      );
+      const streamSimple = configuration.streamSimple;
+      if (streamSimple !== undefined) {
+        configuration.streamSimple = (model, context, streamOptions) =>
+          streamSimple(model, context, { fetch: network.fetch, ...streamOptions });
+      }
+      configuredModels.registerProvider(providerId, configuration);
+      const adapter = providerAdapterFromModels(directModels, providerId);
+      if (providers.has(providerId)) {
+        // A catalog-preserving override must not refresh through its own direct-model bridge.
+        configuredProviderCleanups.push(configuration.models === undefined
+          ? providers.overlay({ id: providerId, stream: adapter.stream })
+          : providers.override(adapter));
+      } else {
+        providers.register(adapter);
+        configuredProviderCleanups.push(() => providers.unregister(providerId, adapter, { preservePersistedCatalog: true }));
+      }
+      if (!auth.has(providerId)) {
+        auth.register({ providerId, credentialId: providerId, displayName: definition.name ?? providerId, secret: "api_key" });
+      } else if (definition.name !== undefined) configuredProviderCleanups.push(auth.overrideDisplayName(providerId, definition.name));
+    }
     await modelRegistry.refresh({
       allowNetwork: options.offline !== true && options.deferModelNetworkRefresh !== true,
       signal: signal === undefined
@@ -1654,28 +1643,28 @@ async function loadResourceGeneration(
       offline: options.offline === true,
       ...optionalProperties(options.systemPrompt === undefined ? undefined : { systemPrompt: options.systemPrompt }),
       ...optionalProperties(options.appendSystemPrompt === undefined ? undefined : { appendSystemPrompt: [...options.appendSystemPrompt] }),
-      additionalExtensionPaths: options.extensionRuntime === true ? directAdditionalSources : [],
-      preparedExtensions: runtimeExtensions,
-      extensionFactories: [...(options.extensionFactories ?? [])],
-      noExtensions: options.extensionRuntime !== true || options.extensions !== true,
+      additionalPluginPaths: options.pluginRuntime === true ? directAdditionalSources : [],
+      preparedPlugins: runtimePlugins,
+      pluginFactories: [...(options.pluginFactories ?? [])],
+      noPluginCode: options.pluginRuntime !== true || options.pluginCode !== true,
       noSkills: options.skills === false,
       noPromptTemplates: options.promptTemplates === false,
       noThemes: options.themes === false,
       additionalSkillPaths: [
-		...(options.skills === false ? [] : [
-			authoringResources.skillRoot,
-			...additionalDirectResources.skills.filter((resource) => resource.enabled).map((resource) => resource.path),
-		]),
+        ...(options.skills === false ? [] : [authoringResources.skillRoot]),
+        ...(options.skills === false && options.explicitPluginResources?.skills !== true
+          ? []
+          : additionalDirectResources.skills.filter((resource) => resource.enabled).map((resource) => resource.path)),
         ...(options.skillPaths ?? []).map((path) => expandPath(path, workspace)),
       ],
       additionalPromptTemplatePaths: [
-		...(options.promptTemplates === false
+        ...(options.promptTemplates === false && options.explicitPluginResources?.prompts !== true
 			? []
 			: additionalDirectResources.prompts.filter((resource) => resource.enabled).map((resource) => resource.path)),
         ...(options.promptTemplatePaths ?? []).map((path) => expandPath(path, workspace)),
       ],
       additionalThemePaths: [
-		...(options.themes === false
+        ...(options.themes === false && options.explicitPluginResources?.themes !== true
 			? []
 			: additionalDirectResources.themes.filter((resource) => resource.enabled).map((resource) => resource.path)),
         ...(options.themePaths ?? []).map((path) => expandPath(path, workspace)),
@@ -1686,14 +1675,14 @@ async function loadResourceGeneration(
     }
     const resourceLoader = new DefaultResourceLoader(resourceLoaderOptions);
     await resourceLoader.refresh({ preparedSettings: settings, ...optionalProperties(signal === undefined ? undefined : { signal }) });
-    runtimeExtensions.addRegistrationCleanup(bindDirectProviderWireLifecycle(runtimeExtensions, providerWire));
-    runtimeExtensions.setDirectDiscoveryHandler((discoverySignal) => {
+    runtimePlugins.addRegistrationCleanup(bindDirectProviderWireLifecycle(runtimePlugins, providerWire));
+    runtimePlugins.setDirectDiscoveryHandler((discoverySignal) => {
       discoverySignal?.throwIfAborted();
-      return runtimeDiscoveryView(runtimeExtensions, resourceLoader);
+      return runtimeDiscoveryView(runtimePlugins, resourceLoader);
     });
     bindLiveRegistrations();
     signal?.throwIfAborted();
-    const extensions = directResourceCatalog(runtimeExtensions, resourceLoader);
+    const plugins = directResourceCatalog(runtimePlugins, resourceLoader);
     signal?.throwIfAborted();
     return {
       trusted,
@@ -1704,8 +1693,8 @@ async function loadResourceGeneration(
       resourceLoader,
       network,
       providerWire,
-      extensions,
-      runtimeExtensions,
+      plugins,
+      runtimePlugins,
       ...optionalProperties(sessionDirectory === undefined ? undefined : { sessionDirectory }),
       extraTools,
       ...optionalProperties<Pick<RuntimeResourceGeneration, "toolBackend">>(toolBackend === undefined ? undefined : { toolBackend }),
@@ -1733,8 +1722,8 @@ function assignGeneration(runtime: LoadedRuntime, generation: RuntimeResourceGen
   runtime.resourceLoader = generation.resourceLoader;
   runtime.network = generation.network;
   runtime.providerWireLifecycle = generation.providerWire;
-  runtime.extensions = generation.extensions;
-  runtime.runtimeExtensions = generation.runtimeExtensions;
+  runtime.plugins = generation.plugins;
+  runtime.runtimePlugins = generation.runtimePlugins;
   if (generation.sessionDirectory === undefined) delete runtime.sessionDirectory;
   else runtime.sessionDirectory = generation.sessionDirectory;
   runtime.generationSignal = generation.abortController.signal;
@@ -1852,11 +1841,11 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
     storedCredentials,
     new EnvironmentCredentialSource(),
   ]);
-  let preactivatedRuntimeExtensions: RuntimeExtensionHost | undefined;
+  let preactivatedRuntimePlugins: RuntimePluginHost | undefined;
   try {
-    preactivatedRuntimeExtensions = options.preactivatedRuntimeExtensions
-      ?? (effectiveOptions.extensionRuntime === true
-        ? await options.projectTrustResolver?.takePreactivatedExtensions(workspace)
+    preactivatedRuntimePlugins = options.preactivatedRuntimePlugins
+      ?? (effectiveOptions.pluginRuntime === true
+        ? await options.projectTrustResolver?.takePreactivatedPlugins(workspace)
         : undefined);
   } catch (error) {
     await failStartup("extensions");
@@ -1873,11 +1862,11 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       effectiveOptions,
       "startup",
       options.signal,
-      preactivatedRuntimeExtensions,
+      preactivatedRuntimePlugins,
       runtimeOpenAICodexTransportObserver(() => observability),
     );
   } catch (error) {
-    await preactivatedRuntimeExtensions?.close().catch(() => undefined);
+    await preactivatedRuntimePlugins?.close().catch(() => undefined);
     await failStartup("resources");
     throw error;
   }
@@ -1891,6 +1880,21 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
   }
   let sessionManager!: SessionManager;
   let session: AgentSession;
+  const sessionOwnership: AgentSessionOwnership = {
+    sessionStore: "host",
+    async refresh(refreshOptions) {
+      const result = await runtime.refresh({
+        ...optionalProperties(refreshOptions.signal === undefined ? undefined : { signal: refreshOptions.signal }),
+        ...optionalProperties(refreshOptions.validateSettings === undefined ? undefined : {
+          prepareSettings: async (settings: SettingsManager) => await refreshOptions.validateSettings!(settings.getSettings()),
+        }),
+        ...optionalProperties(refreshOptions.beforeSessionStart === undefined ? undefined : {
+          beforeSessionStart: refreshOptions.beforeSessionStart,
+        }),
+      });
+      if (result.warnings.length > 0) throw new Error(`Runtime refreshed with warnings: ${result.warnings.join("; ")}`);
+    },
+  };
   try {
     if (options.sessionManager !== undefined) {
       const sessionWorkspace = await canonicalExistingPath(resolve(options.sessionManager.getCwd()));
@@ -1919,7 +1923,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       ...optionalProperties(options.modelScope === undefined ? undefined : { modelScope: options.modelScope }),
       ...optionalProperties(options.sessionStartEvent === undefined ? undefined : { sessionStartEvent: options.sessionStartEvent }),
       ...agentSessionResources(generation, cacheRetention, observability, options.toolAuthorizationHandler),
-    });
+    }, sessionOwnership);
   } catch (error) {
     const failures: unknown[] = [error];
     try {
@@ -1948,7 +1952,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
     trusted: generation.trusted,
     offline: options.offline === true,
     ephemeral: options.ephemeral === true,
-    extensions: generation.runtimeExtensions.extensions().length,
+    extensions: generation.runtimePlugins.plugins().length,
     providers: generation.providers.list().length,
   });
 
@@ -1956,7 +1960,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
   let refreshFlight: Promise<RuntimeRefreshResult> | undefined;
   let refreshAbortController: AbortController | undefined;
   let extensionShutdownHandler: (() => void | Promise<void>) | undefined;
-  let extensionMode = generation.runtimeExtensions.hostContext().mode;
+  let extensionMode = generation.runtimePlugins.hostContext().mode;
   const runtime: LoadedRuntime = {
     paths,
     workspace,
@@ -1972,12 +1976,12 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
     providerWireLifecycle: generation.providerWire,
     sessionManager,
     session,
-    extensions: generation.extensions,
-    runtimeExtensions: generation.runtimeExtensions,
+    plugins: generation.plugins,
+    runtimePlugins: generation.runtimePlugins,
     ...optionalProperties(generation.sessionDirectory === undefined ? undefined : { sessionDirectory: generation.sessionDirectory }),
     generationSignal: generation.abortController.signal,
     ...optionalProperties(observability === undefined ? undefined : { observability }),
-    setExtensionShutdownHandler(handler): void {
+    setPluginShutdownHandler(handler): void {
       if (closed) throw new Error("Runtime is closed");
       extensionShutdownHandler = handler;
     },
@@ -1998,8 +2002,8 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         }
         const previous = generation;
         const previousSession = runtime.session;
-        if (!previous.runtimeExtensions.lifecycleSignal().aborted) {
-          extensionMode = previous.runtimeExtensions.hostContext().mode;
+        if (!previous.runtimePlugins.lifecycleSignal().aborted) {
+          extensionMode = previous.runtimePlugins.hostContext().mode;
         }
         const warnings: string[] = [];
         let committed = false;
@@ -2011,13 +2015,13 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         let catalogRollback: ModelCatalogRollback | undefined;
         try {
           shutdownStarted = true;
-          await previous.runtimeExtensions.dispatch("session_shutdown", {
+          await previous.runtimePlugins.dispatch("session_shutdown", {
             reason: "refresh",
           }, signal).catch((error) => {
-            warnings.push(`Extension session shutdown failed: ${errorMessage(error)}`);
+            warnings.push(`Plugin session shutdown failed: ${errorMessage(error)}`);
           });
           signal.throwIfAborted();
-          catalogRollback = await stageExtensionCatalogBaseline(
+          catalogRollback = await stagePluginCatalogBaseline(
             new FileModelCatalogStore(paths.modelCatalog),
             previous.modelCatalogBaseline,
             previous.extensionCatalogProviderIds,
@@ -2035,7 +2039,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
             undefined,
             runtimeOpenAICodexTransportObserver(() => candidateObservability),
           );
-          candidate.runtimeExtensions.setHostContext({ mode: extensionMode });
+          candidate.runtimePlugins.setHostContext({ mode: extensionMode });
           if (candidate.sessionDirectory !== previous.sessionDirectory) {
             throw new Error("sessionDirectory cannot change during /refresh; restart ohm to use the new location");
           }
@@ -2065,7 +2069,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
                 id: candidateModel.id,
                 info: providerModelToInfo(candidateModel),
               };
-          candidateSession = await AgentSession.create(markAgentSessionSharedStoreReplacement({
+          candidateSession = await AgentSession.create({
             sessionManager,
             workspace,
             agentDirectory: paths.agentDirectory,
@@ -2081,9 +2085,9 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
               ? undefined
               : { modelScope: previousSession.modelScopeOverride }),
             thinkingLevel: previousSession.thinkingLevel,
-          }));
-          bindExtensionControls(candidate, candidateSession);
-          await refreshOptions.prepareExtensions?.(candidate.runtimeExtensions);
+          }, sessionOwnership);
+          bindPluginControls(candidateSession);
+          await refreshOptions.preparePlugins?.(candidate.runtimePlugins);
           await refreshOptions.prepareSettings?.(candidate.settings);
           signal.throwIfAborted();
           generation = candidate;
@@ -2098,7 +2102,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           previous.abortController.abort(new Error("Runtime resources refreshed"));
           committed = true;
           try {
-            await closeAgentSessionForReplacement(previousSession, { preserveSessionStore: true });
+            await previousSession.close({ reason: "replacement" });
           } catch (error) {
             warnings.push(`Old session cleanup failed: ${errorMessage(error)}`);
           }
@@ -2112,23 +2116,23 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           } catch (error) {
             warnings.push(`Refreshed resources but session bindings failed: ${errorMessage(error)}`);
           }
-          if (!candidate.runtimeExtensions.lifecycleSignal().aborted) {
-            extensionMode = candidate.runtimeExtensions.hostContext().mode;
+          if (!candidate.runtimePlugins.lifecycleSignal().aborted) {
+            extensionMode = candidate.runtimePlugins.hostContext().mode;
           }
           try {
             await settleWithin(previous.close(), RUNTIME_GENERATION_CLOSE_TIMEOUT_MS, "Old runtime cleanup");
           } catch (error) {
             warnings.push(`Old runtime cleanup failed: ${errorMessage(error)}`);
           }
-          await candidateSession.bindExtensions({ reason: "refresh" }, signal).catch((error) => {
-            warnings.push(`Extension session restart failed: ${errorMessage(error)}`);
+          await candidateSession.bindPlugins({ reason: "refresh" }, signal).catch((error) => {
+            warnings.push(`Plugin session restart failed: ${errorMessage(error)}`);
           });
         } catch (error) {
           if (!committed) {
             const recoveryFailures: unknown[] = [error];
             if (candidateSession !== undefined) {
               try {
-                await closeAgentSessionForReplacement(candidateSession, { preserveSessionStore: true });
+                await candidateSession.close({ reason: "replacement" });
               } catch (candidateSessionCleanupError) {
                 recoveryFailures.push(candidateSessionCleanupError);
               }
@@ -2157,7 +2161,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
             }
             if (shutdownStarted) {
               try {
-                await previousSession.bindExtensions({ reason: "refresh" });
+                await previousSession.bindPlugins({ reason: "refresh" });
               } catch (candidateRestartError) {
                 recoveryFailures.push(candidateRestartError);
               }
@@ -2217,6 +2221,11 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         failures.push(error);
       }
       try {
+        sessionManager.closeV4Store();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         await generation.close();
       } catch (error) {
         failures.push(error);
@@ -2232,9 +2241,8 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       throwFailures(failures, "Runtime shutdown failed");
     },
   };
-  function bindExtensionControls(target: RuntimeResourceGeneration, controlledSession: AgentSession): void {
-    const host = target.runtimeExtensions;
-    const commandContextActions: ExtensionCommandContextActions = {
+  function bindPluginControls(controlledSession: AgentSession): void {
+    const commandContextActions: PluginCommandContextActions = {
       async waitForIdle(signal) {
         signal?.throwIfAborted();
         await runtime.session.waitForIdle();
@@ -2246,7 +2254,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         runtime.session.newSession({
           ...optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
         });
-        await options.setup?.(extensionSessionManager(runtime.sessionManager));
+        await options.setup?.(pluginSessionManager(runtime.sessionManager));
         await options.withSession?.(runtime.session.createReplacedSessionContext());
         signal?.throwIfAborted();
         return { cancelled: false };
@@ -2284,55 +2292,14 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         await runtime.refresh(signal === undefined ? {} : { signal });
       },
     };
-    controlledSession.setExtensionCommandActions(commandContextActions);
-    host.setDirectContextHandler((sessionTarget, signal) => {
-      signal.throwIfAborted();
-      if (sessionTarget !== undefined && sessionTarget.threadId !== runtime.session.sessionId) {
-        throw new Error("Direct extension context only exposes the current session");
-      }
-      if (
-        sessionTarget?.branch !== undefined &&
-        sessionTarget.branch !== (runtime.session.sessionManager.getLeafId() ?? "root")
-      ) throw new Error("Direct extension context only exposes the current branch");
-      return {
-        sessionManager: extensionSessionManager(runtime.sessionManager),
-        modelRegistry: target.modelRegistry,
-        completeModel: (model, context, options) => target.providerWire.withoutScope(
-          () => controlledSession.modelRuntime.complete(model, context, options),
-        ),
-        ...(() => {
-          const selected = runtime.session.nativeModel;
-          const model = selected === undefined ? undefined : target.modelRegistry.find(selected.provider, selected.id);
-          return model === undefined ? {} : { model };
-        })(),
-        scopedModels: runtime.session.nativeScopedModels,
-        thinkingLevel: runtime.session.thinkingLevel,
-        isIdle() { return runtime.session.isIdle; },
-        hasPendingMessages() { return runtime.session.hasPendingMessages; },
-        abort() { runtime.session.abort("Cancelled by extension"); },
-        shutdown() {
-          if (extensionShutdownHandler === undefined) void runtime.close();
-          else void extensionShutdownHandler();
-        },
-        getContextUsage() { return runtime.session.getContextUsage(); },
-        compact(options = {}) {
-          void runtime.session.compact(options.customInstructions).then(
-            (result) => options.onComplete?.({
-              threadId: runtime.session.sessionId,
-              branch: runtime.session.sessionManager.getLeafId() ?? "root",
-              ...result,
-            }),
-            (error) => {
-              options.onError?.(Error.isError(error)
-                ? error
-                : new Error(errorMessage(error), { cause: error }));
-            },
-          );
-        },
-        getSystemPrompt() { return runtime.session.systemPrompt; },
-      };
+    controlledSession.updatePluginBindings({
+      commandContextActions,
+      shutdownHandler() {
+        if (extensionShutdownHandler === undefined) void runtime.close();
+        else void extensionShutdownHandler();
+      },
     });
   }
-  bindExtensionControls(generation, session);
+  bindPluginControls(session);
   return runtime;
 }

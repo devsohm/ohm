@@ -42,21 +42,21 @@ test("controller UI slots compose, replace, fall back, and clean up by generatio
   const a = {};
   const b = {};
 
-  controller.setExtensionUiSlot("owner-a", "session.beforeEditor", "summary", {
+  controller.setPluginUiSlot("owner-a", "session.beforeEditor", "summary", {
     lines: ["A append"],
     order: 1,
   }, a, generationA.signal);
-  controller.setExtensionUiSlot("owner-b", "session.beforeEditor", "summary", {
+  controller.setPluginUiSlot("owner-b", "session.beforeEditor", "summary", {
     lines: ["B prepend"],
     placement: "prepend",
   }, b, generationB.signal);
-  controller.setExtensionUiSlot("owner-a", "session.footer", "replacement", {
+  controller.setPluginUiSlot("owner-a", "session.footer", "replacement", {
     lines: ["footer fallback"],
     placement: "replace",
     order: 1,
   }, {}, generationA.signal);
   const footerWinner = {};
-  controller.setExtensionUiSlot("owner-b", "session.footer", "replacement", {
+  controller.setPluginUiSlot("owner-b", "session.footer", "replacement", {
     lines: ["footer winner"],
     placement: "replace",
     order: 2,
@@ -68,10 +68,10 @@ test("controller UI slots compose, replace, fall back, and clean up by generatio
   assert.match(initial, /footer winner/u);
   assert.doesNotMatch(initial, /footer fallback/u);
 
-  controller.setExtensionUiSlot("owner-a", "session.beforeEditor", "summary", {
+  controller.setPluginUiSlot("owner-a", "session.beforeEditor", "summary", {
     lines: ["A updated"],
   }, {}, generationA.signal);
-  controller.setExtensionUiSlot("owner-a", "session.beforeEditor", "summary", undefined, a);
+  controller.setPluginUiSlot("owner-a", "session.beforeEditor", "summary", undefined, a);
   controller.renderNow();
   assert.match(viewport(output), /A updated/u, "a stale token cannot remove its replacement");
 
@@ -83,7 +83,7 @@ test("controller UI slots compose, replace, fall back, and clean up by generatio
   assert.match(fallback, /A updated/u);
   assert.match(fallback, /footer fallback/u);
 
-  controller.clearExtensionUi();
+  controller.clearPluginUi();
   controller.renderNow();
   assert.doesNotMatch(viewport(output), /A updated|footer fallback/u);
   generationA.abort(new Error("test complete"));
@@ -99,7 +99,7 @@ test("raw replacements outrank slots, which outrank earlier structured replaceme
   controller.setPersistentComponent("header-replacement", "structured", () => ({
     render: () => ({ lines: [{ spans: [{ text: "structured fallback" }] }] }),
   }), structured.signal);
-  controller.setExtensionUiSlot("slot-owner", "session.header", "replacement", {
+  controller.setPluginUiSlot("slot-owner", "session.header", "replacement", {
     lines: ["slot replacement"],
     placement: "replace",
   }, {}, slot.signal);
@@ -140,7 +140,7 @@ test("tiny rich frames retain the editor cursor while slot rows are budgeted", (
     "session.afterEditor",
     "session.footer",
   ] as const).entries()) {
-    controller.setExtensionUiSlot("owner", path, `slot-${index}`, {
+    controller.setPluginUiSlot("owner", path, `slot-${index}`, {
       lines: [`slot ${index} row 1`, `slot ${index} row 2`],
     }, {}, generation.signal);
   }
@@ -167,7 +167,7 @@ test("line and accessibility controllers reject persistent UI slots", () => {
       handleSignals: false,
     });
     const generation = new AbortController();
-    assert.throws(() => controller.setExtensionUiSlot(
+    assert.throws(() => controller.setPluginUiSlot(
       "owner",
       "session.header",
       "header",

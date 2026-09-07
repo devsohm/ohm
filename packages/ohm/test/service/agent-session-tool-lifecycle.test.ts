@@ -15,9 +15,9 @@ import type {
 import { DefaultResourceLoader } from "../../src/core/resource-loader.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { FUNCTION_VALUE } from "../../src/core/value-schemas.js";
-import { getExtensionRuntimeHost, projectLoadedExtensionHost } from "../../src/extensions/compat.js";
-import type { ExtensionAPI } from "../../src/extensions/direct.js";
-import { loadDirectExtensions } from "../../src/extensions/runtime.js";
+import { getPluginRuntimeHost, projectLoadedPluginHost } from "../../src/plugins/compat.js";
+import type { PluginAPI } from "../../src/plugins/direct.js";
+import { loadDirectPlugins } from "../../src/plugins/runtime.js";
 import {
   createModels,
   createProvider,
@@ -33,13 +33,13 @@ import { SessionManager } from "../../src/storage/session-manager.js";
 import { sha256 } from "../../src/tools/hash.js";
 import type { ToolAuthorizationOwner } from "../../src/tools/approval.js";
 import type { HarnessTool } from "../../src/tools/types.js";
-import { loadTestDirectExtensions } from "../helpers/direct-extension-loader.js";
+import { loadTestDirectExtensions } from "../helpers/direct-plugin-loader.js";
 
 const observedAt = "2026-07-21T00:00:00.000Z";
 const supported = { value: "supported", source: "provider", observedAt } as const;
 
 declare global {
-  var __ohmToolProvenanceApi: ExtensionAPI | undefined;
+  var __ohmToolProvenanceApi: PluginAPI | undefined;
 }
 
 class SwitchingProvider implements ProviderAdapter {
@@ -231,10 +231,10 @@ test("an unknown persisted model leaves a usable fallback untouched", async (con
 test("replacement callbacks receive the full command context and object-style messages", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-replacement-context-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
     activationFailure: "throw",
-    inlineExtensions: [() => {}],
+    inlinePlugins: [() => {}],
   });
   context.after(async () => await host.close());
   const manager = SessionManager.inMemory(workspace);
@@ -243,10 +243,10 @@ test("replacement callbacks receive the full command context and object-style me
     sessionManager: manager,
     providers: new ProviderRegistry([]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
-  await session.bindExtensions({ mode: "print" });
+  await session.bindPlugins({ mode: "print" });
 
   const replacement = session.createReplacedSessionContext();
   assert.equal(replacement.session, session);
@@ -320,7 +320,7 @@ test("SDK tool policies apply to tools registered during session start", async (
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      extensionFactories: [(ohm) => {
+      pluginFactories: [(ohm) => {
         ohm.on("session_start", () => {
           ohm.registerTool({
             name: "late_tool",
@@ -335,7 +335,7 @@ test("SDK tool policies apply to tools registered during session start", async (
       }],
     });
     await loader.refresh();
-    const host = getExtensionRuntimeHost(loader.getExtensions().runtime);
+    const host = getPluginRuntimeHost(loader.getPlugins().runtime);
     assert.ok(host);
     const provider = new CatalogProvider();
     const registry = new PublicModelRegistry(await ModelRuntime.create({
@@ -356,7 +356,7 @@ test("SDK tool policies apply to tools registered during session start", async (
       settingsManager: settings,
       ...selected.options,
     });
-    await created.session.bindExtensions({ mode: "print" });
+    await created.session.bindPlugins({ mode: "print" });
     assert.equal(created.session.getActiveTools().includes("late_tool"), selected.active, selected.name);
     await created.session.close();
     await host.close();
@@ -387,7 +387,7 @@ test("direct getCommands includes extension commands, prompts, and skills in a r
     ),
   ]);
 
-  let directApi: Pick<ExtensionAPI, "getCommands"> | undefined;
+  let directApi: Pick<PluginAPI, "getCommands"> | undefined;
   const settings = SettingsManager.inMemory();
   const loader = new DefaultResourceLoader({
     cwd: workspace,
@@ -399,7 +399,7 @@ test("direct getCommands includes extension commands, prompts, and skills in a r
     noSkills: true,
     additionalPromptTemplatePaths: [join(agentDirectory, "prompts")],
     additionalSkillPaths: [join(agentDirectory, "skills")],
-    extensionFactories: [{
+    pluginFactories: [{
       name: "command-catalog-fixture",
       factory(ohm) {
         directApi = ohm;
@@ -411,7 +411,7 @@ test("direct getCommands includes extension commands, prompts, and skills in a r
     }],
   });
   await loader.refresh();
-  const host = getExtensionRuntimeHost(loader.getExtensions().runtime);
+  const host = getPluginRuntimeHost(loader.getPlugins().runtime);
   assert.ok(host);
   context.after(async () => await host.close());
   const session = await AgentSession.create({
@@ -423,7 +423,7 @@ test("direct getCommands includes extension commands, prompts, and skills in a r
     resourceLoader: loader,
   });
   context.after(async () => await session.close());
-  await session.bindExtensions({ mode: "print" });
+  await session.bindPlugins({ mode: "print" });
 
   assert.ok(directApi);
   assert.deepEqual(
@@ -505,10 +505,10 @@ test("an over-budget resumed history compacts before its next provider request",
     if (turn === 4) firstKeptEntryId = userEntry;
   }
   const compactEvents: Array<{ reason: string; willRetry: boolean }> = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
     activationFailure: "throw",
-    inlineExtensions: [(ohm) => {
+    inlinePlugins: [(ohm) => {
       ohm.on("session_before_compact", (event) => {
         compactEvents.push({ reason: event.reason, willRetry: event.willRetry });
         return {
@@ -527,7 +527,7 @@ test("an over-budget resumed history compacts before its next provider request",
     sessionManager: manager,
     providers: new ProviderRegistry([provider]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 500,
     compactionRecentTokens: 500,
   });
@@ -552,10 +552,10 @@ test("an over-budget resumed history compacts before its next provider request",
 test("tools registered during session start join the live session catalog", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-start-tool-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
     activationFailure: "throw",
-    inlineExtensions: [(ohm) => {
+    inlinePlugins: [(ohm) => {
       ohm.on("session_start", () => {
         throw new Error("start observer failed");
       });
@@ -579,7 +579,7 @@ test("tools registered during session start join the live session catalog", asyn
     sessionManager: SessionManager.inMemory(workspace),
     providers: new ProviderRegistry([provider]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
   await session.setModel({
@@ -590,7 +590,7 @@ test("tools registered during session start join the live session catalog", asyn
   });
 
   assert.equal(session.getAllTools().some((tool) => tool.name === "start_tool"), false);
-  await session.bindExtensions({ mode: "print" });
+  await session.bindPlugins({ mode: "print" });
   assert.equal(session.getAllTools().some((tool) => tool.name === "start_tool"), true);
   assert.ok(host.diagnostics().some((entry) => entry.message.includes("start observer failed")));
 
@@ -675,11 +675,11 @@ test("direct getAllTools preserves builtin, host, and scoped extension provenanc
     sessionManager: SessionManager.inMemory(workspace),
     providers: new ProviderRegistry([]),
     settingsManager: SettingsManager.inMemory(),
-    extensionsResult: projectLoadedExtensionHost(host, sourceInfo),
+    pluginsResult: projectLoadedPluginHost(host, sourceInfo),
     tools: [sdkTool, overriddenBuiltin],
   });
   context.after(async () => await session.close());
-  await session.bindExtensions({ mode: "print" });
+  await session.bindPlugins({ mode: "print" });
 
   const api = globalThis.__ohmToolProvenanceApi;
   assert.ok(api);
@@ -730,10 +730,10 @@ test("direct getAllTools preserves builtin, host, and scoped extension provenanc
 test("extension tool selection changes the next provider turn and records additive tools", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-tool-lifecycle-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
     activationFailure: "throw",
-    inlineExtensions: [(ohm) => {
+    inlinePlugins: [(ohm) => {
       ohm.registerTool({
         name: "switch_tools",
         label: "Switch tools",
@@ -763,7 +763,7 @@ test("extension tool selection changes the next provider turn and records additi
     sessionManager: SessionManager.inMemory(workspace),
     providers: new ProviderRegistry([provider]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: host.tools(),
     toolAuthorizationHandler(_request, authorizationContext) {
       authorizationOwners.push(authorizationContext.owner);
@@ -777,7 +777,7 @@ test("extension tool selection changes the next provider turn and records additi
     id: "model",
     info: provider.models[0]!,
   });
-  await session.bindExtensions({ mode: "print" });
+  await session.bindPlugins({ mode: "print" });
   session.setActiveTools(["switch_tools"]);
   const pendingSnapshots: Array<{ event: "start" | "end"; ids: string[] }> = [];
   session.subscribe((event) => {

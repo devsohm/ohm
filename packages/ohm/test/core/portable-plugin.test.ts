@@ -9,11 +9,11 @@ import { DefaultPackageManager } from "../../src/core/package-manager.js";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { loadSkills } from "../../src/core/skills.js";
-import { getExtensionRuntimeHost } from "../../src/extensions/compat.js";
+import { getPluginRuntimeHost } from "../../src/plugins/compat.js";
 import {
   PROJECT_PACKAGE_DECLARATION,
   ProjectPackageManager,
-} from "../../src/extensions/project-packages.js";
+} from "../../src/plugins/project-packages.js";
 import { canonicalizePath } from "../../src/utils/paths.js";
 
 const schema = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
@@ -96,10 +96,10 @@ test("portable plugins map skills and namespaced ohm resources into the existing
     noPromptTemplates: true,
     noThemes: true,
   });
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   await loader.refresh();
   assert.equal(loader.getSkills().skills.some((entry) => entry.name === "review"), true);
-  assert.equal(loader.getExtensions().extensions.some((entry) => entry.commands.has("portable-probe")), true);
+  assert.equal(loader.getPlugins().plugins.some((entry) => entry.commands.has("portable-probe")), true);
   assert.equal(loader.getSkills().diagnostics.some((entry) =>
     entry.code === "PORTABLE_PLUGIN_MANIFEST_FIELD_IGNORED"), true);
 });
@@ -269,7 +269,7 @@ test("portable component containment applies the narrowest failure boundary", {
     agentDir: value.agentDir,
     settingsManager: SettingsManager.inMemory(),
   });
-  const escaped = await escapedManager.resolveExtensionSources([escapedManifestRoot], { temporary: true });
+  const escaped = await escapedManager.resolvePluginSources([escapedManifestRoot], { temporary: true });
   assert.deepEqual(escaped.extensions, []);
   assert.equal(escapedManager.getDiagnostics()[0]?.code, "PORTABLE_PLUGIN_MANIFEST_INVALID");
 });

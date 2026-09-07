@@ -20,8 +20,8 @@ export interface CreateHarnessRuntimeOptions {
   workspace?: string;
   projectTrusted?: boolean;
   ephemeral?: boolean;
-  extensions?: boolean;
-  extensionPaths?: readonly string[];
+  pluginCode?: boolean;
+  pluginPaths?: readonly string[];
   skills?: boolean;
   skillPaths?: readonly string[];
   promptTemplates?: boolean;
@@ -76,7 +76,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
   static async create(runtime: LoadedRuntime): Promise<LoadedHarnessRuntime> {
     const harness = new LoadedHarnessRuntime(runtime);
     try {
-      await runtime.session.bindExtensions({
+      await runtime.session.bindPlugins({
         mode: "sdk",
         shutdownHandler: () => { void harness.close(); },
       });
@@ -101,7 +101,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
 
   constructor(runtime: LoadedRuntime) {
     this.#runtime = runtime;
-    runtime.setExtensionShutdownHandler(() => this.close());
+    runtime.setPluginShutdownHandler(() => this.close());
   }
 
   get workspace(): string {
@@ -170,7 +170,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
       return await this.#runtime.refresh({
         ...options,
         beforeSessionStart: async (session) => {
-          session.updateExtensionBindings({
+          session.updatePluginBindings({
             mode: "sdk",
             shutdownHandler: () => { void this.close(); },
           });
@@ -210,7 +210,7 @@ class LoadedHarnessRuntime implements HarnessRuntime {
   async #performClose(): Promise<void> {
     const failures: unknown[] = [];
     try {
-      await this.#runtime.runtimeExtensions.dispatch("session_shutdown", { reason: "quit" });
+      await this.#runtime.runtimePlugins.dispatch("session_shutdown", { reason: "quit" });
     } catch (error) {
       failures.push(error);
     }
@@ -235,6 +235,6 @@ class LoadedHarnessRuntime implements HarnessRuntime {
 export async function createHarnessRuntime(
   options: CreateHarnessRuntimeOptions = {},
 ): Promise<HarnessRuntime> {
-  const runtime = await loadRuntime({ ...options, extensionRuntime: true });
+  const runtime = await loadRuntime({ ...options, pluginRuntime: true });
   return await LoadedHarnessRuntime.create(runtime);
 }

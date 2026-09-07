@@ -24,7 +24,7 @@
 
   <rect class="strong" x="470" y="142" width="660" height="154"/>
   <text class="label" x="510" y="194">ohm</text>
-  <text class="detail" x="510" y="232">AgentSession · auth · tools · extensions</text>
+  <text class="detail" x="510" y="232">AgentSession · auth · tools · plugins</text>
   <text class="detail" x="510" y="266">six modes · policy · generations</text>
 
   <path class="edge" d="M650 296v86H340v72"/>

@@ -37,9 +37,9 @@ const MAX_SLOT_SOURCE_LINES = 4;
 const MAX_SLOT_SOURCE_BYTES = 16 * 1024;
 const MAX_SLOT_LINES = 8;
 const MAX_EDITOR_LINES = 8;
-const MAX_EXTENSION_VALUES = 4;
-const MAX_EXTENSION_BYTES = 32 * 1024;
-const MAX_EXTENSION_LINES = 2;
+const MAX_PLUGIN_VALUES = 4;
+const MAX_PLUGIN_BYTES = 32 * 1024;
+const MAX_PLUGIN_LINES = 2;
 const DEFAULT_UNICODE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const DEFAULT_ASCII_SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
@@ -96,7 +96,7 @@ export interface TuiRuntimeSurfaceProjection {
   readonly footer: TuiRuntimeSurfaceSlot;
   readonly widget: TuiRuntimeSurfaceSlot;
   readonly widgetBelow: TuiRuntimeSurfaceSlot;
-  /** Extension editor replacement only. Core editor state remains host-owned. */
+  /** Plugin editor replacement only. Core editor state remains host-owned. */
   readonly editor?: TuiRuntimeSurfaceBlock;
   /** Full runtime component only. Transcript projection remains host-owned. */
   readonly runtime?: TuiRuntimeSurfaceBlock;
@@ -489,14 +489,14 @@ function projectedText(
   theme: Theme | undefined,
 ): TuiRuntimeSurfaceBlock {
   const inner = Math.max(1, columns - 2);
-  const safe = byteTruncate(sanitizeTerminalText(value), MAX_EXTENSION_BYTES - 1);
+  const safe = byteTruncate(sanitizeTerminalText(value), MAX_PLUGIN_BYTES - 1);
   const lines = wrapCells(safe, inner).slice(0, maximumLines).map((line) => ({
     spans: [{ text: truncateCells(`${columns > 1 ? " " : ""}${line}`, columns, ""), role }],
   }));
   return projectRuntimeUiBlock({ lines }, {
     columns,
     maxLines: maximumLines,
-    maxBytes: MAX_EXTENSION_BYTES,
+    maxBytes: MAX_PLUGIN_BYTES,
     ...optionalProperties(theme === undefined ? undefined : { theme }),
   });
 }
@@ -507,9 +507,9 @@ function projectedTextValues(
   role: ThemeRole,
   theme: Theme | undefined,
 ): TuiRuntimeSurfaceBlock[] {
-  return (values ?? []).slice(-MAX_EXTENSION_VALUES).map((value, index) => {
+  return (values ?? []).slice(-MAX_PLUGIN_VALUES).map((value, index) => {
     if (!isStringValue(value)) throw new TypeError(`Runtime text surface ${index} must be a string`);
-    return projectedText(value, columns, role, MAX_EXTENSION_LINES, theme);
+    return projectedText(value, columns, role, MAX_PLUGIN_LINES, theme);
   });
 }
 
@@ -578,6 +578,29 @@ function spinner(
   return safe[selectedFrame % safe.length];
 }
 
+/** Shared native activity text for the footer and default working row. */
+export function projectTuiActivity(view: TuiViewState, unicode: boolean): string | undefined {
+  if (view.context.workingVisible === false) return undefined;
+  if (view.inputPrompt !== undefined || view.overlay?.promptMode !== undefined) return "Waiting for input";
+  const activity = view.context.activity;
+  if (activity === undefined || view.context.active !== true) return undefined;
+  const elapsed = !Number.isFinite(activity.startedAt)
+    ? undefined
+    : elapsedText(Math.max(0, Date.now() - activity.startedAt));
+  const retryDelay = activity.retryAt === undefined
+    ? undefined
+    : `${(Math.max(0, activity.retryAt - Date.now()) / 1_000).toFixed(1)}s`;
+  const retry = retryDelay === undefined
+    ? undefined
+    : `${activity.attempt === undefined ? "retry" : `attempt ${activity.attempt}`} in ${retryDelay}`;
+  return [
+    activity.phase.trim(),
+    elapsed,
+    retry,
+    activity.cancellable === true ? "Esc to cancel" : undefined,
+  ].filter((value): value is string => value !== undefined && value !== "").join(unicode ? " · " : " | ");
+}
+
 function indicatorBlocks(
   view: TuiViewState,
   columns: number,
@@ -585,25 +608,11 @@ function indicatorBlocks(
   unicode: boolean,
 ): Pick<TuiRuntimeSurfaceProjection, "extensionStatus" | "working"> {
   const status = view.context.extensionStatus?.trim();
-  const activity = view.context.activity;
-  const visible = activity !== undefined && view.context.active === true && view.context.workingVisible !== false;
-  const explicitWorkingMessage = view.context.workingMessage?.trim();
-  const elapsed = activity === undefined || explicitWorkingMessage !== undefined || !Number.isFinite(activity.startedAt)
-    ? undefined
-    : elapsedText(Math.max(0, Date.now() - activity.startedAt));
-  const retryDelay = activity?.retryAt === undefined || explicitWorkingMessage !== undefined
-    ? undefined
-    : `${(Math.max(0, activity.retryAt - Date.now()) / 1_000).toFixed(1)}s`;
-  const retry = retryDelay === undefined
-    ? undefined
-    : `${activity?.attempt === undefined ? "retry" : `attempt ${activity.attempt}`} in ${retryDelay}`;
-  const workingMessage = explicitWorkingMessage ?? [
-    activity?.phase.trim(),
-    elapsed,
-    retry,
-    activity?.cancellable === true ? "Esc to cancel" : undefined,
-  ].filter((value): value is string => value !== undefined && value !== "").join(unicode ? " · " : " | ");
-  const workingFrame = visible ? spinner(view.workingIndicator, view.context.activityFrame, unicode) : undefined;
+  const activity = projectTuiActivity(view, unicode);
+  const visible = activity !== undefined;
+  const workingMessage = view.context.workingMessage?.trim() ?? activity;
+  const waiting = view.inputPrompt !== undefined || view.overlay?.promptMode !== undefined;
+  const workingFrame = visible && !waiting ? spinner(view.workingIndicator, view.context.activityFrame, unicode) : undefined;
   const working = visible && workingMessage !== undefined && workingMessage !== ""
     ? projectedText([workingFrame, workingMessage].filter(Boolean).join(" "), columns, "working", 1, theme)
     : undefined;

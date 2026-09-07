@@ -40,9 +40,9 @@ const TERMINATION_ESCALATION_MS = 2_000;
 const OUTPUT_DRAIN_MAX_MS = 1_000;
 const DEFAULT_STATUS_UPDATE_INTERVAL_MS = 100;
 
-export type ExtensionProcessId = string;
+export type PluginProcessId = string;
 
-export type ExtensionProcessState =
+export type PluginProcessState =
   | "starting"
   | "running"
   | "stopping"
@@ -51,9 +51,9 @@ export type ExtensionProcessState =
   | "cancelled"
   | "timed_out";
 
-export type ExtensionProcessOutputMode = "capture" | "pipe" | "ignore";
+export type PluginProcessOutputMode = "capture" | "pipe" | "ignore";
 
-export interface ExtensionProcessSpec {
+export interface PluginProcessSpec {
   argv: readonly [string, ...string[]];
   cwd?: string;
   env?: Readonly<Record<string, string>>;
@@ -61,15 +61,15 @@ export interface ExtensionProcessSpec {
   timeoutMs?: number;
   signal?: AbortSignal;
   stdin?: "ignore" | "pipe";
-  stdout?: ExtensionProcessOutputMode;
-  stderr?: ExtensionProcessOutputMode;
+  stdout?: PluginProcessOutputMode;
+  stderr?: PluginProcessOutputMode;
   /** Retained prefix per captured stream. */
   captureLimitBytes?: number;
 }
 
-export interface ExtensionProcessStatus {
-  readonly id: ExtensionProcessId;
-  readonly state: ExtensionProcessState;
+export interface PluginProcessStatus {
+  readonly id: PluginProcessId;
+  readonly state: PluginProcessState;
   readonly startedAt: number;
   readonly finishedAt?: number;
   readonly durationMs: number;
@@ -83,12 +83,12 @@ export interface ExtensionProcessStatus {
   readonly error?: string;
 }
 
-export interface ExtensionProcessReadResult {
+export interface PluginProcessReadResult {
   readonly data: Uint8Array;
   readonly eof: boolean;
 }
 
-export interface ExtensionProcessResult extends ExtensionProcessStatus {
+export interface PluginProcessResult extends PluginProcessStatus {
   readonly state: "succeeded" | "failed" | "cancelled" | "timed_out";
   readonly exitCode: number | null;
   readonly signal: string | null;
@@ -96,27 +96,27 @@ export interface ExtensionProcessResult extends ExtensionProcessStatus {
   readonly stderr: Uint8Array;
 }
 
-export interface ExtensionProcessWaitOptions {
+export interface PluginProcessWaitOptions {
   signal?: AbortSignal;
 }
 
-export interface ExtensionProcessService {
-  spawn(spec: ExtensionProcessSpec): ExtensionProcessId;
-  status(id: ExtensionProcessId): ExtensionProcessStatus;
-  subscribe(id: ExtensionProcessId, listener: (status: ExtensionProcessStatus) => void | Promise<void>): () => void;
+export interface PluginProcessService {
+  spawn(spec: PluginProcessSpec): PluginProcessId;
+  status(id: PluginProcessId): PluginProcessStatus;
+  subscribe(id: PluginProcessId, listener: (status: PluginProcessStatus) => void | Promise<void>): () => void;
   read(
-    id: ExtensionProcessId,
+    id: PluginProcessId,
     stream: "stdout" | "stderr",
     options?: { maxBytes?: number; signal?: AbortSignal },
-  ): Promise<ExtensionProcessReadResult>;
+  ): Promise<PluginProcessReadResult>;
   write(
-    id: ExtensionProcessId,
+    id: PluginProcessId,
     data: string | Uint8Array,
     options?: { signal?: AbortSignal },
   ): Promise<void>;
-  closeInput(id: ExtensionProcessId, options?: { signal?: AbortSignal }): Promise<void>;
-  wait(id: ExtensionProcessId, options?: ExtensionProcessWaitOptions): Promise<ExtensionProcessResult>;
-  cancel(id: ExtensionProcessId): Promise<ExtensionProcessResult>;
+  closeInput(id: PluginProcessId, options?: { signal?: AbortSignal }): Promise<void>;
+  wait(id: PluginProcessId, options?: PluginProcessWaitOptions): Promise<PluginProcessResult>;
+  cancel(id: PluginProcessId): Promise<PluginProcessResult>;
 }
 
 export interface ManagedProcessOwner {
@@ -147,13 +147,13 @@ export interface ManagedProcessSupervisorOptions {
 
 interface PendingRead {
   maximum: number;
-  resolve: (result: ExtensionProcessReadResult) => void;
+  resolve: (result: PluginProcessReadResult) => void;
   reject: (cause: unknown) => void;
   cleanups: Array<() => void>;
 }
 
 interface PipeState {
-  mode: ExtensionProcessOutputMode;
+  mode: PluginProcessOutputMode;
   chunks: Buffer[];
   headOffset: number;
   bytes: number;
@@ -172,9 +172,9 @@ interface OwnerState {
 type StopReason = "cancel" | "failure" | "timeout";
 
 interface ProcessRecord {
-  id: ExtensionProcessId;
+  id: PluginProcessId;
   owner: OwnerState;
-  state: ExtensionProcessState;
+  state: PluginProcessState;
   startedAt: number;
   finishedAt?: number;
   exitCode?: number | null;
@@ -188,12 +188,12 @@ interface ProcessRecord {
   stdoutBytes: number;
   stderrBytes: number;
   captureLimitBytes: number;
-  completion: Promise<ExtensionProcessResult>;
-  resolveCompletion: (result: ExtensionProcessResult) => void;
+  completion: Promise<PluginProcessResult>;
+  resolveCompletion: (result: PluginProcessResult) => void;
   spawnReady: Promise<void>;
   resolveSpawn: () => void;
   rejectSpawn: (cause: unknown) => void;
-  listeners: Set<(status: ExtensionProcessStatus) => void | Promise<void>>;
+  listeners: Set<(status: PluginProcessStatus) => void | Promise<void>>;
   notificationTimer: NodeJS.Timeout | undefined;
   timeoutTimer: NodeJS.Timeout | undefined;
   escalationTimer: NodeJS.Timeout | undefined;
@@ -217,8 +217,8 @@ interface ValidatedProcessSpec {
   timeoutMs: number | undefined;
   signal: AbortSignal | undefined;
   stdin: "ignore" | "pipe";
-  stdout: ExtensionProcessOutputMode;
-  stderr: ExtensionProcessOutputMode;
+  stdout: PluginProcessOutputMode;
+  stderr: PluginProcessOutputMode;
   captureLimitBytes: number;
 }
 
@@ -240,7 +240,7 @@ function boundedText(value: string, label: string, maximum: number): string {
   return value;
 }
 
-function outputMode(value: ExtensionProcessOutputMode | undefined, label: string): ExtensionProcessOutputMode {
+function outputMode(value: PluginProcessOutputMode | undefined, label: string): PluginProcessOutputMode {
   const selected = value ?? "capture";
   if (selected !== "capture" && selected !== "pipe" && selected !== "ignore") {
     throw new Error(`${label} must be capture, pipe, or ignore`);
@@ -248,7 +248,7 @@ function outputMode(value: ExtensionProcessOutputMode | undefined, label: string
   return selected;
 }
 
-function terminal(state: ExtensionProcessState): state is ExtensionProcessResult["state"] {
+function terminal(state: PluginProcessState): state is PluginProcessResult["state"] {
   return state === "succeeded" || state === "failed" || state === "cancelled" || state === "timed_out";
 }
 
@@ -294,7 +294,7 @@ function appendCapture(stream: PipeState, chunk: Buffer, maximum: number): void 
   }
 }
 
-function pipeResult(stream: PipeState, maximum: number): ExtensionProcessReadResult {
+function pipeResult(stream: PipeState, maximum: number): PluginProcessReadResult {
   const selected: Buffer[] = [];
   let retained = 0;
   while (stream.chunks.length > 0 && retained < maximum) {
@@ -316,7 +316,7 @@ function pipeResult(stream: PipeState, maximum: number): ExtensionProcessReadRes
   });
 }
 
-function publicResult(result: ExtensionProcessResult): ExtensionProcessResult {
+function publicResult(result: PluginProcessResult): PluginProcessResult {
   return Object.freeze({
     ...result,
     stdout: new Uint8Array(result.stdout),
@@ -324,7 +324,7 @@ function publicResult(result: ExtensionProcessResult): ExtensionProcessResult {
   });
 }
 
-/** Generation-agnostic host supervisor. Extension ownership is supplied through opaque owner keys. */
+/** Generation-agnostic host supervisor. Plugin ownership is supplied through opaque owner keys. */
 export class ManagedProcessSupervisor {
   readonly #cwd: string;
   readonly #maxCaptureBytes: number;
@@ -340,7 +340,7 @@ export class ManagedProcessSupervisor {
   readonly #spawnProcess: typeof spawn;
   readonly #terminateProcess: (pid: number, signal: NodeJS.Signals) => Promise<boolean>;
   readonly #owners = new Map<object, OwnerState>();
-  readonly #records = new Map<ExtensionProcessId, ProcessRecord>();
+  readonly #records = new Map<PluginProcessId, ProcessRecord>();
   #closed = false;
   #closing: Promise<void> | undefined;
 
@@ -395,7 +395,7 @@ export class ManagedProcessSupervisor {
     );
   }
 
-  service(owner: ManagedProcessOwner): ExtensionProcessService {
+  service(owner: ManagedProcessOwner): PluginProcessService {
     if (this.#closed) throw new Error("Managed process supervisor is closed");
     let state = this.#owners.get(owner.key);
     if (state === undefined) {
@@ -414,7 +414,7 @@ export class ManagedProcessSupervisor {
       throw new Error("Managed process owner key is already bound");
     }
     const selected = state;
-    const service: ExtensionProcessService = {
+    const service: PluginProcessService = {
       spawn: (spec) => this.#spawn(selected, spec),
       status: (id) => this.#status(this.#owned(selected, id)),
       subscribe: (id, listener) => this.#subscribe(selected, id, listener),
@@ -449,7 +449,7 @@ export class ManagedProcessSupervisor {
     if (!state.owner.isActive()) throw new Error("Runtime extension context is no longer active");
   }
 
-  #owned(state: OwnerState, id: ExtensionProcessId): ProcessRecord {
+  #owned(state: OwnerState, id: PluginProcessId): ProcessRecord {
     this.#assertOwner(state);
     const record = this.#records.get(id);
     if (record === undefined || record.owner !== state) throw new Error(`Unknown managed process: ${id}`);
@@ -462,7 +462,7 @@ export class ManagedProcessSupervisor {
     return count;
   }
 
-  #validateSpec(spec: ExtensionProcessSpec): ValidatedProcessSpec {
+  #validateSpec(spec: PluginProcessSpec): ValidatedProcessSpec {
     if (!isObjectValue(spec)) throw new TypeError("Managed process spec must be an object");
     if (!Array.isArray(spec.argv) || spec.argv.length === 0 || spec.argv.length > MAX_ARGV_ENTRIES) {
       throw new Error(`Managed process argv must contain 1 through ${MAX_ARGV_ENTRIES} entries`);
@@ -522,7 +522,7 @@ export class ManagedProcessSupervisor {
     };
   }
 
-  #spawn(owner: OwnerState, input: ExtensionProcessSpec): ExtensionProcessId {
+  #spawn(owner: OwnerState, input: PluginProcessSpec): PluginProcessId {
     this.#assertOwner(owner);
     if (!owner.owner.isCommitted()) throw new Error("Managed processes cannot start before activation commits");
     owner.owner.signal.throwIfAborted();
@@ -531,8 +531,8 @@ export class ManagedProcessSupervisor {
     if (this.#runningCount(owner.records) >= this.#maxRunningPerOwner || this.#runningCount(this.#records.values()) >= this.#maxRunning) {
       throw new Error("Managed process capacity is exhausted");
     }
-    let resolveCompletion!: (result: ExtensionProcessResult) => void;
-    const completion = new Promise<ExtensionProcessResult>((resolveValue) => { resolveCompletion = resolveValue; });
+    let resolveCompletion!: (result: PluginProcessResult) => void;
+    const completion = new Promise<PluginProcessResult>((resolveValue) => { resolveCompletion = resolveValue; });
     let resolveSpawn!: () => void;
     let rejectSpawn!: (cause: unknown) => void;
     const spawnReady = new Promise<void>((resolveValue, rejectValue) => {
@@ -648,7 +648,7 @@ export class ManagedProcessSupervisor {
         record.stderr.eof = true;
         this.#flushRead(record, "stdout");
         this.#flushRead(record, "stderr");
-        const state: ExtensionProcessResult["state"] = record.stopReason === "timeout"
+        const state: PluginProcessResult["state"] = record.stopReason === "timeout"
           ? "timed_out"
           : record.stopReason === "cancel"
             ? "cancelled"
@@ -701,9 +701,9 @@ export class ManagedProcessSupervisor {
     });
   }
 
-  #status(record: ProcessRecord): ExtensionProcessStatus {
+  #status(record: ProcessRecord): PluginProcessStatus {
     const now = record.finishedAt ?? Date.now();
-    const status: ExtensionProcessStatus = {
+    const status: PluginProcessStatus = {
       id: record.id,
       state: record.state,
       startedAt: record.startedAt,
@@ -765,13 +765,13 @@ export class ManagedProcessSupervisor {
 
   #subscribe(
     owner: OwnerState,
-    id: ExtensionProcessId,
-    listener: (status: ExtensionProcessStatus) => void | Promise<void>,
+    id: PluginProcessId,
+    listener: (status: PluginProcessStatus) => void | Promise<void>,
   ): () => void {
     const record = this.#owned(owner, id);
     if (!Check(FUNCTION_VALUE, listener)) throw new TypeError("Managed process listener must be a function");
     if (owner.subscriptions >= this.#maxSubscriptionsPerOwner) throw new Error("Managed process subscription capacity is exhausted");
-    const registered = (status: ExtensionProcessStatus): void | Promise<void> => listener(status);
+    const registered = (status: PluginProcessStatus): void | Promise<void> => listener(status);
     record.listeners.add(registered);
     owner.subscriptions += 1;
     try {
@@ -790,10 +790,10 @@ export class ManagedProcessSupervisor {
 
   async #read(
     owner: OwnerState,
-    id: ExtensionProcessId,
+    id: PluginProcessId,
     name: "stdout" | "stderr",
     options: { maxBytes?: number; signal?: AbortSignal } = {},
-  ): Promise<ExtensionProcessReadResult> {
+  ): Promise<PluginProcessReadResult> {
     const record = this.#owned(owner, id);
     const stream = record[name];
     if (stream.mode !== "pipe") throw new Error(`Managed process ${name} is not configured as a pipe`);
@@ -806,7 +806,7 @@ export class ManagedProcessSupervisor {
       return result;
     }
     if (stream.pending !== undefined) throw new Error(`Managed process ${name} already has a pending read`);
-    return await new Promise<ExtensionProcessReadResult>((resolveValue, rejectValue) => {
+    return await new Promise<PluginProcessReadResult>((resolveValue, rejectValue) => {
       const pending: PendingRead = { maximum, resolve: resolveValue, reject: rejectValue, cleanups: [] };
       const listen = (signal: AbortSignal | undefined): void => {
         if (signal === undefined) return;
@@ -849,7 +849,7 @@ export class ManagedProcessSupervisor {
 
   async #write(
     owner: OwnerState,
-    id: ExtensionProcessId,
+    id: PluginProcessId,
     data: string | Uint8Array,
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
@@ -891,7 +891,7 @@ export class ManagedProcessSupervisor {
 
   async #closeInput(
     owner: OwnerState,
-    id: ExtensionProcessId,
+    id: PluginProcessId,
     options: { signal?: AbortSignal } = {},
   ): Promise<void> {
     const record = this.#owned(owner, id);
@@ -913,14 +913,14 @@ export class ManagedProcessSupervisor {
 
   async #wait(
     owner: OwnerState,
-    id: ExtensionProcessId,
-    options: ExtensionProcessWaitOptions = {},
-  ): Promise<ExtensionProcessResult> {
+    id: PluginProcessId,
+    options: PluginProcessWaitOptions = {},
+  ): Promise<PluginProcessResult> {
     const record = this.#owned(owner, id);
     return publicResult(await withAbort(record.completion, [options.signal, owner.owner.signal]));
   }
 
-  async #cancel(owner: OwnerState, id: ExtensionProcessId): Promise<ExtensionProcessResult> {
+  async #cancel(owner: OwnerState, id: PluginProcessId): Promise<PluginProcessResult> {
     const record = this.#owned(owner, id);
     if (!terminal(record.state)) this.#stop(record, "cancel");
     return publicResult(await record.completion);
@@ -990,7 +990,7 @@ export class ManagedProcessSupervisor {
 
   #finish(
     record: ProcessRecord,
-    state: ExtensionProcessResult["state"],
+    state: PluginProcessResult["state"],
     exitCode: number | null,
     signal: string | null,
     cause?: unknown,
@@ -1021,7 +1021,7 @@ export class ManagedProcessSupervisor {
     this.#flushRead(record, "stdout");
     this.#flushRead(record, "stderr");
     const status = this.#status(record);
-    const result: ExtensionProcessResult = Object.freeze({
+    const result: PluginProcessResult = Object.freeze({
       ...status,
       state,
       exitCode,

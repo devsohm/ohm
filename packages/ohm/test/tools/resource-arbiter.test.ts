@@ -104,6 +104,36 @@ test("a cancelled queued lease is removed without blocking the next waiter", asy
   next.release();
 });
 
+test("unrelated leases bypass a waiting writer without letting later readers starve it", async () => {
+  const arbiter = new ToolResourceArbiter();
+  const controller = new AbortController();
+  const claims: ResourceClaim[] = [{ kind: "file", key: "/workspace/a", mode: "read" }];
+  const active = await arbiter.acquire(claims, controller.signal);
+  const writerAbort = new AbortController();
+  const writer = arbiter.acquire([{ ...claims[0]!, mode: "write" }], writerAbort.signal);
+  let readerEntered = false;
+  const reader = arbiter.acquire(claims, controller.signal).then((lease) => {
+    readerEntered = true;
+    return lease;
+  });
+  try {
+    const unrelated = await within(arbiter.acquire([
+      { kind: "file", key: "/workspace/b", mode: "write" },
+    ], controller.signal), "an unrelated lease behind a blocked writer");
+    unrelated.release();
+    assert.equal(readerEntered, false);
+    writerAbort.abort(new Error("cancel blocked writer"));
+    await assert.rejects(writer, /cancel blocked writer/u);
+    const readerLease = await within(reader, "the compatible reader after writer cancellation");
+    readerLease.release();
+  } finally {
+    controller.abort();
+    writerAbort.abort();
+    active.release();
+    await Promise.allSettled([writer, reader]);
+  }
+});
+
 test("authorization denial does not acquire a shared resource lease", async (t) => {
   const arbiter = new RejectingResourceArbiter();
   const tool = fixtureTool("write", "write", async () => ({ content: "written", isError: false }));
@@ -170,39 +200,150 @@ test("a conflicting coordinator waits through durable completion", async (t) => 
   assert.equal(secondStarted, true);
 });
 
-test("completion failure releases a shared resource lease", async (t) => {
-  const arbiter = new ToolResourceArbiter();
-  const firstTool = fixtureTool("first", "write", async () => ({ content: "first", isError: false }));
-  let secondStarted = false;
-  const secondTool = fixtureTool("second", "read", async () => {
-    secondStarted = true;
-    return { content: "second", isError: false };
-  });
-  const first = new ToolCoordinator(
-    new ToolRegistry([firstTool]),
-    {},
-    undefined,
-    {},
-    { resourceArbiter: arbiter },
-  );
-  const second = new ToolCoordinator(
-    new ToolRegistry([secondTool]),
-    {},
-    undefined,
-    {},
-    { resourceArbiter: arbiter },
-  );
-  await assert.rejects(first.execute(
-    [{ callId: "first-call", name: "first", input: {}, index: 0 }],
-    await context(t),
-    { completed() { throw new Error("completion failed"); } },
-  ), /completion failed/u);
-  await within(second.execute(
-    [{ callId: "second-call", name: "second", input: {}, index: 0 }],
-    await context(t),
-  ), "execution after completion failure");
-  assert.equal(secondStarted, true);
+test("completion failure stops queued dispatch, retains running effects, and releases shared leases", async (t) => {
+  for (const failure of [new Error("completion failed"), undefined]) {
+    const arbiter = new ToolResourceArbiter();
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+    let releaseFirst!: () => void;
+    const released = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let completionFailed!: () => void;
+    const failed = new Promise<void>((resolve) => { completionFailed = resolve; });
+    let queuedStarted = false;
+    const tools = [
+      fixtureTool("first", "write", async () => {
+        firstEntered();
+        await released;
+        return { content: "first", isError: false };
+      }),
+      fixtureTool("failing", "write", async () => ({ content: "failing", isError: false })),
+      fixtureTool("queued", "write", async () => {
+        queuedStarted = true;
+        return { content: "queued", isError: false };
+      }),
+    ].map((tool): HarnessTool => ({
+      ...tool,
+      resources() {
+        return [{ kind: "file", key: tool.definition.name === "failing" ? "/workspace/b" : "/workspace/a", mode: "write" }];
+      },
+    }));
+    const first = new ToolCoordinator(new ToolRegistry(tools), {}, undefined, {}, { resourceArbiter: arbiter });
+    const running = first.execute(
+      tools.map((tool, index) => ({ callId: tool.definition.name, name: tool.definition.name, input: {}, index })),
+      await context(t),
+      {
+        completed(entry) {
+          if (entry.invocation.name !== "failing") return;
+          completionFailed();
+          throw failure;
+        },
+      },
+    );
+    const rejected = assert.rejects(running, (error) => error === failure);
+    try {
+      await within(Promise.all([entered, failed]), "a running effect beside a fatal completion");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(queuedStarted, false);
+      assert.throws(() => first.turnSnapshot(), /while a tool batch is executing/u);
+    } finally {
+      releaseFirst();
+    }
+    await within(rejected, "batch failure after raw settlement");
+    assert.equal(queuedStarted, false);
+    let secondStarted = false;
+    const secondTool: HarnessTool = {
+      ...fixtureTool("second", "read", async () => {
+        secondStarted = true;
+        return { content: "second", isError: false };
+      }),
+      resources() { return [{ kind: "file", key: "/workspace/a", mode: "read" }]; },
+    };
+    const second = new ToolCoordinator(new ToolRegistry([secondTool]), {}, undefined, {}, { resourceArbiter: arbiter });
+    await within(second.execute(
+      [{ callId: "second-call", name: "second", input: {}, index: 0 }],
+      await context(t),
+    ), "execution after completion failure");
+    assert.equal(secondStarted, true);
+  }
 });
+
+for (const boundary of ["authorization", "resource", "presentation dispatch", "durable dispatch"] as const) {
+  test(`completion failure prevents raw dispatch after waiting at ${boundary}`, async (t) => {
+    const failure = boundary === "resource" ? undefined : new Error("completion failed");
+    const arbiter = new ToolResourceArbiter();
+    const selectedContext = await context(t);
+    const claims: ResourceClaim[] = [{ kind: "file", key: "/workspace/waiting", mode: "write" }];
+    const externalLease = boundary === "resource" ? await arbiter.acquire(claims, selectedContext.signal) : undefined;
+    let enterBoundary!: () => void;
+    const entered = new Promise<void>((resolve) => { enterBoundary = resolve; });
+    let releaseBoundary!: () => void;
+    const released = new Promise<void>((resolve) => { releaseBoundary = resolve; });
+    let markFailed!: () => void;
+    const failed = new Promise<void>((resolve) => { markFailed = resolve; });
+    const executions: string[] = [];
+    const completions: string[] = [];
+    const tools = ["waiting", "failing"].map((name): HarnessTool => ({
+      ...fixtureTool(name, "write", async () => {
+        executions.push(name);
+        if (name === "failing") {
+          await entered;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        return { content: name, isError: false };
+      }),
+      resources() { return [{ kind: "file", key: `/workspace/${name}`, mode: "write" }]; },
+    }));
+    const coordinator = new ToolCoordinator(new ToolRegistry(tools), {
+      async dispatching(invocation) {
+        if (invocation.name === "waiting" && boundary === "presentation dispatch") {
+          enterBoundary();
+          await released;
+        }
+      },
+    }, undefined, {
+      async authorize(request) {
+        if (request.invocation.name === "waiting") {
+          if (boundary === "authorization" || boundary === "resource") enterBoundary();
+          if (boundary === "authorization") await released;
+        }
+        return { decision: "allow_once" };
+      },
+    }, { resourceArbiter: arbiter });
+    const running = coordinator.execute(
+      tools.map((tool, index) => ({ callId: tool.definition.name, name: tool.definition.name, input: {}, index })),
+      selectedContext,
+      {
+        async dispatching(invocation) {
+          if (invocation.name === "waiting" && boundary === "durable dispatch") {
+            enterBoundary();
+            await released;
+          }
+        },
+        completed(entry) {
+          completions.push(entry.invocation.name);
+          if (entry.invocation.name === "failing") {
+            markFailed();
+            throw failure;
+          }
+        },
+      },
+    );
+    const rejected = assert.rejects(running, (error) => error === failure);
+    try {
+      await within(failed, "the fatal completion while dispatch waits");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.throws(() => coordinator.turnSnapshot(), /while a tool batch is executing/u);
+    } finally {
+      releaseBoundary();
+      externalLease?.release();
+    }
+    await within(rejected, "the failed batch after dispatch is released");
+    assert.deepEqual(executions, ["failing"]);
+    assert.deepEqual(completions, ["failing"]);
+    const lease = await within(arbiter.acquire(claims, selectedContext.signal), "resource ownership after failure");
+    lease.release();
+  });
+}
 
 test("abort keeps a lease until an abort-ignoring effect actually settles", async (t) => {
   const arbiter = new ToolResourceArbiter();

@@ -5,46 +5,50 @@
 **Power your agent. Own the runtime.**
 
 ohm is an open, local-first agent harness for people who want control over how their agent works. Its lean core provides
-a capable agent runtime, bounded coding tools, persistent sessions, multiple ways to interact, and a trusted extension
+a capable agent runtime, bounded coding tools, persistent sessions, multiple ways to interact, and a trusted plugin
 system designed to be built on rather than boxed in.
 
-Instead of putting every possible workflow into core, ohm supplies the foundation for the agent you want. Extensions
+Instead of putting every possible workflow into core, ohm supplies the foundation for the agent you want. Plugins
 can add tools, commands, providers, authentication, state, events, and UI. Use ohm in its terminal interface, run it
 once or over JSON, RPC, HTTP, or SSE, embed it through the SDK, or build a new experience on the same runtime.
 
 **ohm is not the finished agent. It is the harness you build yours with.**
 
-Runtime extensions and `bash` execute with your operating-system user privileges. Review executable packages before enabling them; ohm is not a process sandbox.
+Plugin code and `bash` execute with your operating-system user privileges. Review executable plugins before enabling them; ohm is not a process sandbox.
 
 The `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` tools are active by default across interactive, print,
 JSON, RPC, serve, and direct SDK sessions.
 
 ## Install and start
 
+This branch prepares 0.2.0. Version-pinned commands below require its published
+tag; until then, use the [latest published release](https://github.com/devsohm/ohm/releases/latest)
+and its matching instructions.
+
 One command detects the current x64 or arm64 platform, verifies the matching GitHub standalone release, installs its
 pinned runtime, and creates a per-user launcher:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.ps1 | iex
 ```
 
 Neither command needs Node.js, npm, an npm account, or the npm registry. Linux and macOS need `curl`, `tar`, and a
 SHA-256 utility. Current Windows includes the required PowerShell and `tar.exe`.
 
 For a portable manual installation, download the standalone archive for your platform from the
-[v0.1.1 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.1), verify it against `SHA256SUMS`, and
+[v0.2.0 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.2.0), verify it against `SHA256SUMS`, and
 extract it.
 
 ```sh
-tar -xzf ohm-v0.1.1-linux-x64.tar.gz
+tar -xzf ohm-v0.2.0-linux-x64.tar.gz
 cd /path/to/your/project
-/path/to/ohm-v0.1.1-linux-x64/bin/ohm
+/path/to/ohm-v0.2.0-linux-x64/bin/ohm
 ```
 
 Use `bin/ohm` on Linux or macOS and `bin\ohm.cmd` on Windows. The
@@ -78,8 +82,8 @@ ancestor order. Run `ohm config path` to locate the user settings document
 and `ohm config edit` to edit it safely. Add `--scope project` to target the
 trusted workspace settings file.
 
-Read the complete product guide for providers, sessions, configuration, terminal controls, extensions, embedding,
-RPC, the local HTTP and SSE service, security boundaries, and troubleshooting. The [extension examples catalog](packages/ohm/examples/README.md)
+Read the complete product guide for providers, sessions, configuration, terminal controls, plugins, embedding,
+RPC, the local HTTP and SSE service, security boundaries, and troubleshooting. The [plugin examples catalog](packages/ohm/examples/README.md)
 routes authors by outcome, and the [documentation map](packages/ohm/docs/README.md) links every focused topic.
 
 ## How ohm works
@@ -89,11 +93,11 @@ routes authors by outcome, and the [documentation map](packages/ohm/docs/README.
 Interactive, print, JSON, RPC, serve, and SDK modes use the same
 `AgentSession`, kernel runtime engine, tool coordinator, and V4 session state.
 The [architecture guide](packages/ohm/docs/ARCHITECTURE.md) explains the
-request loop, storage, refresh, compaction, execution, and extension boundaries.
+request loop, storage, refresh, compaction, execution, and plugin boundaries.
 
 ## Packages
 
-- [`ohm`](packages/ohm) — the terminal application, session runtime, extension host, and public application API.
+- [`ohm`](packages/ohm) — the terminal application, session runtime, plugin host, and public application API.
 - [`@ohm/models`](packages/models) — canonical messages, model metadata, standalone provider transports, OAuth helpers, and streaming utilities.
 - [`@ohm/kernel`](packages/kernel) — the reusable agent loop and queue/lifecycle primitives.
 - [`@ohm/terminal`](packages/terminal) — terminal input, rendering, components, layout, themes, and native helpers.

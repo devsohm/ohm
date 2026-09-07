@@ -12,10 +12,10 @@ import { optionalProperties } from "../core/optional-properties.js";
 import { isPromise, isProxy } from "node:util/types";
 
 import type { CustomMessage } from "@ohm/kernel";
-import type { Component } from "@ohm/terminal";
+import type { Component, OverlayBounds } from "@ohm/terminal";
 import { errorMessage } from "../core/errors.js";
 import type { KeyEvent } from "./keys.js";
-import type { CustomEntry } from "../extensions/session-contract.js";
+import type { CustomEntry } from "../plugins/session-contract.js";
 import type { ThemeName } from "./types.js";
 import type { Theme } from "./theme.js";
 import { THEME_ROLES, type ThemeRole } from "./theme.js";
@@ -249,6 +249,8 @@ export interface RuntimeUiComponentHandle {
   focus(): void;
   unfocus(options?: RuntimeUiOverlayUnfocusOptions): void;
   isFocused(): boolean;
+  /** Last painted overlay rectangle, absent while hidden or before layout. */
+  getBounds?(): OverlayBounds | undefined;
 }
 
 export interface RuntimeUiOverlayUnfocusOptions {

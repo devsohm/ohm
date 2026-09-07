@@ -9,7 +9,7 @@ Compaction keeps long sessions within a model's context window. It changes the p
 Automatic compaction compares the projected context with the selected model's resolved context window and output reserve. It can run in four places:
 
 - before a provider request crosses the local threshold;
-- after system and extension processing makes the final provider projection cross its hard budget, with one same-step compact-and-reproject path;
+- after system and plugin processing makes the final provider projection cross its hard budget, with one same-step compact-and-reproject path;
 - after a provider returns a typed context-overflow result, with one compact-and-retry path;
 - after a successful response reports usage beyond the threshold, without replaying that response.
 
@@ -30,7 +30,7 @@ The interactive `/settings` panel can change `enabled` and `triggerPercent`.
 
 The context window comes from the selected model. The default policy keeps 15% of that window as response headroom and starts compaction at the remaining 85%. An explicit per-call output ceiling enlarges the headroom when it is greater than 15%. An independent provider-published maximum input ceiling can lower the resulting input budget further. `reserveTokens` and `triggerPercent` are deliberate fixed overrides; omit them to keep the ratio policy.
 
-After a response, context pressure combines the provider-observed prompt with an estimated projection of the generated response and later durable messages, because all of them occupy the next request. The concise TUI percentage uses the same `ctx N.N%` form for both direct observations and projections; extension footer snapshots retain the source distinction. A large response can therefore move the meter across the automatic threshold. The configured threshold remains available in `/settings` instead of being repeated in the footer.
+After a response, context pressure combines the provider-observed prompt with an estimated projection of the generated response and later durable messages, because all of them occupy the next request. The concise TUI percentage uses the same `ctx N.N%` form for both direct observations and projections; plugin footer snapshots retain the source distinction. A large response can therefore move the meter across the automatic threshold. The configured threshold remains available in `/settings` instead of being repeated in the footer.
 
 Programmatic prompt calls may override `contextTokenBudget`, `summaryTokenBudget`, and `autoCompaction`. An explicit
 `contextTokenBudget` remains the run ceiling across every tool/model step; model-derived budgets refresh between steps
@@ -133,9 +133,9 @@ inventing a write, or presenting a stale session-wide value.
 
 Branch-summary cards follow the same collapsed and expanded transcript state.
 
-Transient compaction and branch-summary failures use bounded retry policy. Partial summary output is never committed or replayed. Retry lifecycle events are available through the TUI, RPC, SSE, extension, and SDK event surfaces.
+Transient compaction and branch-summary failures use bounded retry policy. Partial summary output is never committed or replayed. Retry lifecycle events are available through the TUI, RPC, SSE, plugin, and SDK event surfaces.
 
-A final-projection or provider-reported context overflow permits one compact-and-retry attempt for the current unchanged context. An immediate second overflow fails instead of looping. A later overflow can recover again only after a successful provider response or tool-result append has made genuine progress. If system or extension context is itself irreducible, ohm fails before transport.
+A final-projection or provider-reported context overflow permits one compact-and-retry attempt for the current unchanged context. An immediate second overflow fails instead of looping. A later overflow can recover again only after a successful provider response or tool-result append has made genuine progress. If system or plugin context is itself irreducible, ohm fails before transport.
 
 Cancellation during automatic compaction leaves the original context intact. Manual cancellation emits one terminal `compaction_end` record with `aborted: true`.
 

@@ -1,0 +1,10 @@
+{
+  "name": "@ohm/example-task-prompts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Optional review, diagnosis, and implementation prompt templates",
+  "files": ["prompts", "checks", "README.md"],
+  "scripts": { "test": "node --test checks/prompts.test.mjs" },
+  "peerDependencies": { "ohm": ">=0.2.0 <0.3.0" },
+  "ohm": { "prompts": ["prompts"] }
+}

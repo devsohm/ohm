@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 
 import type { ProcessRunner } from "../process/types.js";
 import { acquireSessionWriterLeaseSync } from "../storage/session-writer-lease.js";
+import { checkpointSqliteSessionForMove, isSqliteSessionFile } from "../storage/sqlite-session-storage.js";
 
 const DELETE_TIMEOUT_MS = 10_000;
 const DELETE_OUTPUT_LIMIT_BYTES = 8 * 1024;
@@ -75,6 +76,7 @@ export async function deleteSessionFile(
 ): Promise<SessionFileDeleteMethod> {
   const writerLease = acquireSessionWriterLeaseSync(path);
   try {
+    if (isSqliteSessionFile(path)) checkpointSqliteSessionForMove(path, writerLease);
     const command = recoverableDeleteCommand(path, options.platform ?? process.platform);
     if (command !== undefined) {
       try {

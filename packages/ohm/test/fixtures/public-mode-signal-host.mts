@@ -22,7 +22,7 @@ const dispose = (): void => {
 
 if (mode === "rpc") {
   const session = {
-    async bindExtensions() {},
+    async bindPlugins() {},
     subscribe() { return () => undefined; },
   };
   const runtime = modeRuntimeFixture({
@@ -45,7 +45,7 @@ if (mode === "rpc") {
     sessionManager: { getHeader: () => null, getEntries: () => [] },
     state: { messages: [] },
     suspendedRun: undefined,
-    async bindExtensions() {},
+    async bindPlugins() {},
     subscribe() { return () => undefined; },
     async prompt() {
       writeFileSync(readyPath, "ready");

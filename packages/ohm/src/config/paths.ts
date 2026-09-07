@@ -67,8 +67,8 @@ export function getToolsDir(environment?: NodeJS.ProcessEnv): string {
   return join(getAgentDir(environment), "tools");
 }
 
-export function getExtensionsDir(environment?: NodeJS.ProcessEnv): string {
-  return join(getAgentDir(environment), "extensions");
+export function getPluginsDir(environment?: NodeJS.ProcessEnv): string {
+  return join(getAgentDir(environment), "plugins");
 }
 
 export function getSkillsDir(environment?: NodeJS.ProcessEnv): string {

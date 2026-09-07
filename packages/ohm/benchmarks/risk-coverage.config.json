@@ -3,7 +3,7 @@
   "excludedTests": ["test/live/"],
   "targets": [
     {
-      "file": "src/extensions/runtime.ts",
+      "file": "src/plugins/runtime.ts",
       "minimum": { "lines": 90, "branches": 68, "functions": 90 }
     },
     {
@@ -30,8 +30,8 @@
   "groups": [
     {
       "id": "extension-runtime",
-      "targets": ["src/extensions/runtime.ts"],
-      "testPrefixes": ["test/extensions/", "test/cli/", "test/service/", "test/storage/"],
+      "targets": ["src/plugins/runtime.ts"],
+      "testPrefixes": ["test/plugins/", "test/cli/", "test/service/", "test/storage/"],
       "testExcludes": ["test/cli/process-signal-cleanup.test.ts"]
     },
     {
@@ -43,7 +43,7 @@
     {
       "id": "service-runtime",
       "targets": ["src/service/agent-session.ts"],
-      "testPrefixes": ["test/storage/", "test/service/", "test/cli/", "test/core/", "test/extensions/", "test/tools/"],
+      "testPrefixes": ["test/storage/", "test/service/", "test/cli/", "test/core/", "test/plugins/", "test/tools/"],
       "testExcludes": ["test/cli/process-signal-cleanup.test.ts"]
     },
     {

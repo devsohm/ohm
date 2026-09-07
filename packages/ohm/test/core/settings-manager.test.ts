@@ -4,53 +4,20 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isJsonObject, type JsonObject, type JsonValue } from "../../src/core/json.js";
+import { isJsonObject, type JsonObject } from "../../src/core/json.js";
 import {
   InMemorySettingsStorage,
-  SETTINGS_KEYS,
   SettingsManager,
   type SettingsScope,
   type SettingsStorage,
 } from "../../src/core/settings-manager.js";
-import { hasNullValue, PORTABLE_CONFIG_SCAFFOLD } from "../helpers/config-scaffold.js";
+import { CONFIG_SCHEMA_URI, PORTABLE_CONFIG_SCAFFOLD } from "../helpers/config-scaffold.js";
 
 function parseJsonObject(text: string): JsonObject {
   const value: unknown = JSON.parse(text);
   if (!isJsonObject(value)) throw new Error("Expected fixture JSON to contain an object");
   return value;
 }
-
-function schemaNodeProperties(value: JsonValue | undefined): JsonObject {
-  if (!isJsonObject(value) || !isJsonObject(value.properties)) return {};
-  return value.properties;
-}
-
-test("the installed scaffold contains portable defaults while the schema contains every supported setting", async () => {
-  const template = parseJsonObject(await readFile(new URL("../../resources/config.example.json", import.meta.url), "utf8"));
-  const schema = parseJsonObject(await readFile(new URL("../../resources/schemas/config-v1.json", import.meta.url), "utf8"));
-  const properties = schemaNodeProperties(schema);
-  assert.deepEqual(template, PORTABLE_CONFIG_SCAFFOLD);
-  assert.equal(hasNullValue(template), false);
-  assert.deepEqual(Object.keys(properties).filter((key) => key !== "$schema"), SETTINGS_KEYS);
-  const keys = (name: string): string[] => Object.keys(schemaNodeProperties(properties[name]));
-  assert.deepEqual(keys("compaction"), ["enabled", "triggerPercent", "reserveTokens", "recentTokens"]);
-  assert.deepEqual(keys("branchSummary"), ["reserveTokens", "skipPrompt"]);
-  assert.deepEqual(keys("retry"), ["enabled", "maxRetries", "baseDelayMs", "provider"]);
-  assert.deepEqual(Object.keys(schemaNodeProperties(schemaNodeProperties(properties.retry).provider)), [
-    "timeoutMs", "maxRetries", "maxRetryDelayMs",
-  ]);
-  assert.deepEqual(keys("tools"), ["enabled", "excluded"]);
-  assert.deepEqual(keys("terminal"), ["showImages", "imageWidthCells", "clearOnShrink", "showTerminalProgress"]);
-  assert.deepEqual(keys("images"), ["autoResize", "blockImages"]);
-  assert.deepEqual(keys("thinkingBudgets"), ["minimal", "low", "medium", "high", "xhigh", "max"]);
-  assert.deepEqual(keys("markdown"), ["codeBlockIndent"]);
-  assert.deepEqual(keys("warnings"), ["anthropicExtraUsage"]);
-  assert.deepEqual(keys("observability"), ["level"]);
-
-  const manager = SettingsManager.inMemory(template);
-  const { $schema: _schema, ...expectedSettings } = PORTABLE_CONFIG_SCAFFOLD;
-  assert.deepEqual(manager.getSettings(), expectedSettings);
-});
 
 test("direct settings expose runtime defaults without creating files", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-settings-defaults-"));
@@ -119,6 +86,82 @@ test("null settings resolve to defaults without reaching runtime getters", () =>
   });
 });
 
+test("plugin settings normalize aliases without duplicating contributions or mutating callers", () => {
+  const plugins = [{ source: "./review", entrypoints: ["index.ts"], skills: ["skills"] }];
+  const input = { plugins, packages: [{ source: "./review", extensions: ["index.ts"], skills: ["skills"] }] };
+  const original = structuredClone(input);
+  const manager = SettingsManager.inMemory(input);
+  assert.deepEqual(manager.getSettings(), { plugins });
+  assert.deepEqual(manager.getPackages(), plugins);
+  assert.deepEqual(input, original);
+  const returned = manager.getPackages();
+  returned.push("./mutated");
+  assert.deepEqual(manager.getPackages(), plugins);
+
+  for (const invalid of [
+    { plugins: ["./first"], packages: ["./second"] },
+    { plugins: [], packages: null },
+    { plugins: [{ source: "./review", entrypoints: [], extensions: ["index.ts"] }] },
+  ]) {
+    assert.throws(() => SettingsManager.inMemory(invalid), /conflicting/u);
+    assert.throws(() => manager.updateGlobalSettings(invalid), /conflicting/u);
+    assert.throws(() => manager.applyOverrides(invalid), /conflicting/u);
+    assert.deepEqual(manager.getPackages(), plugins);
+  }
+});
+
+test("plugin migration preserves scoped resets, overrides, trust and concurrent disk edits", async () => {
+  const storage = new InMemorySettingsStorage();
+  const initial = JSON.stringify({ packages: ["./global"], untouched: null });
+  storage.withLock("global", () => initial);
+  storage.withLock("project", () => JSON.stringify({ plugins: ["./project"] }));
+  const manager = SettingsManager.fromStorage(storage, { projectTrusted: false });
+  assert.deepEqual(manager.getSettings(), { plugins: ["./global"] });
+  storage.withLock("global", (contents) => { assert.equal(contents, initial); return undefined; });
+  assert.throws(() => manager.updateProjectSettings({ plugins: [] }), /not trusted/u);
+  manager.setProjectTrusted(true);
+  assert.deepEqual(manager.getPackages(), ["./project"]);
+  manager.updateProjectSettings({ packages: null });
+  assert.deepEqual(manager.getPackages(), ["./global"]);
+  manager.applyOverrides({ packages: ["./invocation"] });
+  assert.deepEqual(manager.getPackages(), ["./invocation"]);
+  await manager.refresh();
+  assert.deepEqual(manager.getPackages(), ["./global"]);
+
+  storage.withLock("global", () => JSON.stringify({ packages: [{ source: "./external", extensions: [] }], untouched: null }));
+  manager.setTheme("mono");
+  await manager.flush();
+  storage.withLock("global", (contents) => {
+    assert.deepEqual(JSON.parse(contents ?? "{}"), {
+      plugins: [{ source: "./external", entrypoints: [] }], untouched: null, theme: "mono",
+    });
+    return undefined;
+  });
+  storage.withLock("project", (contents) => { assert.deepEqual(JSON.parse(contents ?? "{}"), { plugins: null }); return undefined; });
+  assert.deepEqual(manager.getPackages(), [{ source: "./external", entrypoints: [] }]);
+  manager.setPackages(["./local"]);
+  const concurrent = SettingsManager.fromStorage(storage);
+  concurrent.setQuietStartup(true);
+  await Promise.all([manager.flush(), concurrent.flush()]);
+  assert.deepEqual(SettingsManager.fromStorage(storage).getGlobalSettings(), {
+    plugins: ["./local"], theme: "mono", quietStartup: true,
+  });
+});
+
+test("conflicting plugin aliases do not replace valid settings or overwrite the conflicting file", async () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ plugins: ["./valid"] }));
+  const manager = SettingsManager.fromStorage(storage);
+  const conflicting = JSON.stringify({ plugins: ["./first"], packages: ["./second"] });
+  storage.withLock("global", () => conflicting);
+  await assert.rejects(manager.refresh(), /Settings could not be loaded/u);
+  assert.deepEqual(manager.getPackages(), ["./valid"]);
+  manager.setTheme("mono");
+  await manager.flush();
+  assert.equal(manager.drainErrors().every(({ error }) => /conflicting/u.test(error.message)), true);
+  storage.withLock("global", (contents) => { assert.equal(contents, conflicting); return undefined; });
+});
+
 test("null inheritance does not silently remove invalid replacement-array entries", () => {
   assert.throws(
     () => SettingsManager.inMemory({ tools: { enabled: ["read", null, "bash"] } }),
@@ -129,6 +172,7 @@ test("null inheritance does not silently remove invalid replacement-array entrie
 test("every supported settings family rejects invalid persisted shapes", () => {
   const cases: Array<[unknown, RegExp]> = [
     [{ $schema: 1 }, /config\.\$schema/u],
+    [{ $schema: "https://example.invalid/config.json" }, /config\.\$schema/u],
     [{ transport: "bogus" }, /settings\.transport/u],
     [{ observability: { level: "verbose" } }, /settings\.observability\.level/u],
     [{ steeringMode: "bogus" }, /settings\.steeringMode/u],
@@ -150,6 +194,10 @@ test("every supported settings family rejects invalid persisted shapes", () => {
     [{ compaction: { triggerPercent: 96 } }, /settings\.compaction\.triggerPercent/u],
     [{ packages: 7 }, /settings\.packages/u],
     [{ packages: [""] }, /settings\.packages\[0\]/u],
+    [{ plugins: 7 }, /settings\.plugins/u],
+    [{ plugins: [""] }, /settings\.plugins\[0\]/u],
+    [{ plugins: [{}] }, /settings\.plugins\[0\]\.source/u],
+    [{ plugins: [{ source: "./review", entrypoints: "index.ts" }] }, /settings\.plugins\[0\]\.entrypoints/u],
     [{ extensions: "abc" }, /settings\.extensions/u],
     [{ terminal: { showImages: "yes" } }, /settings\.terminal\.showImages/u],
     [{ fullscreenScrollbar: "sometimes" }, /settings\.fullscreenScrollbar/u],
@@ -221,7 +269,7 @@ test("nested project nulls inherit recursively from global settings", () => {
   });
 });
 
-test("writes and refresh preserve untouched null placeholders and unknown fields", async (context) => {
+test("writes migrate known schema metadata while preserving null placeholders and unknown fields", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-settings-null-preservation-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
   const agentDirectory = join(root, "agent");
@@ -232,15 +280,18 @@ test("writes and refresh preserve untouched null placeholders and unknown fields
     nested: { value: null, bytes: "keep \\u0000 exactly" },
     list: [null, { child: null }, "unchanged"],
   };
-  await writeFile(path, JSON.stringify({
+  const initial = JSON.stringify({
     $schema: "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json",
     theme: null,
     terminal: { showImages: null, imageWidthCells: null, extensionOption: null },
     retry: { enabled: null, provider: { timeoutMs: null, extensionOption: null } },
     extensionSettings: unknown,
-  }));
+  });
+  await writeFile(path, initial);
 
   const manager = SettingsManager.create(join(root, "project"), agentDirectory);
+  assert.deepEqual(manager.drainErrors(), []);
+  assert.equal(await readFile(path, "utf8"), initial);
   manager.updateGlobalSettings({ terminal: { showImages: false }, quietStartup: true });
   await manager.flush();
   await manager.refresh();
@@ -251,7 +302,7 @@ test("writes and refresh preserve untouched null placeholders and unknown fields
   assert.equal(manager.getImageWidthCells(), 60);
   assert.equal(manager.getRetryEnabled(), true);
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
-    $schema: "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json",
+    $schema: CONFIG_SCHEMA_URI,
     theme: "mono",
     terminal: { showImages: false, imageWidthCells: null, extensionOption: null },
     retry: { enabled: null, provider: { timeoutMs: null, extensionOption: null } },

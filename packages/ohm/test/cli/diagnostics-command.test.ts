@@ -74,6 +74,12 @@ test("diagnostic bundles expose bounded status and timings without secret-bearin
     ohm: { extensions: ["extensions/index.mjs"] },
   }));
   await writeFile(join(extension, "extensions", "index.mjs"), "export default function activate() {}\n");
+  const canonicalPlugin = join(value.agentDirectory, "plugins", "canonical-fixture");
+  await mkdir(canonicalPlugin, { recursive: true });
+  await writeFile(join(canonicalPlugin, "package.json"), JSON.stringify({
+    name: "canonical-fixture", type: "module", ohm: { entrypoints: ["index.mjs"] },
+  }));
+  await writeFile(join(canonicalPlugin, "index.mjs"), "export default function activate() {}\n");
   const userSkill = join(value.agentDirectory, "skills", "diagnostic-skill");
   await mkdir(userSkill, { recursive: true });
   await writeFile(join(userSkill, "SKILL.md"), `---\nname: diagnostic-skill\ndescription: ${sentinels[2]}\n---\nsecret body\n`);
@@ -104,7 +110,7 @@ test("diagnostic bundles expose bounded status and timings without secret-bearin
   assert.equal(bundle.paths.auth?.kind, "file");
   assert.equal(bundle.workspace.path, "<workspace>");
   assert.equal(bundle.workspace.trusted, true);
-  assert.deepEqual(bundle.resources.extensions.map((entry) => entry.id), ["diagnostic-fixture"]);
+  assert.deepEqual(bundle.resources.extensions.map((entry) => entry.id).sort(), ["canonical-fixture", "diagnostic-fixture"]);
   assert.deepEqual(
     bundle.resources.skills.map((entry) => entry.name).sort(),
     ["diagnostic-skill", "ohm-dev", "project-skill"],

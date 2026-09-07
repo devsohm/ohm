@@ -1,10 +1,10 @@
-# Dynamic package extension
+# Dynamic package plugin
 
 This package uses `resources_discover` to add its `skills/` and `prompts/`
 directories during startup and refresh.
 
 ```text
-ohm install ./packages/ohm/examples/dynamic-package
+ohm plugins install ./packages/ohm/examples/dynamic-package
 ```
 
 After `/refresh`, `/example-dynamic-ready` confirms activation. The

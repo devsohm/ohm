@@ -53,6 +53,10 @@ Each returned string is one physical terminal row. Non-image rows must fit the s
 
 ANSI and OSC control sequences do not consume cells. CJK characters and emoji can consume more than one cell. Use `visibleWidth`, `sliceByColumn`, `truncateToWidth`, and `wrapTextWithAnsi` instead of JavaScript string length or ordinary slicing.
 
+`wordWrapLine(text, width)` wraps one plain-text logical line and returns
+`TextChunk` values with source offsets. The composer and text buffer share this
+wrapping rule so visual rows and keyboard navigation agree.
+
 The package includes:
 
 - `Container`, `Box`, `Text`, `Spacer`, and `TruncatedText` for composition.
@@ -104,6 +108,8 @@ Terminal image row groups can be concatenated by `VStack.render()`. Horizontal p
 
 Custom viewport components can participate in pointer routing through `ViewportPointerTarget` and `ViewportPointerRegionComponent`. Their symbol-marked methods receive cell coordinates and publish the child rectangles produced by the latest render. `dispatchViewportPointer()` is available to embedding hosts that need the same deepest-target and scroll-chaining behavior without `FullscreenTUI`.
 
+Both TUI hosts use this same pointer protocol. Main-screen mouse reporting is opt-in with `new TUI(terminal, false, undefined, { mouse: true })`; fullscreen reporting remains on by default. The shared `TuiPointerOptions` also configures `wheelScrollLines` and safe hyperlink `openUrl` callbacks. Normalized events retain `shift`, `alt`, and `ctrl`, and include `clickCount` (same cell/button/modifiers within 500ms, capped at three) and `dragging`. These extra fields are optional for embedding hosts constructing events themselves. Visible overlays receive input before covered components, with local coordinates; captured drags can move outside their rectangle. Button release, terminal focus loss, removal, hiding, resize, and shutdown release capture.
+
 ## Input and keybindings
 
 `StdinBuffer` separates batched input without splitting CSI, OSC, DCS, APC, extended-key, mouse, or bracketed-paste sequences. `parseKey` and `matchesKey` normalize legacy input, modifyOtherKeys, and extended keyboard events.
@@ -127,11 +133,14 @@ handle.setHidden(false);
 handle.isHidden();
 handle.focus();
 handle.isFocused();
+handle.getBounds(); // { row, column, width, height } after a completed render
 handle.unfocus({ target: baseComponent });
 handle.hide();
 ```
 
 Overlays support absolute or percentage sizing, nine anchors, offsets, margins, responsive visibility, and non-capturing presentation.
+
+`getBounds()` returns a frozen, zero-based screen rectangle from the last completed layout, or `undefined` before layout, after removal, while hidden, or between resize and the next layout. It does not trigger rendering. Bounds follow clipping and responsive layout in either screen mode. `nonCapturing` controls keyboard focus; a visible overlay still covers pointer targets behind it.
 
 Focus ownership survives temporary base controls and dynamic visibility without sending input to a hidden component. Permanently removing an overlay also repairs dependent focus ancestry.
 

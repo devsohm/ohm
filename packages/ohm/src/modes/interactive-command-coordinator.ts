@@ -3,6 +3,8 @@ import type { TuiAction } from "../tui/types.js";
 
 export const INTERACTIVE_BUILTIN_COMMANDS = [
   "atlas",
+  "actions",
+  "inspect",
   "cancel",
   "changelog",
   "clone",

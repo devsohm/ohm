@@ -74,7 +74,7 @@ export interface ProviderWireLifecycleScope {
   /** Exact branch when the owning host can resolve it. */
   readonly branch?: string;
   readonly step: number;
-  /** @internal Prevents provider hooks for child agents from acquiring interactive UI. */
+  /** @internal Keeps background provider requests from acquiring interactive UI through hooks. */
   readonly headless?: boolean;
 }
 

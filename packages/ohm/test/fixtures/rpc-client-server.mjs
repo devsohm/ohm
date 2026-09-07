@@ -36,7 +36,7 @@ process.once("disconnect", () => { if (!done) process.kill(process.pid, "SIGKILL
       pending = pending.slice(newline + 1);
       if (line === "") continue;
       const command = JSON.parse(line);
-      if (mode === "image-echo") {
+      if (mode === "image-echo" || mode === "command-echo") {
         writeFileSync(1, `${JSON.stringify({ type: "fixture_command_received", command })}\n`);
       }
       if (command.type === "extension_ui_response") {
@@ -53,7 +53,7 @@ process.once("disconnect", () => { if (!done) process.kill(process.pid, "SIGKILL
           delta: "fixture output",
         })}\n`);
       }
-      const paginationData = mode !== "pagination" ? undefined
+      const paginationData = mode !== "pagination" && mode !== "command-echo" ? undefined
         : command.type === "get_tree" ? command.cursor === undefined ? {
           tree: [{
             entry: {
@@ -178,6 +178,17 @@ process.once("disconnect", () => { if (!done) process.kill(process.pid, "SIGKILL
           data: availableModels,
         } : cycleModel !== undefined ? {
           data: cycleModel,
+        } : command.type === "cycle_thinking_level" ? {
+          data: { level: "high" },
+        } : command.type === "presentation_action" ? {
+          data: {
+            protocolVersion: command.protocolVersion,
+            owner: command.owner,
+            presentationId: command.presentationId,
+            revision: command.revision,
+            actionId: command.actionId,
+            result: null,
+          },
         } : recoveryData !== undefined ? {
           data: recoveryData,
         } : queueData !== undefined ? {

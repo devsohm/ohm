@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import activate, { createMcpExtension } from "../extensions/index.mjs";
+import activate, { createMcpPlugin } from "../src/index.mjs";
 import { createFixtureProtocol } from "../fixture/protocol.mjs";
-import server from "../extensions/server.mjs";
+import server from "../src/server.mjs";
 
 class FixtureProcessService {
   records = new Map();
@@ -142,7 +142,7 @@ function registrationHandle(dispose = () => undefined) {
   return Object.freeze(handle);
 }
 
-async function extensionHarness(context, selectedActivate = activate, toolOverride) {
+async function pluginHarness(context, selectedActivate = activate, toolOverride) {
   const ownerAbort = new AbortController();
   const processes = new FixtureProcessService();
   const tools = [];
@@ -208,8 +208,8 @@ async function extensionHarness(context, selectedActivate = activate, toolOverri
   };
 }
 
-async function runningExtension(context) {
-  const harness = await extensionHarness(context);
+async function runningPlugin(context) {
+  const harness = await pluginHarness(context);
   await harness.start();
   return harness.tools;
 }
@@ -229,7 +229,7 @@ async function waitFor(predicate, timeoutMs = 1_000) {
 }
 
 test("initialization follows pagination and registers only the explicit allowlist", async (context) => {
-  const tools = await runningExtension(context);
+  const tools = await runningPlugin(context);
   const names = tools.map((tool) => tool.name).sort();
   assert.equal(names.length, 11);
   assert.equal(names.includes("fixture.hidden"), false);
@@ -251,7 +251,7 @@ test("initialization follows pagination and registers only the explicit allowlis
 });
 
 test("the managed server receives only its explicit bounded environment", async (context) => {
-  const harness = await extensionHarness(context);
+  const harness = await pluginHarness(context);
   await harness.start();
 
   const spec = harness.processes.record(harness.spawned[0]).spec;
@@ -261,11 +261,11 @@ test("the managed server receives only its explicit bounded environment", async 
 
 test("server environment configuration is bounded before activation", () => {
   const env = Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`MCP_FIXTURE_${index}`, "fixture"]));
-  assert.throws(() => createMcpExtension({ ...server, env }), /MCP server env exceeds 32 entries/u);
+  assert.throws(() => createMcpPlugin({ ...server, env }), /MCP server env exceeds 32 entries/u);
 });
 
 test("the session_start deadline does not own the initialized server lifetime", async (context) => {
-  const harness = await extensionHarness(context);
+  const harness = await pluginHarness(context);
   const callbackSignal = AbortSignal.timeout(50);
   await harness.start(callbackSignal);
   await new Promise((resolve) => {
@@ -284,7 +284,7 @@ test("the session_start deadline does not own the initialized server lifetime", 
 });
 
 test("initialization rejects a protocol version the adapter does not implement", async (context) => {
-  const harness = await extensionHarness(context, createMcpExtension({
+  const harness = await pluginHarness(context, createMcpPlugin({
     ...server,
     argv: [...server.argv, "--protocol-version", "2099-01-01"],
   }));
@@ -300,7 +300,7 @@ test("initialization rejects a protocol version the adapter does not implement",
 
 test("a tool registration rejection leaves no tools, stops its server, and can retry cleanly", async (context) => {
   let shouldFail = true;
-  const harness = await extensionHarness(context, activate, () => {
+  const harness = await pluginHarness(context, activate, () => {
     if (shouldFail) {
       shouldFail = false;
       throw new Error("reject MCP tool registration");
@@ -321,8 +321,8 @@ test("a tool registration rejection leaves no tools, stops its server, and can r
   });
 });
 
-test("tools/list_changed replaces the extension-owned tool registrations", async (context) => {
-  const harness = await extensionHarness(context);
+test("tools/list_changed replaces the plugin-owned tool registrations", async (context) => {
+  const harness = await pluginHarness(context);
   await harness.start();
   const originalTools = new Map(harness.tools.map((tool) => [tool.name, tool]));
   const originalEcho = harness.tools.find((tool) => tool.name === "example_mcp_echo");
@@ -340,7 +340,7 @@ test("tools/list_changed replaces the extension-owned tool registrations", async
 });
 
 test("a rejected catalog refresh removes the complete bridge tool set", async (context) => {
-  const harness = await extensionHarness(context, activate, ({ tool }) => {
+  const harness = await pluginHarness(context, activate, ({ tool }) => {
     if (tool.name === "example_mcp_echo" && tool.description.includes("catalog revision 1")) {
       throw new Error("reject refreshed MCP tool");
     }
@@ -354,7 +354,7 @@ test("a rejected catalog refresh removes the complete bridge tool set", async (c
 });
 
 test("server requests are rejected and caller cancellation reaches the server", async (context) => {
-  const tools = await runningExtension(context);
+  const tools = await runningPlugin(context);
   assert.deepEqual(await call(tools, "example_mcp_client_request", {}), {
     content: [{ type: "text", text: "rejected:-32601" }],
     details: { server: "fixture", remoteTool: "fixture.client-request" },
@@ -375,7 +375,7 @@ for (const [name, pattern] of [
   ["example_mcp_die", /closed stdout|exit code 17|ended in state/u],
 ]) {
   test(`${name} fails closed and leaves the generation unavailable`, async (context) => {
-    const tools = await runningExtension(context);
+    const tools = await runningPlugin(context);
     await assert.rejects(call(tools, name, {}), pattern);
     await assert.rejects(call(tools, "example_mcp_echo", { text: "after failure" }), /unavailable|process|frame|JSON/u);
   });

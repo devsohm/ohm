@@ -1,4 +1,4 @@
-# Session control extension
+# Session control plugin
 
 This package shows the host-owned session controls available to command
 handlers:
@@ -10,7 +10,7 @@ handlers:
   `getSystemPromptOptions()`, waits with `waitForIdle()`, and displays bounded
   state.
 - `/example-session-abort` requests cancellation of active agent work.
-- `/example-session-refresh` refreshes host-owned extensions and resources. The
+- `/example-session-refresh` refreshes host-owned plugins and resources. The
   command handler stops after requesting refresh.
 - `/example-session-shutdown` requests graceful host shutdown.
 
@@ -19,5 +19,5 @@ and lifecycle events still apply. Abort and shutdown are requests; the host
 owns final cancellation and cleanup.
 
 ```text
-ohm install ./packages/ohm/examples/session-control
+ohm plugins install ./packages/ohm/examples/session-control
 ```

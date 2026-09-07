@@ -9,6 +9,7 @@ export interface CliOptionMetadata {
   value?: string;
   values?: readonly string[];
   optionalValue?: boolean;
+  hidden?: boolean;
 }
 
 export const AGENT_CLI_OPTIONS = [
@@ -37,13 +38,14 @@ export const AGENT_CLI_OPTIONS = [
   { name: "exclude-tools", long: "--exclude-tools", short: "-xt", value: "LIST" },
   { name: "thinking", long: "--thinking", value: "LEVEL", values: CLI_THINKING_VALUES },
   { name: "print", long: "--print", short: "-p", value: "MESSAGE", optionalValue: true },
-  { name: "export", long: "--export", value: "SESSION.jsonl" },
+  { name: "export", long: "--export", value: "SESSION" },
   { name: "redact", long: "--redact" },
   { name: "no-browser", long: "--no-browser" },
   { name: "max-steps", long: "--max-steps", value: "NUMBER" },
   { name: "max-output-tokens", long: "--max-output-tokens", value: "NUMBER" },
-  { name: "extension", long: "--extension", short: "-e", value: "PATH" },
-  { name: "no-extensions", long: "--no-extensions", short: "-ne" },
+  { name: "plugin", long: "--plugin", value: "PATH" },
+  { name: "no-plugins", long: "--no-plugins" },
+  { name: "no-plugin-code", long: "--no-plugin-code" },
   { name: "skill", long: "--skill", value: "PATH" },
   { name: "prompt-template", long: "--prompt-template", value: "PATH" },
   { name: "theme", long: "--theme", value: "PATH" },
@@ -63,14 +65,15 @@ export const MANAGEMENT_CLI_OPTIONS = [
   { name: "yes", long: "--yes", short: "-y" },
   { name: "all", long: "--all" },
   { name: "local", long: "--local", short: "-l" },
-  { name: "no-extensions", long: "--no-extensions", short: "-ne" },
+  { name: "no-plugins", long: "--no-plugins" },
+  { name: "no-plugin-code", long: "--no-plugin-code" },
   { name: "approve", long: "--approve", short: "-a" },
   { name: "no-approve", long: "--no-approve", short: "-na" },
   { name: "allow-scripts", long: "--allow-scripts" },
   { name: "offline", long: "--offline" },
   { name: "scope", long: "--scope", value: "SCOPE", values: ["user", "project"] },
   { name: "workspace", long: "--workspace", value: "DIR" },
-  { name: "extension", long: "--extension", short: "-e", value: "PATH" },
+  { name: "plugin", long: "--plugin", value: "PATH" },
   { name: "session-dir", long: "--session-dir", value: "DIR" },
   { name: "host", long: "--host", value: "HOST", values: ["127.0.0.1", "localhost", "::1"] },
   { name: "port", long: "--port", value: "PORT" },
@@ -80,6 +83,7 @@ export type ManagementCliOptionName = (typeof MANAGEMENT_CLI_OPTIONS)[number]["n
 
 export interface ManagementCliCommandMetadata {
   name: string;
+  hidden?: boolean;
   options: readonly ManagementCliOptionName[];
   subcommands?: readonly string[];
   argumentValues?: readonly string[];
@@ -87,21 +91,21 @@ export interface ManagementCliCommandMetadata {
 
 export const MANAGEMENT_CLI_COMMANDS = [
   {
+    name: "plugins",
+    options: ["json", "local", "scope", "allow-scripts", "all", "workspace", "approve", "no-approve", "offline", "no-plugins", "no-plugin-code", "plugin"],
+    subcommands: ["init", "test", "preview", "verify", "install", "list", "remove", "update", "doctor", "show", "resources", "commands", "prompts", "validate", "inspect", "pack", "smoke", "refresh", "report", "index"],
+  },
+  {
     name: "config",
-    options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"],
+    options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-plugins", "no-plugin-code", "plugin"],
     subcommands: ["path", "edit", "validate"],
   },
   { name: "diagnostics", options: ["workspace"] },
-  {
-    name: "extensions",
-    options: ["json", "local", "scope", "allow-scripts", "all", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"],
-    subcommands: ["list", "doctor", "commands", "prompts", "show", "author", "install", "remove", "uninstall", "update", "packages"],
-  },
   { name: "logs", options: ["json"] },
   { name: "stats", options: ["json"] },
   {
     name: "packages",
-    options: ["json", "all", "allow-scripts", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"],
+    options: ["json", "all", "allow-scripts", "workspace", "approve", "no-approve", "offline", "no-plugins", "no-plugin-code", "plugin"],
     subcommands: ["check", "reconcile", "update"],
   },
   {
@@ -109,19 +113,19 @@ export const MANAGEMENT_CLI_COMMANDS = [
     options: ["json", "all", "workspace", "session-dir"],
     subcommands: ["doctor"],
   },
-  { name: "install", options: ["json", "local", "scope", "allow-scripts", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"] },
-  { name: "remove", options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"] },
+  { name: "install", hidden: true, options: ["json", "local", "scope", "allow-scripts", "workspace", "approve", "no-approve", "offline", "no-plugin-code", "plugin"] },
+  { name: "remove", hidden: true, options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-plugin-code", "plugin"] },
   { name: "uninstall", options: ["yes"] },
-  { name: "update", options: ["json", "local", "scope", "allow-scripts", "all", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"] },
-  { name: "list", options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-extensions", "extension"] },
+  { name: "update", hidden: true, options: ["json", "local", "scope", "allow-scripts", "all", "workspace", "approve", "no-approve", "offline", "no-plugin-code", "plugin"] },
+  { name: "list", hidden: true, options: ["json", "local", "scope", "workspace", "approve", "no-approve", "offline", "no-plugin-code", "plugin"] },
   { name: "self-install", options: [] },
   { name: "self-update", options: [] },
   { name: "self-uninstall", options: ["yes"] },
-  { name: "serve", options: ["workspace", "session-dir", "host", "port", "approve", "no-approve", "offline", "no-extensions", "extension"] },
+  { name: "serve", options: ["workspace", "session-dir", "host", "port", "approve", "no-approve", "offline", "no-plugins", "no-plugin-code", "plugin"] },
   { name: "completions", options: [], argumentValues: CLI_COMPLETION_SHELLS },
 ] as const satisfies readonly ManagementCliCommandMetadata[];
 
-export const EXTENSION_AUTHOR_COMMANDS = ["validate", "inspect", "pack", "smoke", "refresh", "report", "index"] as const;
+export const PLUGIN_AUTHOR_COMMANDS = ["init", "test", "preview", "verify", "validate", "inspect", "pack", "smoke", "refresh", "report", "index"] as const;
 export const AGENT_CLI_COMMANDS = ["chat", "run"] as const;
 export const CLI_HELP_TOPICS = [
   ...MANAGEMENT_CLI_COMMANDS.map((command) => command.name),

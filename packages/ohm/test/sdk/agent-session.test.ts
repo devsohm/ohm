@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Type } from "typebox";
 
-import type { AgentEvent, AgentTool, AgentToolResult, BeforeToolCallResult } from "@ohm/kernel";
+import type { AgentContext, AgentEvent, AgentTool, AgentToolResult, BeforeToolCallResult } from "@ohm/kernel";
 import {
   createAssistantMessageEventStream,
   type Api,
@@ -19,16 +19,17 @@ import { Check } from "typebox/value";
 
 import { DefaultResourceLoader, type ResourceLoader } from "../../src/core/resource-loader.js";
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
+import { runtimeDiscoveryView } from "../../src/cli/runtime.js";
 import { errorMessage } from "../../src/core/errors.js";
 import type { RuntimeEvent } from "../../src/core/events.js";
 import { isJsonObject, type JsonObject } from "../../src/core/json.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { FUNCTION_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
-import type { DiscoveryView, ExtensionAPI } from "../../src/extensions/direct.js";
+import type { DiscoveryView, PluginAPI } from "../../src/plugins/direct.js";
 import {
-  createExtensionRuntime,
-  getExtensionRuntimeHost,
-} from "../../src/extensions/compat.js";
+  createPluginRuntime,
+  getPluginRuntimeHost,
+} from "../../src/plugins/compat.js";
 import { providerFromAdapter } from "../../src/providers/internal-runtime-bridge.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
 import { ModelRegistry as InternalModelRegistry } from "../../src/providers/model-registry.js";
@@ -128,6 +129,47 @@ test("SDK activates every built-in tool by default", async () => {
   await created.session.close();
 });
 
+for (const registration of ["sdk", "plugin"] as const) {
+  test(`${registration} tools without prompt snippets remain visible only while selected`, async (context) => {
+    const { cwd, agentDir } = await workspace();
+    const { adapter, model, runtime, modelRuntime: owner } = await modelRuntime([0, 1].map(() => ({
+      kind: "turn" as const,
+      content: [{ type: "text" as const, text: "done" }],
+      terminal: { type: "finish" as const, reason: "stop" as const },
+    })));
+    context.after(() => owner.close());
+    const definition = defineTool({
+      name: "custom_lookup",
+      description: "Find a record",
+      parameters: Type.Object({}),
+      async execute() { return { content: [], details: {} }; },
+    });
+    const settingsManager = SettingsManager.inMemory();
+    const resourceLoader = new DefaultResourceLoader({
+      cwd, agentDir, settingsManager,
+      noSkills: true, noPromptTemplates: true, noThemes: true,
+      pluginFactories: registration === "plugin" ? [(api) => { api.registerTool(definition); }] : [],
+    });
+    await resourceLoader.refresh();
+    const { session } = await createAgentSession({
+      cwd, agentDir, modelRuntime: runtime, model, resourceLoader, settingsManager,
+      sessionManager: SessionManager.inMemory(cwd), noTools: "builtin",
+      customTools: registration === "sdk" ? [definition] : [],
+    });
+    context.after(() => session.close());
+
+    await session.prompt("Inspect the available tools");
+    assert.match(session.systemPrompt, /^- custom_lookup$/mu);
+    assert.deepEqual(adapter.capturedRequests()[0]?.tools?.map((tool) => tool.name), ["custom_lookup"]);
+
+    session.setActiveTools([]);
+    await session.prompt("Inspect the available tools again");
+    assert.doesNotMatch(session.systemPrompt, /^- custom_lookup$/mu);
+    assert.match(session.systemPrompt, /\n\(none\)\n/u);
+    assert.deepEqual(adapter.capturedRequests()[1]?.tools ?? [], []);
+  });
+}
+
 test("SDK applies an exact session model scope and the selected model thinking default", async () => {
   const { cwd, agentDir } = await workspace();
   const { model, runtime } = await modelRuntime([], { reasoning: "supported" });
@@ -193,6 +235,27 @@ test("direct session presents public models and tool definitions without wire me
   await created.session.close();
 });
 
+test("SDK restores persisted selection without projecting complete history", async (t) => {
+  const { cwd, agentDir } = await workspace();
+  const { model, runtime } = await modelRuntime([], { reasoning: "supported" });
+  const manager = SessionManager.inMemory(cwd);
+  manager.appendModelChange(model.provider, model.id);
+  manager.appendThinkingLevelChange("high");
+  manager.appendMessage({ id: "history", role: "user", createdAt: new Date().toISOString(),
+    content: [{ type: "text", text: "Existing conversation" }] });
+  const context = t.mock.method(manager, "buildSessionContext");
+  const entries = t.mock.method(manager, "getEntries");
+  const created = await createAgentSession({
+    cwd, agentDir, modelRuntime: runtime, sessionManager: manager,
+    settingsManager: SettingsManager.inMemory({ defaultThinkingLevel: "low" }),
+  });
+  t.after(() => created.session.close());
+  assert.equal(created.session.model?.id, model.id);
+  assert.equal(created.session.thinkingLevel, "high");
+  assert.equal(context.mock.callCount(), 0);
+  assert.equal(entries.mock.callCount(), 0);
+});
+
 test("SDK default sessions use the CLI-discoverable workspace directory", async () => {
   const { cwd, agentDir } = await workspace();
   const { model, runtime } = await modelRuntime();
@@ -252,14 +315,21 @@ test("SDK reopens suspended never-repeat work for explicit recovery before apply
   assert.ok(sessionFile);
   const running = initial.session.prompt("start unsafe work");
   await started;
-  const interruptedSessionFile = join(cwd, "sessions", "sdk-suspended-interrupted.jsonl");
-  await copyFile(sessionFile, interruptedSessionFile);
+  const interruptedDirectory = join(cwd, "interrupted");
+  const matchingDirectory = join(cwd, "matching");
+  await Promise.all([mkdir(interruptedDirectory), mkdir(matchingDirectory)]);
+  const interruptedSessionFile = join(interruptedDirectory, "snapshot.jsonl");
+  const snapshot = SessionManager.open(sessionFile, undefined, undefined, { readOnly: true });
+  try {
+    const state = snapshot.getV4State();
+    await writeFile(interruptedSessionFile, [state.header, ...state.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  } finally { snapshot.closeV4Store(); }
   await initial.session.abort("simulate process interruption");
   assert.equal((await running).results.at(-1)?.finishReason, "cancelled");
   assert.equal(executions, 1);
   assert.equal(initial.session.suspendedRun?.effects[0]?.policy, "never_repeat");
   await initial.session.close();
-  const matchingSessionFile = join(cwd, "sessions", "sdk-suspended-matching.jsonl");
+  const matchingSessionFile = join(matchingDirectory, "snapshot.jsonl");
   await copyFile(interruptedSessionFile, matchingSessionFile);
 
   const restored = await createAgentSession({
@@ -518,7 +588,7 @@ test("SDK creation failure releases its internally-created session writer", asyn
     settingsManager: SettingsManager.inMemory(),
   }), /providerWireLifecycle requires a caller-supplied modelRuntime/u);
 
-  const journals = (await readdir(sessionDirectory)).filter((name) => name.endsWith(".jsonl"));
+  const journals = (await readdir(sessionDirectory)).filter((name) => name.endsWith(".sqlite"));
   assert.equal(journals.length, 1);
   const reopened = SessionManager.open(join(sessionDirectory, journals[0]!));
   reopened.closeV4Store();
@@ -581,7 +651,7 @@ test("SDK binds provider wire hooks to a caller-connected transport and releases
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "sdk-provider-hooks",
       factory(api) {
         api.on("before_provider_request", (event) => {
@@ -600,7 +670,7 @@ test("SDK binds provider wire hooks to a caller-connected transport and releases
     }],
   });
   await loader.refresh();
-  const host = getExtensionRuntimeHost(loader.getExtensions().runtime);
+  const host = getPluginRuntimeHost(loader.getPlugins().runtime);
   assert.ok(host);
   assert.equal(host.hasListeners("before_provider_request"), true);
   assert.equal(host.hasListeners("before_provider_headers"), true);
@@ -711,7 +781,7 @@ test("direct sendUserMessage failures are retained as diagnostics", async (conte
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "sdk-direct-message-diagnostic",
       factory(api) {
         sendUserMessage = () => api.sendUserMessage("message without a selected model");
@@ -719,7 +789,7 @@ test("direct sendUserMessage failures are retained as diagnostics", async (conte
     }],
   });
   await loader.refresh();
-  const host = getExtensionRuntimeHost(loader.getExtensions().runtime);
+  const host = getPluginRuntimeHost(loader.getPlugins().runtime);
   assert.ok(host);
   context.after(async () => await host.close());
 
@@ -770,7 +840,7 @@ test("SDK discovery includes commands, prompts, and skills before and after refr
     noContextFiles: true,
     additionalPromptTemplatePaths: [prompt],
     additionalSkillPaths: [skill],
-    extensionFactories: [{
+    pluginFactories: [{
       name: "sdk-discovery",
       factory(api) {
         api.registerCommand("sdk-inspect", {
@@ -795,12 +865,15 @@ test("SDK discovery includes commands, prompts, and skills before and after refr
   });
   context.after(async () => {
     await created.session.close();
-    await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close();
+    await getPluginRuntimeHost(loader.getPlugins().runtime)?.close();
   });
 
   const assertDiscovery = async (): Promise<void> => {
     assert.ok(getDiscoveryView);
     const view = await getDiscoveryView();
+    const host = getPluginRuntimeHost(loader.getPlugins().runtime);
+    assert.ok(host);
+    assert.deepEqual(view, runtimeDiscoveryView(host, loader));
     assert.equal(view.resources.some((entry) =>
       entry.kind === "command" && entry.source === "builtin" && entry.name === "refresh"), true);
     assert.equal(view.resources.some((entry) =>
@@ -983,7 +1056,7 @@ test("SDK clamps absent and partial advanced thinking maps", async () => {
 
 function delegateResourceLoader(loader: DefaultResourceLoader, refresh: () => Promise<void>): ResourceLoader {
   return {
-    getExtensions: () => loader.getExtensions(),
+    getPlugins: () => loader.getPlugins(),
     getSkills: () => loader.getSkills(),
     getPrompts: () => loader.getPrompts(),
     getThemes: () => loader.getThemes(),
@@ -991,7 +1064,7 @@ function delegateResourceLoader(loader: DefaultResourceLoader, refresh: () => Pr
     getSystemPrompt: () => loader.getSystemPrompt(),
     getAppendSystemPrompt: () => loader.getAppendSystemPrompt(),
     extendResources: (paths) => loader.extendResources(paths),
-    extendResourcesFromExtensions: async (runtime, reason) => await loader.extendResourcesFromExtensions(runtime, reason),
+    extendResourcesFromPlugins: async (runtime, reason) => await loader.extendResourcesFromPlugins(runtime, reason),
     refresh,
   };
 }
@@ -1018,12 +1091,12 @@ test("createAgentSession accepts a SessionManager cwd for the same canonical wor
   await created.session.close();
 });
 
-test("createAgentSession accepts the public extension result contract and zero-argument runtime", async () => {
+test("createAgentSession accepts the public plugin result contract and zero-argument runtime", async () => {
   const { cwd, agentDir } = await workspace();
-  const extensionRuntime = createExtensionRuntime();
-  const exactExtensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+  const pluginRuntime = createPluginRuntime();
+  const exactPluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
   const resourceLoader: ResourceLoader = {
-    getExtensions: () => exactExtensionsResult,
+    getPlugins: () => exactPluginsResult,
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -1045,15 +1118,15 @@ test("createAgentSession accepts the public extension result contract and zero-a
     noTools: "all",
   });
 
-  assert.equal(created.extensionsResult, exactExtensionsResult);
-  assert.equal(created.extensionsResult.runtime, extensionRuntime);
-  assert.deepEqual(created.extensionsResult.extensions, []);
-  assert.deepEqual(created.extensionsResult.errors, []);
-  const fallbackHost = getExtensionRuntimeHost(extensionRuntime);
+  assert.equal(created.pluginsResult, exactPluginsResult);
+  assert.equal(created.pluginsResult.runtime, pluginRuntime);
+  assert.deepEqual(created.pluginsResult.plugins, []);
+  assert.deepEqual(created.pluginsResult.errors, []);
+  const fallbackHost = getPluginRuntimeHost(pluginRuntime);
   assert.ok(fallbackHost);
   await created.session.close();
   assert.throws(() => fallbackHost.onError(() => {}), /closed/u);
-  assert.throws(() => extensionRuntime.getCommands(), /stale|disposed/u);
+  assert.throws(() => pluginRuntime.getCommands(), /stale|disposed/u);
 });
 
 test("direct provider registrations are available before the initial model is selected", async () => {
@@ -1063,13 +1136,13 @@ test("direct provider registrations are available before the initial model is se
     cwd,
     agentDir,
     settingsManager: SettingsManager.inMemory(),
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-fixture",
       factory(api) {
         const current = ++generation;
         if (current > 2) return;
         api.registerProvider("extension-model", {
-          name: "Extension model",
+          name: "Plugin model",
           baseUrl: "https://example.test/v1",
           apiKey: "fixture-key",
           api: "openai-completions",
@@ -1109,7 +1182,7 @@ test("direct provider registrations are available before the initial model is se
   await created.session.refresh();
   assert.equal(runtime.find("extension-model", "fixture-2"), undefined);
   await created.session.close();
-  await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close();
+  await getPluginRuntimeHost(loader.getPlugins().runtime)?.close();
   assert.equal(runtime.find("extension-model", "fixture-1"), undefined);
 });
 
@@ -1119,7 +1192,7 @@ test("SDK provider bootstrap restores the built-in model and transport after com
     cwd,
     agentDir,
     settingsManager: SettingsManager.inMemory(),
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-override-fixture",
       factory(api) {
         api.registerProvider("sdk-fixture", {
@@ -1162,7 +1235,7 @@ test("SDK provider bootstrap restores the built-in model and transport after com
     sessionManager: SessionManager.inMemory(cwd),
     noTools: "all",
   });
-  const host = getExtensionRuntimeHost(created.extensionsResult.runtime);
+  const host = getPluginRuntimeHost(created.pluginsResult.runtime);
   assert.ok(host);
   assert.equal(created.session.model?.id, "temporary-model");
   assert.equal(runtime.find("sdk-fixture", "temporary-model")?.id, "temporary-model");
@@ -1187,8 +1260,8 @@ test("SDK provider bootstrap restores the built-in model and transport after com
 
 test("direct provider overlays preserve owner order across replacement, unregister, and refresh", async () => {
   const { cwd, agentDir } = await workspace();
-  const ownerA: ExtensionAPI[] = [];
-  const ownerB: ExtensionAPI[] = [];
+  const ownerA: PluginAPI[] = [];
+  const ownerB: PluginAPI[] = [];
   const provider = (name: string, modelId: string) => ({
     name,
     baseUrl: "https://example.test/v1",
@@ -1208,7 +1281,7 @@ test("direct provider overlays preserve owner order across replacement, unregist
     cwd,
     agentDir,
     settingsManager: SettingsManager.inMemory(),
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-owner-a",
       factory(api) {
         ownerA.push(api);
@@ -1256,7 +1329,7 @@ test("direct provider overlays preserve owner order across replacement, unregist
   assert.equal(runtime.find("sdk-fixture", "owner-b")?.id, "owner-b");
 
   await created.session.close();
-  await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close();
+  await getPluginRuntimeHost(loader.getPlugins().runtime)?.close();
   assert.equal(runtime.find("sdk-fixture", "fixture-model")?.id, "fixture-model");
 });
 
@@ -1309,13 +1382,13 @@ test("createAgentSession composes injected managers, exact tool policy, and cust
     tools: ["probe"],
   });
 
-  assert.deepEqual(Object.keys(created).sort(), ["extensionsResult", "session"]);
+  assert.deepEqual(Object.keys(created).sort(), ["pluginsResult", "session"]);
   assert.equal(created.session.nativeSessionManager, sessionManager);
   assert.equal(created.session.settingsManager, settingsManager);
   assert.equal(created.session.thinkingLevel, "off");
   assert.deepEqual(created.session.getActiveTools(), ["probe"]);
-  assert.notEqual(created.extensionsResult.runtime, created.session.extensionRunner);
-  assert.equal(created.extensionsResult, created.session.resourceLoader.getExtensions());
+  assert.notEqual(created.pluginsResult.runtime, created.session.pluginRunner);
+  assert.equal(created.pluginsResult, created.session.resourceLoader.getPlugins());
 
   const events: string[] = [];
   const unsubscribe = created.session.subscribe((event) => { events.push(event.type); });
@@ -1324,13 +1397,13 @@ test("createAgentSession composes injected managers, exact tool policy, and cust
   assert.equal(result.results.at(-1)?.finalText, "complete");
   assert.equal(executions, 1);
   assert.equal(events.includes("tool_execution_start"), true);
-  const initialHost = getExtensionRuntimeHost(created.extensionsResult.runtime);
+  const initialHost = getPluginRuntimeHost(created.pluginsResult.runtime);
   assert.ok(initialHost);
   await created.session.refresh();
-  const currentExtensionsResult = created.session.resourceLoader.getExtensions();
-  const currentHost = getExtensionRuntimeHost(currentExtensionsResult.runtime);
+  const currentExtensionsResult = created.session.resourceLoader.getPlugins();
+  const currentHost = getPluginRuntimeHost(currentExtensionsResult.runtime);
   assert.ok(currentHost);
-  assert.notEqual(currentExtensionsResult, created.extensionsResult);
+  assert.notEqual(currentExtensionsResult, created.pluginsResult);
   assert.notEqual(currentHost, initialHost);
   assert.throws(() => initialHost.onError(() => {}), /closed/u);
   await created.session.close();
@@ -1495,7 +1568,7 @@ test("createAgentSession executes public tool definitions with a session context
     renderShell: "self",
     parameters,
     renderCall(input, _theme, renderer) {
-      renderer.state.seen = input.value;
+      if (Check(STRING_VALUE, input.value)) renderer.state.seen = input.value;
       return {
         render: () => [`CALL ${input.value} ${renderer.cwd}`],
         invalidate() {},
@@ -1660,13 +1733,13 @@ test("extension execution and rendering win custom-tool name collisions", async 
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "renderer-collision",
       factory(api) {
         api.registerTool({
           name: "collision_probe",
-          label: "Extension collision probe",
-          description: "Extension collision fixture",
+          label: "Plugin collision probe",
+          description: "Plugin collision fixture",
           parameters: Type.Object({ value: Type.String() }, { additionalProperties: false }),
           renderShell: "self",
           renderCall(input) {
@@ -1686,7 +1759,7 @@ test("extension execution and rendering win custom-tool name collisions", async 
         api.registerTool({
           name: "unrendered_collision",
           label: "Unrendered extension collision probe",
-          description: "Extension collision fixture without a renderer",
+          description: "Plugin collision fixture without a renderer",
           parameters: Type.Object({ value: Type.String() }, { additionalProperties: false }),
           async execute(_toolCallId, input) {
             executions.push(`extension-unrendered:${input.value}`);
@@ -1779,7 +1852,7 @@ test("extension execution and rendering win custom-tool name collisions", async 
   });
   context.after(async () => {
     await created.session.close().catch(() => undefined);
-    await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close().catch(() => undefined);
+    await getPluginRuntimeHost(loader.getPlugins().runtime)?.close().catch(() => undefined);
   });
 
   const renderer = created.session.toolRendererBinding();
@@ -1964,6 +2037,7 @@ test("createAgentSession enforces host authorization before model-requested tool
   const direct = await created.session.executeBash("echo direct", undefined, { excludeFromContext: true });
   assert.equal(direct.exitCode, 0);
   assert.equal(approvals.length, 0);
+  assert.deepEqual(created.session.getToolPolicy().authorization, { scope: "model_requested_tools", mode: "host_handler" });
   const result = await created.session.prompt("request approval");
 
   assert.equal(result.results.at(-1)?.finalText, "denial observed");
@@ -2273,91 +2347,148 @@ test("session.agent runs a caller-owned model through caller-owned stream and au
   assert.equal(agent.state.errorMessage, undefined);
 });
 
-test("prepareNextTurn installs a brand-new tool only at the next turn boundary", async () => {
-  const { cwd, agentDir } = await workspace();
-  let bootstrapExecutions = 0;
-  let nextExecutions = 0;
-  const bootstrap: HarnessTool = {
-    definition: {
-      name: "bootstrap",
-      description: "Complete the first turn",
-      inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    },
-    validate() {},
-    resources: () => [],
-    async execute() {
-      bootstrapExecutions += 1;
-      return { content: "bootstrapped", isError: false };
-    },
-  };
-  const nextTool: AgentTool = {
-    name: "next_probe",
-    label: "Next probe",
-    description: "Runs after the tool registry swap",
-    parameters: Type.Object({}),
-    async execute() {
-      nextExecutions += 1;
-      return { content: [{ type: "text", text: "next ran" }], details: undefined };
-    },
-  };
-  const { model, runtime } = await modelRuntime([
-    {
-      kind: "turn",
-      content: [{ type: "tool_call", name: "bootstrap", arguments: {} }],
-      terminal: { type: "finish", reason: "tool_calls" },
-    },
-    {
-      kind: "turn",
-      content: [{ type: "tool_call", name: "next_probe", arguments: {} }],
-      terminal: { type: "finish", reason: "tool_calls" },
-    },
-    {
-      kind: "turn",
-      content: [{ type: "text", text: "boundary complete" }],
-      terminal: { type: "finish", reason: "stop" },
-    },
-  ]);
-  const created = await createAgentSession({
-    cwd,
-    agentDir,
-    modelRuntime: runtime,
-    model,
-    sessionManager: SessionManager.inMemory(cwd),
-    settingsManager: SettingsManager.inMemory(),
-    customTools: [bootstrap],
-    tools: ["bootstrap"],
-  });
-  const hookOrder: string[] = [];
-  created.session.agent.beforeToolCall = async ({ toolCall }) => {
-    hookOrder.push(`before:${toolCall.name}`);
-    return undefined;
-  };
-  created.session.agent.afterToolCall = async ({ toolCall }) => {
-    hookOrder.push(`after:${toolCall.name}`);
-    return undefined;
-  };
-  let preparations = 0;
-  created.session.agent.prepareNextTurnWithContext = ({ context }) => {
-    preparations += 1;
-    if (preparations !== 1) return undefined;
-    assert.deepEqual(context.tools?.map((tool) => tool.name), ["bootstrap"]);
-    return { context: { ...context, tools: [nextTool] } };
-  };
+for (const preparation of ["prepareNextTurn", "prepareNextTurnWithContext"] as const) {
+  test(`${preparation} preserves edited context ownership and installs tools at the next turn boundary`, async () => {
+    const { cwd, agentDir } = await workspace();
+    let bootstrapExecutions = 0;
+    let nextExecutions = 0;
+    const bootstrap: HarnessTool = {
+      definition: {
+        name: "bootstrap",
+        description: "Complete the first turn",
+        inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      },
+      validate() {},
+      resources: () => [],
+      async execute() {
+        bootstrapExecutions += 1;
+        return { content: "bootstrapped", isError: false };
+      },
+    };
+    const nextTool: AgentTool = {
+      name: "next_probe",
+      label: "Next probe",
+      description: "Runs after the tool registry swap",
+      parameters: Type.Object({}),
+      async execute() {
+        nextExecutions += 1;
+        return { content: [{ type: "text", text: "next ran" }], details: undefined };
+      },
+    };
+    const { adapter, model, runtime } = await modelRuntime([
+      {
+        kind: "turn",
+        content: [{ type: "tool_call", name: "bootstrap", arguments: {} }],
+        terminal: { type: "finish", reason: "tool_calls" },
+      },
+      {
+        kind: "turn",
+        content: [{ type: "tool_call", name: "next_probe", arguments: {} }],
+        terminal: { type: "finish", reason: "tool_calls" },
+      },
+      {
+        kind: "turn",
+        content: [{ type: "text", text: "boundary complete" }],
+        terminal: { type: "finish", reason: "stop" },
+      },
+    ]);
+    const manager = SessionManager.inMemory(cwd);
+    const firstKept = manager.appendMessage({
+      id: "kept-user", role: "user", content: [{ type: "text", text: "kept history" }],
+      createdAt: "2026-09-06T00:00:00.000Z",
+    });
+    manager.appendCustomMessageEntry("durable-note", "durable custom note", false);
+    manager.appendMessage({
+      role: "bashExecution", command: "printf fixture", output: "fixture", exitCode: 0,
+      cancelled: false, truncated: false, timestamp: 1,
+    });
+    manager.appendCompaction("earlier history", firstKept, 10);
+    const created = await createAgentSession({
+      cwd,
+      agentDir,
+      modelRuntime: runtime,
+      model,
+      sessionManager: manager,
+      settingsManager: SettingsManager.inMemory(),
+      customTools: [bootstrap],
+      tools: ["bootstrap"],
+    });
+    const hookOrder: string[] = [];
+    created.session.agent.beforeToolCall = async ({ toolCall }) => {
+      hookOrder.push(`before:${toolCall.name}`);
+      return undefined;
+    };
+    created.session.agent.afterToolCall = async ({ toolCall }) => {
+      hookOrder.push(`after:${toolCall.name}`);
+      return undefined;
+    };
+    let preparations = 0;
+    const prepare = (context: AgentContext) => {
+      preparations += 1;
+      if (preparations !== 1) return undefined;
+      assert.deepEqual(context.tools?.map((tool) => tool.name), ["bootstrap"]);
+      const retained = context.messages.slice(1).map((message) => message.role === "assistant" ? {
+        ...message,
+        content: [...message.content, { type: "text" as const, text: "context-only edit" }],
+      } : message);
+      return { context: {
+        ...context,
+        messages: [
+          ...retained,
+          { role: "custom" as const, customType: "prep-note", content: "prepared note", display: false, timestamp: 0 },
+        ],
+        tools: [nextTool],
+      } };
+    };
+    if (preparation === "prepareNextTurnWithContext") {
+      created.session.agent.prepareNextTurnWithContext = ({ context }) => prepare(context);
+    } else {
+      created.session.agent.prepareNextTurn = () => prepare({
+        systemPrompt: created.session.agent.state.systemPrompt,
+        messages: created.session.agent.state.messages,
+        tools: created.session.agent.state.tools,
+      });
+    }
+    created.session.agent.transformContext = async (messages) => structuredClone(messages);
+    created.session.agent.convertToLlm = (messages) => messages.flatMap((message) => {
+      if (message.role === "custom") return [{ role: "user" as const, content: message.content, timestamp: message.timestamp }];
+      return message.role === "user" || message.role === "assistant" || message.role === "toolResult" ? [message] : [];
+    });
 
-  const result = await created.session.prompt("swap tools after the first turn");
-  assert.equal(result.results.at(-1)?.finalText, "boundary complete");
-  assert.equal(bootstrapExecutions, 1);
-  assert.equal(nextExecutions, 1);
-  assert.equal(preparations, 2);
-  assert.deepEqual(hookOrder, [
-    "before:bootstrap",
-    "after:bootstrap",
-    "before:next_probe",
-    "after:next_probe",
-  ]);
-  assert.deepEqual(created.session.agent.state.tools.map((tool) => tool.name), ["next_probe"]);
-  await created.session.close();
-});
+    const result = await created.session.prompt("swap tools after the first turn");
+    assert.equal(result.results.at(-1)?.finalText, "boundary complete");
+    assert.equal(bootstrapExecutions, 1);
+    assert.equal(nextExecutions, 1);
+    assert.equal(preparations, 2);
+    assert.deepEqual(hookOrder, [
+      "before:bootstrap",
+      "after:bootstrap",
+      "before:next_probe",
+      "after:next_probe",
+    ]);
+    assert.deepEqual(created.session.agent.state.tools.map((tool) => tool.name), ["next_probe"]);
+    const request = adapter.capturedRequests()[1];
+    const selectedAssistant = request?.messages.find((message) => message.role === "assistant");
+    const persistedAssistant = manager.buildSessionContext().messages.find((message) => message.role === "assistant");
+    assert.ok(persistedAssistant !== undefined && "id" in persistedAssistant && "content" in persistedAssistant);
+    assert.equal(selectedAssistant?.id, persistedAssistant?.id);
+    assert.equal(selectedAssistant?.content.some((block) => block.type === "text" && block.text === "context-only edit"), true);
+    assert.equal(persistedAssistant?.content.some((block) => block.type === "text" && block.text === "context-only edit"), false);
+    assert.equal(request?.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === "prepared note")), true);
+    assert.equal(JSON.stringify(created.session.sessionManager.getEntries()).includes("contextId"), false);
+    assert.equal(created.session.agent.state.messages.some((message) => "contextId" in message), false);
+    const snapshot = created.session.agent.state.messages;
+    const expectedSnapshot = structuredClone(snapshot);
+    for (const message of snapshot) {
+      if (message.role === "assistant") message.content.push({ type: "text", text: "unassigned snapshot edit" });
+      if (message.role === "custom") message.content = "unassigned custom edit";
+    }
+    assert.deepEqual(created.session.agent.state.messages, expectedSnapshot);
+    created.session.newSession();
+    assert.deepEqual(created.session.agent.state.messages, []);
+    await created.session.close();
+  });
+}
 
 test("createAgentSession keeps a supplied loader intact and binds extensions only on request", async () => {
   const { cwd, agentDir } = await workspace();
@@ -2376,14 +2507,14 @@ test("createAgentSession keeps a supplied loader intact and binds extensions onl
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    additionalExtensionPaths: [brokenExtension],
-    extensionFactories: [{
+    additionalPluginPaths: [brokenExtension],
+    pluginFactories: [{
       name: "lifecycle-fixture",
       factory(api) {
         api.registerTool({
           name: "extension_probe",
-          label: "Extension probe",
-          description: "Extension fixture",
+          label: "Plugin probe",
+          description: "Plugin fixture",
           parameters: { type: "object", properties: {}, additionalProperties: false },
           async execute() {
             return { content: [{ type: "text", text: "extension" }], details: null };
@@ -2428,12 +2559,12 @@ test("createAgentSession keeps a supplied loader intact and binds extensions onl
   });
 
   assert.equal(refreshCalls, 0);
-  assert.equal(created.extensionsResult.extensions.some((entry) => entry.path.includes("lifecycle-fixture")), true);
-  assert.equal(created.extensionsResult.errors.some((entry) =>
+  assert.equal(created.pluginsResult.plugins.some((entry) => entry.path.includes("lifecycle-fixture")), true);
+  assert.equal(created.pluginsResult.errors.some((entry) =>
     entry.path.includes("broken-extension.mjs") && entry.error.includes("activation failed")), true);
   assert.deepEqual(created.session.getActiveTools(), ["extension_probe"]);
   assert.equal(lifecycle.length, 0);
-  await created.session.bindExtensions({ mode: "sdk" });
+  await created.session.bindPlugins({ mode: "sdk" });
   assert.equal(lifecycle[0]?.type, "session_start");
   assert.equal(lifecycle[0]?.reason, "resume");
   assert.equal(lifecycle[0]?.mode, "sdk");
@@ -2443,11 +2574,11 @@ test("createAgentSession keeps a supplied loader intact and binds extensions onl
     true,
     JSON.stringify({
       skills: supplied.getSkills(),
-      extensionDiagnostics: getExtensionRuntimeHost(loader.getExtensions().runtime)?.diagnostics(),
+      extensionDiagnostics: getPluginRuntimeHost(loader.getPlugins().runtime)?.diagnostics(),
     }),
   );
 
-  const host = getExtensionRuntimeHost(created.extensionsResult.runtime);
+  const host = getPluginRuntimeHost(created.pluginsResult.runtime);
   assert.ok(host);
   await created.session.close();
   assert.equal(lifecycle.some((entry) => entry.type === "session_shutdown"), false);
@@ -2460,11 +2591,11 @@ test("createAgentSession keeps a supplied loader intact and binds extensions onl
 
 test("construction failure closes an SDK-created fallback host without refreshing the supplied loader", async () => {
   const { cwd, agentDir } = await workspace();
-  const extensionRuntime = createExtensionRuntime();
-  const exactExtensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+  const pluginRuntime = createPluginRuntime();
+  const exactPluginsResult = { plugins: [], errors: [], runtime: pluginRuntime };
   let refreshCalls = 0;
   const resourceLoader: ResourceLoader = {
-    getExtensions: () => exactExtensionsResult,
+    getPlugins: () => exactPluginsResult,
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -2493,10 +2624,10 @@ test("construction failure closes an SDK-created fallback host without refreshin
   }), /custom tool construction failed/u);
 
   assert.equal(refreshCalls, 0);
-  const fallbackHost = getExtensionRuntimeHost(extensionRuntime);
+  const fallbackHost = getPluginRuntimeHost(pluginRuntime);
   assert.ok(fallbackHost);
   assert.throws(() => fallbackHost.onError(() => {}), /closed/u);
-  assert.throws(() => extensionRuntime.getCommands(), /stale|disposed/u);
+  assert.throws(() => pluginRuntime.getCommands(), /stale|disposed/u);
 });
 
 test("createAgentSession reports model restoration fallback without replacing caller state", async () => {

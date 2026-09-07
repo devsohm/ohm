@@ -29,10 +29,10 @@ workspace in scope. Ask before reading raw log records, crash files, or session 
 select one relevant file and a bounded time or line range rather than ingesting a directory. Never edit a live session
 journal. Review and redact every artifact before sharing it.
 
-`ohm extensions doctor --json --offline` is a separate executable probe. Run it only when extension behavior is
-implicated and the user explicitly authorizes activating the already-trusted extension runtime. It may initialize
-runtime state, and trusted extension code can perform its own side effects. Never grant project trust merely to run
-doctor. Omit `--offline` only when network-dependent extension behavior is necessary and separately authorized.
+`ohm plugins doctor --json --offline` is a separate executable probe. Run it only when plugin behavior is
+implicated and the user explicitly authorizes activating the already-trusted plugin runtime. It may initialize
+runtime state, and trusted plugin code can perform its own side effects. Never grant project trust merely to run
+doctor. Omit `--offline` only when network-dependent plugin behavior is necessary and separately authorized.
 
 ## Continuous local logs
 
@@ -166,12 +166,12 @@ ohm diagnostics ./ohm-support.json
 File creation is exclusive and owner-only. An existing file is never replaced.
 
 The bundle contains the ohm and Node versions, operating-system identity, project-trust status, configuration key
-names, file metadata, extension and skill summaries, bounded loader diagnostics, and probe times. Timings use a
+names, file metadata, plugin and skill summaries, bounded loader diagnostics, and probe times. Timings use a
 monotonic process clock. They help diagnose one run and are not cross-machine benchmarks.
 
-The collector never opens the credential store, session JSONL files, or operational log files for content. For static validation, it reads
+The collector never opens the credential store, session databases or JSONL exports, or operational log files for content. For static validation, it reads
 bounded configuration, manifest, contribution, and skill-frontmatter data. It does not include configuration values,
-descriptions, instructions, templates, custom themes, or runtime code. It never executes extension code.
+descriptions, instructions, templates, custom themes, or runtime code. It never executes plugin code.
 
 Paths below the workspace become `<workspace>`. Paths below the home directory become `~`. Known secret shapes,
 authenticated URL user information, and credential-like query parameters are redacted again before serialization.

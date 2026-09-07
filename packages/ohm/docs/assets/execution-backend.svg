@@ -64,7 +64,7 @@
 
   <rect class="card" x="838" y="732" width="706" height="142"/>
   <text class="label" x="868" y="778">outside this routing contract</text>
-  <text class="detail" x="868" y="816">trusted extension JavaScript · ohm.exec</text>
+  <text class="detail" x="868" y="816">trusted plugin JavaScript · ohm.exec</text>
   <text class="small" x="868" y="848">these remain host-process authority unless separately isolated</text>
 
   <path class="line" d="M1220 638v38H1191v56"/>

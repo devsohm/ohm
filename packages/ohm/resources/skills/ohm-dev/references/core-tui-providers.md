@@ -1,6 +1,6 @@
 # Maintain ohm core, TUI, and providers
 
-Use this reference only when the user explicitly asks to change the ohm source repository. For ordinary customization, use [Configuration](configuration.md) or [Extensions](extensions.md).
+Use this reference only when the user explicitly asks to change the ohm source repository. For ordinary customization, use [Configuration](configuration.md) or [Plugins](plugins.md).
 
 ## Establish the source contract
 
@@ -23,27 +23,27 @@ Change source, tests, docs, resources, or generation inputs. Never edit generate
 
 ## Locate the source
 
-- Public direct-extension declarations live in `packages/ohm/src/extensions/direct.ts`; activation, ownership, events, and generation cleanup live in `packages/ohm/src/extensions/runtime.ts`; the host-managed extension config store lives in `packages/ohm/src/extensions/config-store.ts`.
-- Native and portable package discovery live in `packages/ohm/src/core/package-manager.ts` and `packages/ohm/src/core/portable-plugin.ts`; locked project-package transactions live in `packages/ohm/src/extensions/project-packages.ts`; shared resource assembly lives in `packages/ohm/src/core/resource-loader.ts`.
-- Extension UI and RPC projections live in `packages/ohm/src/tui/direct-ui.ts` and `packages/ohm/src/interfaces/rpc-extension-ui.ts`.
+- Public plugin declarations live in `packages/ohm/src/plugins/direct.ts`; activation, ownership, events, and generation cleanup live in `packages/ohm/src/plugins/runtime.ts`; the host-managed plugin config store lives in `packages/ohm/src/plugins/config-store.ts`.
+- Native and portable package discovery live in `packages/ohm/src/core/package-manager.ts` and `packages/ohm/src/core/portable-plugin.ts`; locked project-package transactions live in `packages/ohm/src/plugins/project-packages.ts`; shared resource assembly lives in `packages/ohm/src/core/resource-loader.ts`.
+- Plugin UI and RPC projections live in `packages/ohm/src/tui/direct-ui.ts` and `packages/ohm/src/interfaces/rpc-plugin-ui.ts`.
 - CLI and SDK composition live in `packages/ohm/src/cli/runtime.ts` and `packages/ohm/src/sdk/index.ts`; shared session policy lives in `packages/ohm/src/service/agent-session.ts`.
-- Start conformance work in `packages/ohm/test/extensions/`, `packages/ohm/test/tui/direct-ui.test.ts`, and `packages/ohm/test/cli/runtime-direct-extensions.test.ts`. Follow imports to the narrowest adjacent test instead of editing a generated declaration.
+- Start conformance work in `packages/ohm/test/plugins/`, `packages/ohm/test/tui/direct-ui.test.ts`, and `packages/ohm/test/cli/runtime-direct-plugins.test.ts`. Follow imports to the narrowest adjacent test instead of editing a generated declaration.
 
 ## Preserve runtime boundaries
 
 - Keep `AgentSession` as the shared product runtime for interactive, print, JSON, RPC, serve, SDK, and embedding composition.
-- Route every tool execution through the coordinator. Preserve validation before and after extension input transformation, resource claims, cancellation, bounded output, and lifecycle events.
+- Route every tool execution through the coordinator. Preserve validation before and after plugin input transformation, resource claims, cancellation, bounded output, and lifecycle events.
 - Keep sessions append-only. Derived state must rebuild from the V4 journal; a failed write must not publish a new entry or leaf.
 - Preserve opaque provider state byte-for-byte and expose only provider-authorized public reasoning.
 - Keep credentials behind the authentication boundary and out of logs, sessions, diagnostics, tool results, and errors.
-- Keep extension contracts transport-neutral. Core, interface, provider, and terminal adapters must not create a second execution engine.
+- Keep plugin contracts transport-neutral. Core, interface, provider, and terminal adapters must not create a second execution engine.
 - Keep file boundaries centralized and make requested isolation fail closed.
 
 ## Terminal UI changes
 
 - Preserve one owner for the complete mutable terminal surface. Do not add ad hoc writes around the live renderer.
 - Keep the transcript, composer, tool updates, visible reasoning, picker, overlays, resize, scroll, cancellation, refresh, and resume paths consistent.
-- Preserve extension message renderers, entry renderers, themes, components, overlays, editor replacement, shortcuts, and generation cleanup.
+- Preserve plugin message renderers, entry renderers, themes, components, overlays, editor replacement, shortcuts, and generation cleanup.
 - Treat every rendered string as untrusted. Strip terminal controls, clamp width and height, and test ASCII, Unicode, narrow, wide, resize, shrink-to-empty, and accessibility paths.
 - Test live mutation and the completed/resumed projection separately. A successful tool may change presentation state only after its durable completion event.
 - Use a real PTY for input, paste, resize, scroll, Escape, and terminal-protocol behavior. An in-memory snapshot cannot prove those paths.

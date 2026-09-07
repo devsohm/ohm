@@ -9,8 +9,8 @@ import { Value } from "typebox/value";
 
 import type { CanonicalMessage } from "../../src/core/types.js";
 import { STRING_VALUE } from "../../src/core/value-schemas.js";
-import { createExtensionRuntime } from "../../src/extensions/compat-runtime.js";
-import type { LoadExtensionsResult } from "../../src/extensions/direct.js";
+import { createPluginRuntime } from "../../src/plugins/compat-runtime.js";
+import type { LoadPluginsResult } from "../../src/plugins/direct.js";
 import type { AgentSession, AgentSessionReplacedContext } from "../../src/service/agent-session.js";
 import { createAgentSessionRuntimeCommandActions } from "../../src/service/runtime-command-actions.js";
 import {
@@ -24,15 +24,81 @@ import {
 import { SessionManager } from "../../src/storage/session-manager.js";
 
 const roots = new Set<string>();
+const originalHome = process.env.OHM_HOME;
+
+test("SQLite runtime recovers the original session after cancelled replacement and failed fork", async () => {
+  const root = await temporaryRoot();
+  const directory = join(root, "sqlite");
+  const manager = SessionManager.create(root, directory, { id: "original" });
+  const entry = manager.appendMessage(message("user", "keep me"));
+  const location = manager.getSessionFile()!;
+  const controller = new AbortController();
+  let generation = 0;
+  let failFork = false;
+  const { create } = factory([]);
+  const wrapped: CreateAgentSessionRuntimeFactory<Services> = async (options) => {
+    generation += 1;
+    if (generation === 2) {
+      controller.abort(new Error("cancel backend replacement"));
+      options.signal?.throwIfAborted();
+    }
+    if (failFork && options.sessionStartEvent?.reason === "fork") throw new Error("fork backend failure");
+    return await create(options);
+  };
+  const runtime = await createAgentSessionRuntime(wrapped, { cwd: root, agentDir: root, sessionManager: manager });
+  await assert.rejects(runtime.newSession({ signal: controller.signal }), /cancel backend replacement/);
+  assert.equal(runtime.session.nativeSessionManager.getSessionDir(), directory);
+  assert.equal(runtime.session.nativeSessionManager.getSessionFile(), location);
+  assert.equal(runtime.session.nativeSessionManager.getEntryCount(), 1);
+  failFork = true;
+  await assert.rejects(runtime.fork(entry, { position: "at" }), /fork backend failure/);
+  assert.equal(runtime.session.nativeSessionManager.getSessionFile(), location);
+  assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".sqlite")), ["original.sqlite"]);
+  await runtime.dispose();
+});
+
+test("JSONL import preserves every commit and cancellation leaves source and SQLite owner intact", async () => {
+  const root = await temporaryRoot();
+  const source = SessionManager.inMemory(root, { id: "imported" });
+  source.appendMessage(message("user", "imported history"));
+  source.commitChanges([{
+    type: "run_accepted", branchId: "main", operationId: "pending", promptNodeId: "future", sourceHeadId: source.getLeafId(),
+    acceptedAt: new Date().toISOString(), request: { opaque: { intact: "exact" } },
+    selection: { provider: "fixture", model: "fixture", api: null, thinkingLevel: "off", toolNames: [], toolsetFingerprint: "empty" },
+  }]);
+  const sourceFile = await jsonlFixture(source, root);
+  const expected = source.getV4State();
+  source.closeV4Store();
+  const originalBytes = await readFile(sourceFile);
+  const directory = join(root, "sqlite");
+  const manager = SessionManager.create(root, directory, { id: "owner" });
+  const { create } = factory([]);
+  let cancelImport = true;
+  const runtime = await createAgentSessionRuntime(create, { cwd: root, agentDir: root, sessionManager: manager }, {
+    beforeSwitch: async () => ({ cancel: cancelImport }),
+  });
+  assert.deepEqual(await runtime.importFromJsonl(sourceFile), { cancelled: true });
+  assert.equal(runtime.session.nativeSessionManager.getSessionId(), "owner");
+  assert.deepEqual((await readdir(join(root, "sqlite"))).filter((name) => name.endsWith(".sqlite")), ["owner.sqlite"]);
+  cancelImport = false;
+  assert.deepEqual(await runtime.importFromJsonl(sourceFile), { cancelled: false });
+  assert.deepEqual(runtime.session.nativeSessionManager.getV4State(), expected);
+  assert.deepEqual(await readFile(sourceFile), originalBytes);
+  assert.equal(runtime.session.nativeSessionManager.getSessionFile(), join(directory, "imported.sqlite"));
+  await runtime.dispose();
+});
 
 test.afterEach(async () => {
   await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
   roots.clear();
+  if (originalHome === undefined) delete process.env.OHM_HOME;
+  else process.env.OHM_HOME = originalHome;
 });
 
 async function temporaryRoot(): Promise<string> {
   const value = await mkdtemp(join(tmpdir(), "ohm-agent-session-runtime-"));
   roots.add(value);
+  process.env.OHM_HOME = join(value, "agent");
   return value;
 }
 
@@ -75,11 +141,11 @@ interface AgentSessionTestDouble {
 
 const ERRNO_VALUE = Type.Object({ code: Type.Optional(Type.String()) }, { additionalProperties: true });
 
-function fakeExtensionsResult(generation: number): LoadExtensionsResult {
+function fakePluginsResult(generation: number): LoadPluginsResult {
   return Object.freeze({
-    extensions: [],
+    plugins: [],
     errors: [{ path: `generation-${generation}`, error: `generation ${generation}` }],
-    runtime: createExtensionRuntime(),
+    runtime: createPluginRuntime(),
   });
 }
 
@@ -132,7 +198,7 @@ function factory(events: string[]): FactoryFixture {
       events.push(`factory:${generation}`);
       return {
         session: fakeSession(sessionManager, generation, events, modelScope),
-        extensionsResult: fakeExtensionsResult(generation),
+        pluginsResult: fakePluginsResult(generation),
         services: {
           cwd,
           agentDir,
@@ -151,6 +217,15 @@ function persist(manager: SessionManager): string {
   const sessionFile = manager.getSessionFile();
   assert.ok(sessionFile);
   return sessionFile;
+}
+
+async function jsonlFixture(manager: SessionManager, directory: string): Promise<string> {
+  manager.appendMessage(message("user", "hello"));
+  manager.appendMessage(message("assistant", "hi"));
+  const state = manager.getV4State();
+  const path = join(directory, `${manager.getSessionId()}.jsonl`);
+  await writeFile(path, [state.header, ...state.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  return path;
 }
 
 function deferred<T = void>(): Deferred<T> {
@@ -209,10 +284,10 @@ test("built-in runtime factory results retain extension discovery and diagnostic
     sessionManager: SessionManager.inMemory(root),
   });
 
-  const extensionsResult = runtime.extensionsResult;
-  if (extensionsResult === undefined) assert.fail("Expected the built-in extension result");
-  assert.deepEqual(extensionsResult.extensions, []);
-  assert.deepEqual(extensionsResult.errors, [{ path: "generation-1", error: "generation 1" }]);
+  const pluginsResult = runtime.pluginsResult;
+  if (pluginsResult === undefined) assert.fail("Expected the built-in extension result");
+  assert.deepEqual(pluginsResult.plugins, []);
+  assert.deepEqual(pluginsResult.errors, [{ path: "generation-1", error: "generation 1" }]);
   assert.deepEqual(runtime.diagnostics, [{ type: "info", message: "generation 1" }]);
   await runtime.dispose();
 });
@@ -522,7 +597,7 @@ test("failed persistent new-session preparation removes only its created journal
 
   assert.equal(runtime.session.sessionManager, manager);
   assert.deepEqual(
-    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl")).sort(),
+    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite")).sort(),
     [basename(currentFile), basename(preservedFile)].sort(),
   );
   assert.equal(await readFile(preservedFile, "utf8"), "preserve this file");
@@ -544,7 +619,7 @@ test("linked runtime replacement prepares exactly one fresh session", async () =
   await runtime.newSession({ parentSession: "parent-session" });
 
   assert.equal(runtime.session.sessionManager.getHeader()!.parentSession, "parent-session");
-  assert.equal((await readdir(sessionDir)).filter((name) => name.endsWith(".jsonl")).length, 2);
+  assert.equal((await readdir(sessionDir)).filter((name) => name.endsWith(".sqlite")).length, 2);
   await runtime.dispose();
 });
 
@@ -666,7 +741,7 @@ test("factory failure recreates the previous owned generation and reports the or
     if (currentGeneration === 2) throw new Error("replacement factory rejected");
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -725,7 +800,7 @@ test("failed persistent new-session construction removes its candidate after own
 
   assert.equal(runtime.session.sessionManager.getSessionId(), "current");
   assert.deepEqual(
-    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl")).sort(),
+    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite")).sort(),
     [basename(currentFile), basename(preservedFile)].sort(),
   );
   assert.deepEqual(
@@ -749,7 +824,7 @@ test("rebind failure closes the candidate once and recreates the previous genera
     events.push(`factory:${currentGeneration}`);
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -824,7 +899,7 @@ test("fork guards run before mutation and an allowed before-fork returns the sel
   assert.notEqual(runtime.session.sessionFile, sourcePath);
   assert.equal(runtime.session.sessionManager.getHeader()!.parentSession, "source");
   assert.deepEqual(runtime.session.sessionManager.getEntries(), []);
-  assert.equal((await readdir(sessions)).filter((name) => name.endsWith(".jsonl")).length, 2);
+  assert.equal((await readdir(sessions)).filter((name) => name.endsWith(".sqlite")).length, 2);
   assert.deepEqual(events.slice(0, 5), [
     `guard:${user}:before`,
     "shutdown:fork",
@@ -915,7 +990,7 @@ test("a failed in-memory fork leaves the original branch and entries unchanged",
     if (currentGeneration === 2) throw new Error("fork factory rejected");
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -975,7 +1050,7 @@ test("a failed persistent fork releases its candidate writer before owner recove
     [`${basename(sourcePath)}.writer-lock`],
   );
   assert.deepEqual(
-    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl")).sort(),
+    (await readdir(sessions)).filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite")).sort(),
     [basename(sourcePath), basename(preservedFile)].sort(),
   );
   assert.equal(await readFile(preservedFile, "utf8"), "preserve this file");
@@ -985,8 +1060,8 @@ test("a failed persistent fork releases its candidate writer before owner recove
 test("import reports a missing stored cwd and accepts the active cwd as an explicit override", async () => {
   const root = await temporaryRoot();
   const missingCwd = join(root, "missing-workspace");
-  const source = SessionManager.create(missingCwd, join(root, "source-sessions"), { id: "imported" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(missingCwd, { id: "imported" });
+  const sourcePath = await jsonlFixture(source, root);
   const current = SessionManager.create(root, join(root, "current-sessions"), { id: "current" });
   persist(current);
   const events: string[] = [];
@@ -1002,7 +1077,7 @@ test("import reports a missing stored cwd and accepts the active cwd as an expli
     assert.ok(error instanceof MissingSessionCwdError);
     assert.equal(error.issue.sessionCwd, resolve(missingCwd));
     assert.equal(error.issue.fallbackCwd, root);
-    assert.match(error.issue.sessionFile, /current-sessions[/\\].+_imported\.jsonl$/u);
+    assert.equal(error.issue.sessionFile, join(root, "current-sessions", "imported.sqlite"));
     return true;
   });
   assert.equal(runtime.session.sessionManager.getSessionId(), "current");
@@ -1017,8 +1092,8 @@ test("import rejects nonregular sources without blocking and preserves regular-f
   skip: process.platform === "win32" ? "POSIX FIFO and device probe" : false,
 }, async () => {
   const root = await temporaryRoot();
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "imported" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "imported" });
+  const sourcePath = await jsonlFixture(source, root);
   source.closeV4Store();
   const alias = join(root, "alias.jsonl");
   const fifo = join(root, "blocked.jsonl");
@@ -1039,10 +1114,10 @@ test("import rejects nonregular sources without blocking and preserves regular-f
 
   await assert.rejects(
     runtime.importFromJsonl(fifo, root, AbortSignal.timeout(1_000)),
-    /not a regular file/u,
+    /must be a regular file/u,
   );
-  await assert.rejects(runtime.importFromJsonl(directory, root), /not a regular file/u);
-  await assert.rejects(runtime.importFromJsonl("/dev/null", root), /not a regular file/u);
+  await assert.rejects(runtime.importFromJsonl(directory, root), /must be a regular file/u);
+  await assert.rejects(runtime.importFromJsonl("/dev/null", root), /must be a regular file/u);
   assert.deepEqual(await runtime.importFromJsonl(alias, root), { cancelled: false });
   assert.equal(runtime.session.sessionManager.getSessionId(), "imported");
   await runtime.dispose();
@@ -1050,12 +1125,12 @@ test("import rejects nonregular sources without blocking and preserves regular-f
 
 test("import never overwrites a colliding destination", async () => {
   const root = await temporaryRoot();
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "imported" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "imported" });
+  const sourcePath = await jsonlFixture(source, root);
   const currentDirectory = join(root, "current-sessions");
   const current = SessionManager.create(root, currentDirectory, { id: "current" });
   persist(current);
-  const collidingPath = join(currentDirectory, basename(sourcePath));
+  const collidingPath = join(currentDirectory, "imported.sqlite");
   const existing = Buffer.from("existing destination\n");
   await writeFile(collidingPath, existing);
 
@@ -1066,24 +1141,23 @@ test("import never overwrites a colliding destination", async () => {
     agentDir: join(root, "agent"),
     sessionManager: current,
   });
-  assert.deepEqual(await runtime.importFromJsonl(sourcePath, root), { cancelled: false });
+  await assert.rejects(runtime.importFromJsonl(sourcePath, root), /EEXIST/u);
   assert.deepEqual(await readFile(collidingPath), existing);
-  assert.equal(runtime.session.sessionManager.getSessionId(), "imported");
-  assert.notEqual(runtime.session.sessionFile, collidingPath);
+  assert.equal(runtime.session.sessionManager.getSessionId(), "current");
   assert.equal((await readdir(currentDirectory)).some((name) => name.startsWith(".ohm-import-")), false);
 });
 
 test("import never follows a colliding destination symlink", async (context) => {
   const root = await temporaryRoot();
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "symlinked" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "symlinked" });
+  const sourcePath = await jsonlFixture(source, root);
   const currentDirectory = join(root, "current-sessions");
   const current = SessionManager.create(root, currentDirectory, { id: "current" });
   persist(current);
   const victim = join(root, "victim.txt");
   const victimBytes = Buffer.from("do not replace\n");
   await writeFile(victim, victimBytes);
-  const linkedDestination = join(currentDirectory, basename(sourcePath));
+  const linkedDestination = join(currentDirectory, "symlinked.sqlite");
   try {
     await symlink(victim, linkedDestination, "file");
   } catch (error) {
@@ -1101,10 +1175,9 @@ test("import never follows a colliding destination symlink", async (context) => 
     agentDir: join(root, "agent"),
     sessionManager: current,
   });
-  assert.deepEqual(await runtime.importFromJsonl(sourcePath, root), { cancelled: false });
+  await assert.rejects(runtime.importFromJsonl(sourcePath, root), /EEXIST/u);
   assert.deepEqual(await readFile(victim), victimBytes);
-  assert.equal(runtime.session.sessionManager.getSessionId(), "symlinked");
-  assert.notEqual(runtime.session.sessionFile, linkedDestination);
+  assert.equal(runtime.session.sessionManager.getSessionId(), "current");
 });
 
 test("invalid and cancelled imports leave no destination or private staging files", async () => {
@@ -1162,8 +1235,8 @@ test("invalid and cancelled imports leave no destination or private staging file
   assert.deepEqual((await readdir(currentDirectory)).sort(), baseline);
   assert.deepEqual(await readFile(invalidDestination), invalidDestinationBytes);
 
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "cancelled" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "cancelled" });
+  const sourcePath = await jsonlFixture(source, root);
   const controller = new AbortController();
   const importing = runtime.importFromJsonl(sourcePath, root, controller.signal);
   const candidate = await guardStarted.promise;
@@ -1177,8 +1250,8 @@ test("invalid and cancelled imports leave no destination or private staging file
 
 test("a guarded import cancellation removes the committed candidate", async () => {
   const root = await temporaryRoot();
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "cancelled" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "cancelled" });
+  const sourcePath = await jsonlFixture(source, root);
   const currentDirectory = join(root, "current-sessions");
   const current = SessionManager.create(root, currentDirectory, { id: "current" });
   persist(current);
@@ -1202,8 +1275,8 @@ test("a guarded import cancellation removes the committed candidate", async () =
 
 test("an import replacement failure recovers the owner and removes the committed candidate", async () => {
   const root = await temporaryRoot();
-  const source = SessionManager.create(root, join(root, "source-sessions"), { id: "failed-import" });
-  const sourcePath = persist(source);
+  const source = SessionManager.inMemory(root, { id: "failed-import" });
+  const sourcePath = await jsonlFixture(source, root);
   const sourceBytes = await readFile(sourcePath);
   const currentDirectory = join(root, "current-sessions");
   const current = SessionManager.create(root, currentDirectory, { id: "current" });
@@ -1216,7 +1289,7 @@ test("an import replacement failure recovers the owner and removes the committed
     if (currentGeneration === 2) throw new Error("import factory rejected");
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: { cwd, agentDir, generation: currentGeneration },
     };
@@ -1368,7 +1441,7 @@ test("caller cancellation during a stalled replacement factory recovers the owne
     events.push(`factory:${currentGeneration}:return`);
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -1513,7 +1586,7 @@ test("dispose during replacement closes every returned generation exactly once",
     events.push(`factory:${currentGeneration}:return`);
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -1576,7 +1649,7 @@ test("dispose does not wait for a replacement factory that ignores cancellation"
     }
     return {
       session: fakeSession(sessionManager, currentGeneration, events),
-      extensionsResult: fakeExtensionsResult(currentGeneration),
+      pluginsResult: fakePluginsResult(currentGeneration),
       diagnostics: [],
       services: {
         cwd,
@@ -1623,19 +1696,19 @@ test("the public constructor accepts the session, services, factory, diagnostics
   const manager = SessionManager.inMemory(root, { id: "direct" });
   const session = fakeSession(manager, 7, events);
   const services: Services = { cwd: root, agentDir: join(root, "agent"), generation: 7 };
-  const extensionsResult = fakeExtensionsResult(7);
+  const pluginsResult = fakePluginsResult(7);
   const runtime = new AgentSessionRuntime(
     session,
     services,
     create,
     [{ type: "warning", message: "fixture" }],
     "fallback",
-    extensionsResult,
+    pluginsResult,
   );
 
   assert.equal(runtime.session, session);
   assert.equal(runtime.services, services);
-  assert.equal(runtime.extensionsResult, extensionsResult);
+  assert.equal(runtime.pluginsResult, pluginsResult);
   assert.deepEqual(runtime.diagnostics, [{ type: "warning", message: "fixture" }]);
   assert.equal(runtime.modelFallbackMessage, "fallback");
 });

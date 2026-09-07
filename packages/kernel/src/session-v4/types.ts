@@ -436,6 +436,50 @@ export interface SessionV4State {
 	commits: Map<string, SessionV4Commit>;
 }
 
+/** Replace-only records used by a privileged journal owner. Reads must not be mutated.
+ * Iteration follows first insertion order. An iterator not yet exhausted observes
+ * later inserts, matching Map; replacing an existing key does not move it.
+ */
+export interface SessionV4RecordCollection<Value, Metadata = never> extends Iterable<[string, Value]> {
+	readonly size: number;
+	get(id: string): Value | undefined;
+	has(id: string): boolean;
+	set(id: string, value: Value): void;
+	delete(id: string): boolean;
+	keys(): IterableIterator<string>;
+	values(): IterableIterator<Value>;
+	entries(): IterableIterator<[string, Value]>;
+	getMetadata?(id: string): Metadata | undefined;
+	metadataEntries?(): IterableIterator<[string, Metadata]>;
+}
+
+export type SessionV4NodeMetadata = Pick<SessionV4ConversationNode, "id" | "parentId" | "nodeType" | "operationId"> & {
+	role?: SessionV4ConversationRole;
+};
+
+export type SessionV4NodeCollection = SessionV4RecordCollection<SessionV4ConversationNode, SessionV4NodeMetadata>;
+
+export type SessionV4OperationMetadata = Pick<SessionV4OperationState,
+	"id" | "branchId" | "promptNodeId" | "sourceHeadId" | "status" | "acceptedAt" | "finishedAt">;
+export type SessionV4QueueMetadata = Pick<SessionV4QueueEntryState,
+	"id" | "branchId" | "targetNodeId" | "operationId" | "status">;
+export type SessionV4ToolEffectMetadata = Pick<SessionV4ToolEffectState,
+	"id" | "operationId" | "toolName" | "status" | "preparedAt" | "lastDispatchedAt" | "recoveryStartedAt" | "finishedAt">;
+export type SessionV4CheckpointMetadata = Pick<SessionV4CheckpointState, "id" | "operationId" | "createdAt">;
+export type SessionV4CommitMetadata = Pick<SessionV4Commit, "commitId" | "sequence" | "committedAt">;
+
+export interface SessionV4RecordCollections {
+	nodes: SessionV4NodeCollection;
+	operations: SessionV4RecordCollection<SessionV4OperationState, SessionV4OperationMetadata>;
+	checkpoints: SessionV4RecordCollection<SessionV4CheckpointState, SessionV4CheckpointMetadata>;
+	queue: SessionV4RecordCollection<SessionV4QueueEntryState, SessionV4QueueMetadata>;
+	toolEffects: SessionV4RecordCollection<SessionV4ToolEffectState, SessionV4ToolEffectMetadata>;
+	commits: SessionV4RecordCollection<SessionV4Commit, SessionV4CommitMetadata>;
+}
+
+/** Internal ownership view; public snapshots continue to use actual Maps. */
+export interface SessionV4ReducerState extends Omit<SessionV4State, keyof SessionV4RecordCollections>, SessionV4RecordCollections {}
+
 export interface SessionV4ReadResult {
 	state: SessionV4State;
 	commits: SessionV4Commit[];

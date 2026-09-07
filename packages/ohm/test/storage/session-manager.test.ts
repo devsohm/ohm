@@ -7,7 +7,6 @@ import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { readSessionV4FileSync } from "@ohm/kernel/session-v4";
 import type { CanonicalMessage } from "../../src/core/types.js";
 import {
   CURRENT_SESSION_VERSION,
@@ -27,6 +26,11 @@ const SPECIAL_SCAN_CHILD_TIMEOUT_MS = process.env.CI === "true"
 const roots = new Set<string>();
 let messageSequence = 0;
 const CUSTOM_VALUE_DATA = Type.Object({ value: Type.Number() }, { additionalProperties: true });
+
+function writeLegacy(manager: SessionManager, path: string): void {
+  const state = manager.getV4State();
+  writeFileSync(path, [state.header, ...state.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+}
 
 async function temporaryRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-v4-"));
@@ -168,7 +172,7 @@ test("persistent sessions materialize one exact version-four header immediately"
   const file = manager.getSessionFile()!;
 
   assert.equal(existsSync(file), true);
-  assert.match(basename(file), /_session\.one\.jsonl$/u);
+  assert.equal(basename(file), "session.one.sqlite");
   assert.deepEqual(manager.getHeader(), {
     type: "session",
     version: CURRENT_SESSION_VERSION,
@@ -176,10 +180,8 @@ test("persistent sessions materialize one exact version-four header immediately"
     timestamp: manager.getHeader().timestamp,
     cwd: resolve(cwd),
   });
-  const lines = readFileSync(file, "utf8").split("\n");
-  assert.equal(lines.length, 2);
-  assert.equal(lines[1], "");
-  assert.deepEqual(JSON.parse(lines[0]!), {
+  assert.equal(readFileSync(file).subarray(0, 16).toString("ascii"), "SQLite format 3\0");
+  assert.deepEqual(manager.getV4State().header, {
     record: "session",
     version: 4,
     sessionId: "session.one",
@@ -187,7 +189,7 @@ test("persistent sessions materialize one exact version-four header immediately"
     workspace: resolve(cwd),
     cwd: resolve(cwd),
   });
-  assert.equal(readSessionV4FileSync(file).state.sequence, 0);
+  assert.equal(manager.getV4State().sequence, 0);
 });
 
 test("failed fresh-session preparation leaves the current writer active", async () => {
@@ -205,7 +207,7 @@ test("failed fresh-session preparation leaves the current writer active", async 
   assert.equal(manager.getSessionFile(), currentFile);
   manager.appendMessage(message("assistant", "after failure"));
   assert.deepEqual(manager.buildSessionContext().messages.map(contextText), ["before failure", "after failure"]);
-  assert.equal(readSessionV4FileSync(currentFile).state.sequence, 2);
+  assert.equal(manager.getV4State().sequence, 2);
 });
 
 test("conversation entries project from v4 nodes and survive reopening", async () => {
@@ -614,6 +616,35 @@ test("active branch tail pages do not walk earlier journal entries", () => {
   assert.ok(reads <= 33, `tail page read ${reads} journal nodes`);
 });
 
+test("context reconstruction visits only the selected lineage and returns detached messages", () => {
+  const manager = SessionManager.inMemory("/tmp", { id: "active-context" });
+  const root = manager.appendMessage(message("user", "root"));
+  for (let index = 0; index < 512; index += 1) {
+    manager.appendMessage(message("assistant", `inactive ${index} ${"x".repeat(1_024)}`));
+  }
+  manager.branch(root);
+  manager.appendMessage(message("assistant", "selected"));
+  const state = manager.getV4State();
+  Object.defineProperty(manager, "memoryState", { configurable: true, value: state, writable: true });
+  state.nodes.values = () => { throw new Error("Context must not project the entire journal"); };
+  const originalGet = state.nodes.get.bind(state.nodes);
+  let reads = 0;
+  state.nodes.get = (id) => {
+    reads += 1;
+    return originalGet(id);
+  };
+
+  const context = manager.buildSessionContext();
+  const entries = manager.buildContextEntries();
+  assert.deepEqual(context.messages.map(contextText), ["root", "selected"]);
+  assert.equal(entries.length, 2);
+  assert.ok(reads <= 4, `two context reads visited ${reads} nodes for a two-node lineage`);
+  Object.defineProperty(context.messages[0], "content", { value: "mutated" });
+  Object.defineProperty(entries[0], "parentId", { value: "mutated" });
+  assert.deepEqual(manager.buildSessionContext().messages.map(contextText), ["root", "selected"]);
+  assert.equal(manager.buildContextEntries()[0]?.parentId, null);
+});
+
 test("tree projections scan label commits once instead of once per node", () => {
   const manager = SessionManager.inMemory("/tmp", { id: "tree-label-index" });
   for (let index = 0; index < 12; index += 1) {
@@ -670,11 +701,12 @@ test("custom state stays out of context while custom and branch summaries enter 
   assert.deepEqual(manager.buildSessionContext().messages.map(contextText), ["root", "custom context"]);
 });
 
-test("an unterminated tail is discarded before the next durable commit", async () => {
+test("legacy unterminated tails are excluded from SQLite copies without modifying the source", async () => {
   const root = await temporaryRoot();
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "tail" });
+  const manager = SessionManager.inMemory(root, { id: "tail" });
   manager.appendMessage(message("user", "committed"));
-  const file = manager.getSessionFile()!;
+  const file = join(root, "tail.jsonl");
+  writeLegacy(manager, file);
   manager.closeV4Store();
   appendFileSync(file, JSON.stringify({
     record: "commit",
@@ -686,16 +718,17 @@ test("an unterminated tail is discarded before the next durable commit", async (
   const dirtyBytes = statSync(file).size;
 
   const reopened = SessionManager.open(file);
-  assert.ok(statSync(file).size < dirtyBytes);
+  assert.equal(statSync(file).size, dirtyBytes);
   reopened.appendMessage(message("assistant", "continued"));
-  assert.equal(readSessionV4FileSync(file).state.sequence, 2);
+  assert.equal(reopened.getV4State().sequence, 2);
   assert.deepEqual(reopened.buildSessionContext().messages.map(contextText), ["committed", "continued"]);
 });
 
 test("a malformed LF-complete record is rejected without modifying bytes", async () => {
   const root = await temporaryRoot();
-  const manager = SessionManager.create(root, join(root, "sessions"), { id: "malformed" });
-  const file = manager.getSessionFile()!;
+  const manager = SessionManager.inMemory(root, { id: "malformed" });
+  const file = join(root, "malformed.jsonl");
+  writeLegacy(manager, file);
   manager.closeV4Store();
   appendFileSync(file, "{broken}\n");
   const before = readFileSync(file);
@@ -827,7 +860,7 @@ test("default session buckets isolate canonical workspaces with colliding readab
     assert.equal(continued.getCwd(), resolve(workspaceB));
     assert.equal(continued.getSessionDir(), directoryB);
     assert.equal(
-      readSessionV4FileSync(continued.getSessionFile()!).state.header.cwd,
+      continued.getV4State().header.cwd,
       resolve(workspaceB),
     );
   } finally {
@@ -940,7 +973,7 @@ test("forkFrom removes its new journal and writer lease when copying fails", asy
   }
 
   assert.deepEqual(
-    readdirSync(sessions).filter((name) => name.endsWith(".jsonl")).sort(),
+    readdirSync(sessions).filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite")).sort(),
     [basename(sourceFile), basename(preservedFile)].sort(),
   );
   assert.deepEqual(
@@ -1010,8 +1043,10 @@ test("default directory identity and explicit paths remain deterministic", async
   const lower = "c:/repo/workspace";
   assert.equal(getDefaultSessionDir(upper, join(root, "agent")), getDefaultSessionDir(lower, join(root, "agent")));
 
-  const explicit = join(root, "chosen.jsonl");
-  const manager = SessionManager.open(explicit, root, root);
+  const explicit = join(root, "chosen.sqlite");
+  assert.throws(() => SessionManager.open(explicit, root, root), /does not exist/u);
+  assert.equal(existsSync(explicit), false);
+  const manager = SessionManager.create(root, root, { id: "chosen" });
   assert.equal(manager.getSessionFile(), explicit);
   assert.equal(existsSync(explicit), true);
   assert.equal(manager.getCwd(), resolve(root));
@@ -1039,8 +1074,9 @@ test("continueRecent skips a newer journal whose committed tail is invalid", asy
   const valid = SessionManager.create(root, sessions, { id: "valid-recent" });
   const validFile = valid.getSessionFile()!;
   valid.closeV4Store();
-  const invalid = SessionManager.create(root, sessions, { id: "invalid-recent" });
-  const invalidFile = invalid.getSessionFile()!;
+  const invalid = SessionManager.inMemory(root, { id: "invalid-recent" });
+  const invalidFile = join(sessions, "invalid-recent.jsonl");
+  writeLegacy(invalid, invalidFile);
   invalid.closeV4Store();
   appendFileSync(invalidFile, "{invalid}\n");
 

@@ -1,4 +1,5 @@
 import { optionalProperties } from "../core/optional-properties.js";
+import { inspectAgentSession } from "../service/session-inspection.js";
 import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { AgentMessage } from "@ohm/kernel";
@@ -10,21 +11,20 @@ import { canonicalPublicImages } from "../core/public-image-content.js";
 import { errorMessage as safeErrorMessage } from "../core/errors.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
 import { BOOLEAN_VALUE, FUNCTION_VALUE, STRING_VALUE } from "../core/value-schemas.js";
-import type { ExtensionRunner } from "../extensions/compat-runtime.js";
-import { validateExtensionWireServiceRequest } from "../extensions/wire-services.js";
+import type { PluginRunner } from "../plugins/compat-runtime.js";
+import { validatePluginWireServiceRequest } from "../plugins/wire-services.js";
 import {
   canonicalSessionEntryId,
   type SessionEntry as PublicSessionEntry,
   type SessionTreeNode as PublicSessionTreeNode,
-} from "../extensions/session-contract.js";
+} from "../plugins/session-contract.js";
 import type {
   AgentSession,
-  AgentSessionEvent,
   AgentSessionPromptOptions,
 } from "../service/agent-session.js";
 import type { AgentSessionRuntime } from "../service/agent-session-runtime.js";
 import type { ProviderModel } from "../providers/models.js";
-import { extensionModel } from "../extensions/model-boundary.js";
+import { pluginModel } from "../plugins/model-boundary.js";
 import {
   MAX_TOOL_RESULT_CONTENT_BYTES,
   MAX_TOOL_RESULT_METADATA_BYTES,
@@ -38,6 +38,7 @@ import {
 } from "./portable-presentation.js";
 import { MAX_RPC_LINE_BYTES, type RpcUnknownCommand } from "./rpc.js";
 import { boundedRpcErrorMessage } from "./rpc-error.js";
+import { projectSessionWireEvent, type SessionWireEvent } from "./session-wire.js";
 import type {
   RpcBashExecutionUpdate,
   RpcCommand,
@@ -100,6 +101,19 @@ const SET_THINKING_LEVEL_COMMAND_VALUE = Type.Object({
     Type.Literal("xhigh"),
     Type.Literal("max"),
   ]),
+}, { additionalProperties: true });
+const CYCLE_MODEL_COMMAND_VALUE = Type.Object({
+  type: Type.Literal("cycle_model"),
+  direction: Type.Optional(Type.Union([Type.Literal("forward"), Type.Literal("backward")])),
+  persist: Type.Optional(Type.Boolean()),
+  models: Type.Optional(Type.Array(Type.Object({
+    selector: Type.String({ maxLength: 641 }),
+    thinkingLevel: Type.Optional(SET_THINKING_LEVEL_COMMAND_VALUE.properties.level),
+  }), { maxItems: 1_024 })),
+}, { additionalProperties: true });
+const CYCLE_THINKING_LEVEL_COMMAND_VALUE = Type.Object({
+  type: Type.Literal("cycle_thinking_level"),
+  persist: Type.Optional(Type.Boolean()),
 }, { additionalProperties: true });
 const QUEUE_MODE_COMMAND_VALUE = Type.Object({
   type: Type.Union([Type.Literal("set_steering_mode"), Type.Literal("set_follow_up_mode")]),
@@ -168,7 +182,7 @@ const PRESENTATION_ACTION_COMMAND_VALUE = Type.Object({
   actionId: Type.String(),
   input: Type.Unknown(),
 }, { additionalProperties: false });
-const EXTENSION_WIRE_REQUEST_COMMAND_VALUE = Type.Object({
+const PLUGIN_WIRE_REQUEST_COMMAND_VALUE = Type.Object({
   type: Type.Literal("extension_wire_request"),
   id: Type.Optional(Type.String()),
   request: Type.Unknown(),
@@ -467,7 +481,7 @@ export interface RpcSessionRuntime {
   setBeforeSessionInvalidate(callback?: () => void): void;
 }
 
-type RpcOutputRecord = RpcResponse | RpcBashExecutionUpdate | AgentSessionEvent | PortablePresentationEvent;
+type RpcOutputRecord = RpcResponse | RpcBashExecutionUpdate | SessionWireEvent | PortablePresentationEvent;
 type RpcSuccessResponse = Extract<RpcResponse, { success: true }>;
 type RpcResponseData = RpcSuccessResponse extends infer Response
   ? Response extends { data: infer Data }
@@ -512,23 +526,23 @@ function failure<ErrorType>(id: string | undefined, command: string, error: Erro
   };
 }
 
-function publicModel(session: AgentSession, model: ProviderModel): ReturnType<typeof extensionModel> {
+function publicModel(session: AgentSession, model: ProviderModel): ReturnType<typeof pluginModel> {
   try {
-    return session.modelRuntime.getModel(model.provider, model.id) ?? extensionModel(model);
+    return session.modelRuntime.getModel(model.provider, model.id) ?? pluginModel(model);
   } catch {
-    return extensionModel(model);
+    return pluginModel(model);
   }
 }
 
-async function availablePublicModels(session: AgentSession): Promise<ReturnType<typeof extensionModel>[]> {
+async function availablePublicModels(session: AgentSession): Promise<ReturnType<typeof pluginModel>[]> {
   try {
     return [...await session.modelRuntime.getAvailable()];
   } catch {
-    return (await session.modelRegistry.getAvailable()).map((model) => extensionModel(model));
+    return (await session.modelRegistry.getAvailable()).map((model) => pluginModel(model));
   }
 }
 
-function extensionCommands(runner: ExtensionRunner): RpcSlashCommand[] {
+function extensionCommands(runner: PluginRunner): RpcSlashCommand[] {
   return runner.getRegisteredCommands().map((command) => ({
     name: command.invocationName,
     ...optionalProperties(command.description === undefined ? undefined : { description: command.description }),
@@ -709,9 +723,14 @@ export class RpcRuntimeDispatcher {
             );
           });
         }
-        case "cycle_model":
+        case "cycle_model": {
+          const selected = Value.Parse(CYCLE_MODEL_COMMAND_VALUE, command);
           return await this.#runModelControl(async () =>
-            success(id, "cycle_model", await this.#runtime.session.cycleModel() ?? null));
+            success(id, "cycle_model", await this.#runtime.session.cycleModel(selected.direction ?? "forward", {
+              ...optionalProperties(selected.models === undefined ? undefined : { models: selected.models }),
+              ...optionalProperties(selected.persist === undefined ? undefined : { persist: selected.persist }),
+            }) ?? null));
+        }
         case "get_available_models":
           return success(id, "get_available_models", {
             models: await availablePublicModels(this.#runtime.session),
@@ -722,7 +741,10 @@ export class RpcRuntimeDispatcher {
           return success(id, "set_thinking_level");
         }
         case "cycle_thinking_level": {
-          const level = this.#runtime.session.cycleThinkingLevel();
+          const selected = Value.Parse(CYCLE_THINKING_LEVEL_COMMAND_VALUE, command);
+          const level = this.#runtime.session.cycleThinkingLevel(
+            selected.persist === undefined ? undefined : { persist: selected.persist },
+          );
           return success(id, "cycle_thinking_level", level === undefined ? null : { level });
         }
         case "get_available_thinking_levels":
@@ -816,10 +838,10 @@ export class RpcRuntimeDispatcher {
             const session = this.#runtime.session;
             const excludeFromContext = selected.excludeFromContext === true;
             const interceptsUserShell = (
-              session.hasExtensionHandlers("user_bash") || session.hasExtensionHandlers("before_user_shell")
+              session.hasPluginHandlers("user_bash") || session.hasPluginHandlers("before_user_shell")
             );
             const intercepted = interceptsUserShell
-              ? await session.extensionRunner.emitUserBash({
+              ? await session.pluginRunner.emitUserBash({
                   type: "user_bash",
                   command: selected.command,
                   excludeFromContext,
@@ -861,8 +883,8 @@ export class RpcRuntimeDispatcher {
                 ...optionalProperties(executionCwd === session.cwd ? undefined : { cwd: executionCwd }),
               });
             }
-            const runtimeHost = session.hasExtensionHandlers("user_shell") || session.hasExtensionHandlers("event")
-              ? session.extensionRunner.getRuntimeHost()
+            const runtimeHost = session.hasPluginHandlers("user_shell") || session.hasPluginHandlers("event")
+              ? session.pluginRunner.getRuntimeHost()
               : undefined;
             if (runtimeHost !== undefined) {
               await runtimeHost.dispatch("event", {
@@ -897,6 +919,8 @@ export class RpcRuntimeDispatcher {
           return success(id, "abort_bash");
         case "get_session_stats":
           return success(id, "get_session_stats", this.#runtime.session.getSessionStats());
+        case "get_inspection":
+          return success(id, "get_inspection", inspectAgentSession(this.#runtime.session));
         case "export_html": {
           const selected = Value.Parse(EXPORT_HTML_COMMAND_VALUE, command);
           return success(id, "export_html", { path: await this.#runtime.session.exportToHtml(selected.outputPath) });
@@ -1058,7 +1082,7 @@ export class RpcRuntimeDispatcher {
         case "get_commands": {
           const session = this.#runtime.session;
           const commands: RpcSlashCommand[] = [
-            ...extensionCommands(session.extensionRunner),
+            ...extensionCommands(session.pluginRunner),
             ...session.promptTemplates.map((template) => ({
               name: template.name,
               ...optionalProperties(template.description === undefined ? undefined : { description: template.description }),
@@ -1101,15 +1125,15 @@ export class RpcRuntimeDispatcher {
           });
         case "get_extension_wire_services":
           return success(id, "get_extension_wire_services", {
-            services: this.#runtime.session.listExtensionWireServices(),
+            services: this.#runtime.session.listPluginWireServices(),
           });
         case "extension_wire_request": {
-          const selected = Value.Parse(EXTENSION_WIRE_REQUEST_COMMAND_VALUE, command);
+          const selected = Value.Parse(PLUGIN_WIRE_REQUEST_COMMAND_VALUE, command);
           return success(
             id,
             "extension_wire_request",
-            await this.#runtime.session.invokeExtensionWireService(
-              validateExtensionWireServiceRequest(selected.request),
+            await this.#runtime.session.invokePluginWireService(
+              validatePluginWireServiceRequest(selected.request),
             ),
           );
         }
@@ -1163,7 +1187,7 @@ export class RpcRuntimeDispatcher {
     this.#unsubscribe = session.subscribe((event) => {
       // RPC owns a separately bounded and command-correlated bash stream.
       if (event.type === "bash_execution_update") return;
-      return this.#output(event);
+      return this.#output(projectSessionWireEvent(event));
     });
   }
 

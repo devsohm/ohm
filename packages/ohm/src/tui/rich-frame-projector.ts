@@ -24,12 +24,14 @@ import {
   type OhmTuiToolEntry,
   type OhmTuiTranscriptEntry,
 } from "./native-renderer/index.js";
+import { internalProjectOhmNativeTranscript } from "./native-renderer/view.js";
 import {
   createNativeOverlaySnapshot,
   projectNativeOverlay,
 } from "./native-renderer/overlay.js";
 import {
   projectRuntimeUiBlock,
+  projectTuiActivity,
   projectTuiRuntimeSurfaces,
   projectTuiRawImageReservations,
   type TuiRuntimeOverlayProjection,
@@ -54,6 +56,7 @@ import {
   INTERNAL_TUI_FRAME_PROJECTOR,
   INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
   INTERNAL_TUI_PERSISTENT_POINTER_MAP,
+  INTERNAL_TUI_OVERLAY_BOUNDS,
   INTERNAL_TUI_PERSISTENT_POINTER_SOURCE,
   INTERNAL_TUI_TOOL_DETAIL_CACHE,
   INTERNAL_TUI_TRANSCRIPT_SEARCH,
@@ -64,7 +67,7 @@ import {
   type TuiProjectedFrame,
 } from "./frame-projector.js";
 import { internalToolRenderSlotsForEntry } from "./layout.js";
-import { elapsedText } from "./model.js";
+import { turnPrefix } from "./turn-layout.js";
 import {
   MAX_TERMINAL_IMAGE_AGGREGATE_BYTES,
   MAX_TERMINAL_IMAGE_COUNT,
@@ -235,26 +238,6 @@ function connection(view: TuiViewState): OhmTuiSnapshot["status"]["connection"] 
   return view.context.active === true ? "connecting" : "offline";
 }
 
-function activity(view: TuiViewState, unicode: boolean): string | undefined {
-  const current = view.context.activity;
-  if (current === undefined || view.context.active !== true || view.context.workingVisible === false) return undefined;
-  const elapsed = Number.isFinite(current.startedAt)
-    ? elapsedText(Math.max(0, Date.now() - current.startedAt))
-    : undefined;
-  const retryDelay = current.retryAt === undefined
-    ? undefined
-    : `${(Math.max(0, current.retryAt - Date.now()) / 1_000).toFixed(1)}s`;
-  const retry = retryDelay === undefined
-    ? undefined
-    : `${current.attempt === undefined ? "retry" : `attempt ${current.attempt}`} in ${retryDelay}`;
-  return [
-    current.phase,
-    elapsed,
-    retry,
-    current.cancellable === true ? "Esc to cancel" : undefined,
-  ].filter((value): value is string => value !== undefined && value !== "").join(unicode ? " · " : " | ");
-}
-
 function compactionActive(view: TuiViewState): boolean {
   if (view.context.active !== true) return false;
   const phase = view.context.activity?.phase;
@@ -315,7 +298,7 @@ function snapshotFor(request: Readonly<TuiFrameProjectionRequest>): OhmTuiSnapsh
   });
   const usage = view.usage;
   const total = usage?.total;
-  const currentActivity = activity(view, unicode);
+  const currentActivity = projectTuiActivity(view, unicode);
   return {
     transcript,
     queuedMessages,
@@ -1064,7 +1047,7 @@ function nativeTranscriptProjection(
   transcript: readonly OhmTuiTranscriptEntry[],
   columns: number,
 ): LocalTranscriptProjection {
-  const chunkFrame = projectOhmNativeFrame({
+  const lines = internalProjectOhmNativeTranscript({
     snapshot: normalizeOhmTuiSnapshot({ ...shell, transcript, queuedMessages: [] }),
     columns,
     thinkingExpanded: request.thinkingExpanded,
@@ -1076,7 +1059,7 @@ function nativeTranscriptProjection(
     unicode: request.theme.unicode,
   }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
   return {
-    lines: trimExactEmptyLines(chunkFrame.text.split("\n").slice(0, chunkFrame.composer.top)).lines,
+    lines: trimExactEmptyLines(lines).lines,
     images: [],
   };
 }
@@ -1156,10 +1139,10 @@ function nativeReasoningProjection(
       });
       if (isStringValue(selected)) transformed = selected;
     } catch {
-      // Extension display transformations cannot replace the retained reasoning text.
+      // Plugin display transformations cannot replace the retained reasoning text.
     }
   }
-  const headerFrame = projectOhmNativeFrame({
+  const header = internalProjectOhmNativeTranscript({
     snapshot: normalizeOhmTuiSnapshot({
       ...shell,
       transcript: [{
@@ -1179,7 +1162,7 @@ function nativeReasoningProjection(
     theme: request.theme,
     unicode: request.theme.unicode,
   }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
-  const lines = trimExactEmptyLines(headerFrame.text.split("\n").slice(0, headerFrame.composer.top)).lines;
+  const lines = trimExactEmptyLines(header).lines;
   if (!expanded) return { lines, images: [] };
   try {
     const {
@@ -1200,11 +1183,12 @@ function nativeReasoningProjection(
       theme: request.theme,
     });
     const bodyLines = trimEmptyRows(body.block.lines);
-    lines.push(...bodyLines.map((line) => `${" ".repeat(indent)}${line}`));
+    const gutter = turnPrefix("assistant", contentWidth, request.theme.unicode);
+    lines.push(...bodyLines.map((line, index) => `${" ".repeat(indent)}${line.replace(index === 0 ? gutter : " ".repeat(gutter.length), "")}`));
     return { lines, images: [] };
   } catch {
     const fallback = projectTranscript(entries, false);
-    const frame = projectOhmNativeFrame({
+    const fallbackLines = internalProjectOhmNativeTranscript({
       snapshot: normalizeOhmTuiSnapshot({ ...shell, transcript: fallback, queuedMessages: [] }),
       columns,
       thinkingExpanded: expanded,
@@ -1215,7 +1199,7 @@ function nativeReasoningProjection(
       unicode: request.theme.unicode,
     }, request[INTERNAL_TUI_TOOL_DETAIL_CACHE]);
     return {
-      lines: trimExactEmptyLines(frame.text.split("\n").slice(0, frame.composer.top)).lines,
+      lines: trimExactEmptyLines(fallbackLines).lines,
       images: [],
     };
   }
@@ -1259,7 +1243,7 @@ function nativeChunkProjection(
   });
   if (custom.failed) {
     appendLocalProjection(selected, {
-      lines: [stripAnsi(truncateToWidth("… Extension tool renderer unavailable", columns))],
+      lines: [stripAnsi(truncateToWidth("… Plugin tool renderer unavailable", columns))],
       images: [],
     });
   }
@@ -1624,7 +1608,7 @@ function slotProjection(slot: TuiRuntimeSurfaceSlot, columns: number, unicode = 
   }));
   const omitted = slot.omittedLines === 0
     ? []
-    : [stripAnsi(truncateToWidth(`${unicode ? "…" : "..."} ${slot.omittedLines} earlier extension rows`, columns))];
+    : [stripAnsi(truncateToWidth(`${unicode ? "…" : "..."} ${slot.omittedLines} earlier plugin rows`, columns))];
   return {
     lines: [...omitted, ...content.map(({ line }) => line)],
     pointerRows: [...omitted.map(() => undefined), ...content.map(({ pointer }) => pointer)],
@@ -1650,7 +1634,7 @@ function boundedSlotProjection(
   const omittedRows = Math.max(0, slot.omittedLines + contentLines.length - visibleLines.length);
   return {
     lines: [stripAnsi(truncateToWidth(sanitizeTerminalText(
-      `${unicode ? "…" : "..."} ${omittedRows} earlier extension rows`,
+      `${unicode ? "…" : "..."} ${omittedRows} earlier plugin rows`,
     ), columns)), ...visibleLines],
     pointerRows: [undefined, ...visiblePointers],
   };
@@ -2034,6 +2018,7 @@ function transcriptSearchPresentation(
   columns: number,
   theme: TuiFrameProjectionRequest["theme"],
   unicode: boolean,
+  status?: string,
 ): TranscriptSearchPresentation {
   const width = Math.max(1, columns);
   const symbols = unicode ? { search: "?", previous: "‹", next: "›", close: "×" }
@@ -2044,9 +2029,9 @@ function transcriptSearchPresentation(
     : `${symbols.previous}${symbols.next}${symbols.close}`;
   const controlWidth = cellWidth(controls);
   const prefix = width >= controlWidth + 3 ? `${symbols.search} ` : "";
-  const count = selectedMatch === undefined
+  const count = status ?? (selectedMatch === undefined
     ? `0/${result.matches.length}${result.truncated ? "+" : ""}`
-    : `${selectedMatch + 1}/${result.matches.length}${result.truncated ? "+" : ""}`;
+    : `${selectedMatch + 1}/${result.matches.length}${result.truncated ? "+" : ""}`);
   const countText = width - cellWidth(prefix) - controlWidth >= cellWidth(count) + 3 ? ` ${count} ` : "";
   const queryWidth = Math.max(0, width - cellWidth(prefix) - cellWidth(countText) - controlWidth);
   const window = queryWidth === 0
@@ -2105,6 +2090,17 @@ function withRichSurfaces(
   } catch {
     return undefined;
   }
+  if (surfaces.header.replacement === false
+    && (view.context.workspace !== undefined || view.context.sessionName !== undefined || view.context.releaseVersion !== undefined)) {
+    const clean = (value: string) => sanitizeTerminalText(value).replaceAll(/\s*\n\s*/gu, " ").trim();
+    const identity = ["ohm", view.context.workspace === undefined ? undefined : clean(view.context.workspace)].filter(Boolean).join("  ");
+    const session = clean(view.context.sessionName ?? "");
+    const right = truncateToWidth(session, Math.floor(size.columns / 3));
+    const left = truncateToWidth(identity, Math.max(1, size.columns - (right === "" ? 0 : visibleWidth(right) + 2)));
+    const text = `${left}${right === "" ? "" : `${" ".repeat(Math.max(2, size.columns - visibleWidth(left) - visibleWidth(right)))}${right}`}`;
+    const masthead = projectRuntimeUiBlock({ lines: [{ spans: [{ text, role: "muted" }] }] }, { columns: size.columns, maxLines: 1, theme });
+    surfaces = { ...surfaces, header: { ...surfaces.header, blocks: [masthead, ...surfaces.header.blocks] } };
+  }
   const base = frame.text === "" ? [] : frame.text.split("\n");
   let shellMain = base.slice(0, bounds.top);
   const baseEditor = base.slice(bounds.top, bounds.bottom);
@@ -2142,6 +2138,7 @@ function withRichSurfaces(
         size.columns,
         theme,
         unicode,
+        view.transcriptSearch.status,
       );
   if (
     transcriptContent !== undefined
@@ -2332,7 +2329,7 @@ function withRichSurfaces(
       if (runtimeRows !== undefined && transcriptStart > 0 && transcriptViewportRows > 0) {
         const visibleRows = Math.max(0, transcriptViewportRows - 1);
         transcriptStart = Math.max(0, transcriptEnd - visibleRows);
-        const marker = `${unicode ? "…" : "..."} ${transcriptStart} earlier extension rows`;
+        const marker = `${unicode ? "…" : "..."} ${transcriptStart} earlier plugin rows`;
         selected = [
           stripAnsi(truncateToWidth(sanitizeTerminalText(marker), size.columns)),
           ...runtimeRows.slice(transcriptStart, transcriptEnd),
@@ -2513,6 +2510,18 @@ function withRichSurfaces(
   const selected: RichProjectedFrame = {
     text: lines.join("\n"),
     cursor: selectedCursor,
+    ...optionalProperties(surfaces.overlays.length === 0 ? undefined : {
+      [INTERNAL_TUI_OVERLAY_BOUNDS]: new Map([
+        ...(view.runtimeOverlays ?? []),
+        ...(view.runtimeOverlay === undefined ? [] : [view.runtimeOverlay]),
+        ...(view.rawRuntimeOverlays ?? []),
+      ].flatMap((source, index) => {
+        const bounds = surfaces.overlays[index];
+        return bounds === undefined ? [] : [[source.block, {
+          row: bounds.row, column: bounds.column, width: bounds.width, height: bounds.height,
+        }] as const];
+      })),
+    }),
     ...optionalProperties(images.length === 0 ? undefined : { images }),
     ...optionalProperties(navigation === undefined ? undefined : { transcriptNavigation: navigation }),
     ...optionalProperties(transcriptContent === undefined || navigation === undefined ? undefined : {
@@ -2545,7 +2554,7 @@ function coreSurfaceView(view: TuiViewState): TuiViewState {
   delete context.extensionFooters;
   delete context.widgets;
   delete context.workingMessage;
-  context.extensionStatus = "Extension UI unavailable; core view preserved";
+  context.extensionStatus = "Plugin UI unavailable; core view preserved";
   for (const key of [
     "runtimeHeaderComponents",
     "runtimeFooterComponents",
@@ -2705,7 +2714,7 @@ function projectRichRecoveryFrame(request: Readonly<TuiFrameProjectionRequest>):
             id: "rich-recovery:notice",
             kind: "notice",
             tone: "warning",
-            text: "Display extension unavailable; core view preserved",
+            text: "Display plugin unavailable; core view preserved",
           },
         ],
       }),

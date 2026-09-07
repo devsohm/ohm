@@ -12,7 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 
@@ -50,6 +50,7 @@ import {
 import { SESSION_EXPORT_CLIENT } from "./session-export-client.js";
 import { SESSION_EXPORT_STYLE } from "./session-export-style.js";
 import { MAX_SESSION_FILE_BYTES, SessionManager, sessionEntryToV4Node } from "./session-manager.js";
+import { isSqliteSessionFile } from "./sqlite-session-storage.js";
 import {
   CURRENT_SESSION_VERSION,
   type SessionEntry,
@@ -303,19 +304,8 @@ export function buildSessionExportTree(
 }
 
 function serializedSession(manager: SessionManager): string {
-  const source = manager.getSessionFile();
-  if (source !== undefined && existsSync(source)) return readSessionExportSourceSync(source).toString("utf8");
-  const header = manager.getHeader();
-  const entries = manager.getEntries();
-  const name = manager.getSessionName();
-  return serializeSessionRecords(header, entries, {
-    leafId: manager.getLeafId(),
-    ...optionalProperties(name === undefined ? undefined : { name }),
-    labels: new Map(entries.flatMap((entry) => {
-      const label = manager.getLabel(entry.id);
-      return label === undefined ? [] : [[entry.id, label] as const];
-    })),
-  });
+  const state = manager.getV4State();
+  return [state.header, ...state.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n";
 }
 
 function projectionHeader(
@@ -969,10 +959,14 @@ export function exportSessionFile(
 ): string {
   const input = resolve(inputPath);
   if (!existsSync(input)) throw new Error(`File not found: ${input}`);
-  const sourceBytes = readSessionExportSourceSync(input);
-  const manager = SessionManager.openSnapshotBytes(input, sourceBytes);
-  const sourceJsonl = sourceBytes.toString("utf8");
-  const output = resolve(outputPath ?? `ohm-session-${basename(input, ".jsonl")}.html`);
-  writePrivateExportFileSync(output, renderSessionHtml(manager, { ...options, sourceJsonl }));
-  return output;
+  const sourceBytes = isSqliteSessionFile(input) ? undefined : readSessionExportSourceSync(input);
+  const manager = sourceBytes === undefined
+    ? SessionManager.open(input, undefined, undefined, { readOnly: true })
+    : SessionManager.openSnapshotBytes(input, sourceBytes);
+  try {
+    const sourceJsonl = sourceBytes?.toString("utf8") ?? serializedSession(manager);
+    const output = resolve(outputPath ?? `ohm-session-${basename(input, extname(input))}.html`);
+    writePrivateExportFileSync(output, renderSessionHtml(manager, { ...options, sourceJsonl }));
+    return output;
+  } finally { manager.closeV4Store(); }
 }

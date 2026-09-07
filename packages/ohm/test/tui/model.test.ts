@@ -192,11 +192,12 @@ test("bulk replay produces the same rich transcript state as sequential event ap
   const sequential = new TuiModel(DEFAULT_TUI_LIMITS);
   const bulk = new TuiModel(DEFAULT_TUI_LIMITS);
 
-  for (const event of events) sequential.apply(event);
-  bulk.applyAll(events);
-
-  assert.deepEqual(bulk.entries, sequential.entries);
-  assert.deepEqual(bulk.committableEntries(), sequential.committableEntries());
+  for (const batch of [events.slice(0, 9), events.slice(9)]) {
+    for (const event of batch) sequential.apply(event);
+    bulk.applyAll(batch);
+    assert.deepEqual(bulk.entries, sequential.entries);
+    assert.deepEqual(bulk.committableEntries(), sequential.committableEntries());
+  }
   assert.deepEqual(bulk.context, sequential.context);
   assert.deepEqual(bulk.usage, sequential.usage);
   assert.equal(bulk.notice, sequential.notice);

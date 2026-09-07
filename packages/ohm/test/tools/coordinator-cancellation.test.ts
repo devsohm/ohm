@@ -183,7 +183,9 @@ test("an invocation cancelled before scheduling never reaches the dispatch bound
 
 test("an aborted non-cooperative tool retains its batch until the raw effect settles", async (t) => {
   const entered = deferred<void>();
+  const peerEntered = deferred<void>();
   const releaseExecution = deferred<void>();
+  t.after(() => releaseExecution.resolve());
   const controller = new AbortController();
   let durableResult: string | undefined;
   const hung: HarnessTool = {
@@ -202,17 +204,31 @@ test("an aborted non-cooperative tool retains its batch until the raw effect set
     resources() { return []; },
     async execute() { return { content: "recovered", isError: false }; },
   };
+  const cooperative: HarnessTool = {
+    definition: { name: "cooperative", description: "honors cancellation", inputSchema: { type: "object" } },
+    validate() {},
+    resources() { return []; },
+    async execute(_input, selectedContext) {
+      peerEntered.resolve();
+      return await new Promise<ToolResult>((_resolve, reject) => {
+        selectedContext.signal.addEventListener("abort", () => reject(selectedContext.signal.reason), { once: true });
+      });
+    },
+  };
   const coordinator = new ToolCoordinator(
-    new ToolRegistry([hung, recovery]),
+    new ToolRegistry([hung, recovery, cooperative]),
     {},
     undefined,
     {},
-    { activeTools: ["hung"] },
+    { activeTools: ["hung", "cooperative"] },
   );
   const running = coordinator.execute(
-    [{ callId: "hung", name: "hung", input: {}, index: 0 }],
+    [
+      { callId: "hung", name: "hung", input: {}, index: 0 },
+      { callId: "cooperative", name: "cooperative", input: {}, index: 1 },
+    ],
     await context(t, controller.signal),
-    { completed(entry) { durableResult = entry.result.content; } },
+    { completed(entry) { if (entry.invocation.name === "hung") durableResult = entry.result.content; } },
   );
   let settled = false;
   void running.then(
@@ -221,6 +237,7 @@ test("an aborted non-cooperative tool retains its batch until the raw effect set
   );
 
   await within(entered.promise, "hung tool entry");
+  await within(peerEntered.promise, "cooperative peer entry");
   assert.deepEqual(coordinator.queueActiveTools(["recovery"]), ["recovery"]);
   assert.throws(() => coordinator.turnSnapshot(), /while a tool batch is executing/u);
   const reason = new Error("cancel hung tool");

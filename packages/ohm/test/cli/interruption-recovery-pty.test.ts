@@ -77,10 +77,10 @@ await main([
   "--model", "interrupt-model",
   "--approve",
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "interrupt-recovery-fixture",
     factory(ohm) {
       ohm.registerTool({

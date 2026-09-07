@@ -23,7 +23,7 @@ const DEFER = "defer" as const;
 const DISPATCH = "dispatch" as const;
 const INTERRUPT = "interrupt" as const;
 
-export const REFRESH_RESOURCE_SUMMARY = "keyboard mappings, extensions, skills, prompt templates, themes, and instruction files";
+export const REFRESH_RESOURCE_SUMMARY = "plugins, keyboard mappings, and instruction files";
 
 /** Single source of truth for built-in interactive command names and presentation. */
 export const INTERACTIVE_COMMANDS: readonly InteractiveCommandDefinition[] = [
@@ -40,6 +40,8 @@ export const INTERACTIVE_COMMANDS: readonly InteractiveCommandDefinition[] = [
   { name: "session", syntax: "session", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "session", label: "Show session information", detail: "/session", value: "/session" } },
   { name: "context", syntax: "context", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "context", label: "Show model context provenance", detail: "/context", value: "/context" } },
   { name: "resources", syntax: "resources", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "resources", label: "Show loaded resources", detail: "/resources", value: "/resources" } },
+  { name: "inspect", syntax: "inspect", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "inspect", label: "Inspect runtime, context, and activity", detail: "/inspect", value: "/inspect" } },
+  { name: "actions", syntax: "actions", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "actions", label: "Run a plugin action", detail: "/actions", value: "/actions" } },
   { name: "hotkeys", syntax: "hotkeys", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "hotkeys", label: "Show keyboard shortcuts", detail: "/hotkeys", value: "/hotkeys" } },
   { name: "atlas", syntax: "atlas", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "atlas", label: "Explore current journal branches", detail: "/atlas", value: "/atlas" } },
   { name: "trust", syntax: "trust", activePolicy: DISPATCH, hidden: false, help: true, palette: { id: "trust", label: "Save project trust", detail: "/trust", value: "/trust" } },

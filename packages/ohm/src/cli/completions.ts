@@ -4,7 +4,6 @@ import {
   AGENT_CLI_OPTIONS,
   CLI_COMPLETION_SHELLS,
   CLI_HELP_TOPICS,
-  EXTENSION_AUTHOR_COMMANDS,
   MANAGEMENT_CLI_COMMANDS,
   MANAGEMENT_CLI_OPTIONS,
   type CliOptionMetadata,
@@ -15,9 +14,9 @@ import type { ManagementArguments } from "./management-args.js";
 export type CompletionShell = (typeof CLI_COMPLETION_SHELLS)[number];
 
 const HELP_TOKENS = ["--help", "-h"] as const;
-const agentOptions: readonly CliOptionMetadata[] = AGENT_CLI_OPTIONS;
-const managementOptionMetadata: readonly CliOptionMetadata[] = MANAGEMENT_CLI_OPTIONS;
-const managementCommands: readonly ManagementCliCommandMetadata[] = MANAGEMENT_CLI_COMMANDS;
+const agentOptions: readonly CliOptionMetadata[] = AGENT_CLI_OPTIONS.filter((option: CliOptionMetadata) => !option.hidden);
+const managementOptionMetadata: readonly CliOptionMetadata[] = MANAGEMENT_CLI_OPTIONS.filter((option: CliOptionMetadata) => !option.hidden);
+const managementCommands: readonly ManagementCliCommandMetadata[] = MANAGEMENT_CLI_COMMANDS.filter((command: ManagementCliCommandMetadata) => !command.hidden);
 const agentCommandNames: ReadonlySet<string> = new Set(AGENT_CLI_COMMANDS);
 
 function shellQuote(value: string): string {
@@ -38,10 +37,12 @@ function managementOptions(commandName: string): CliOptionMetadata[] {
 }
 
 function commandSuggestions(commandName: string): string[] {
-  if (commandName === "help") return [...CLI_HELP_TOPICS];
-  if (agentCommandNames.has(commandName)) return optionTokens(AGENT_CLI_OPTIONS);
+  if (commandName === "help") return CLI_HELP_TOPICS.filter((topic) => !MANAGEMENT_CLI_COMMANDS.some(
+    (command: ManagementCliCommandMetadata) => command.name === topic && command.hidden,
+  ));
+  if (agentCommandNames.has(commandName)) return optionTokens(agentOptions);
   const command = managementCommands.find((candidate) => candidate.name === commandName);
-  if (command === undefined) return optionTokens(AGENT_CLI_OPTIONS);
+  if (command === undefined) return optionTokens(agentOptions);
   return [
     ...(command.subcommands ?? command.argumentValues ?? []),
     ...optionTokens(managementOptions(commandName)),
@@ -53,8 +54,8 @@ function topLevelSuggestions(): string[] {
   return [
     "help",
     ...AGENT_CLI_COMMANDS,
-    ...MANAGEMENT_CLI_COMMANDS.map((command) => command.name),
-    ...optionTokens(AGENT_CLI_OPTIONS),
+    ...managementCommands.map((command) => command.name),
+    ...optionTokens(agentOptions),
   ];
 }
 
@@ -128,16 +129,8 @@ function renderBashCompletion(): string {
     "  esac",
     "",
     "  case \"$command\" in",
-    `    ${shellQuote("extensions")})`,
-    "      if [[ \"${COMP_WORDS[2]-}\" == \"author\" ]]; then",
-    `        COMPREPLY=( $(compgen -W ${bashWords([...EXTENSION_AUTHOR_COMMANDS, ...optionTokens(managementOptions("extensions")), ...HELP_TOKENS])} -- "$cur") )`,
-    "      else",
-    `        COMPREPLY=( $(compgen -W ${bashWords(commandSuggestions("extensions"))} -- "$cur") )`,
-    "      fi",
-    "      ;;",
   );
-  for (const command of ["help", ...AGENT_CLI_COMMANDS, ...MANAGEMENT_CLI_COMMANDS.map((entry) => entry.name)]) {
-    if (command === "extensions") continue;
+  for (const command of ["help", ...AGENT_CLI_COMMANDS, ...managementCommands.map((entry) => entry.name)]) {
     lines.push(
       `    ${shellQuote(command)})`,
       `      COMPREPLY=( $(compgen -W ${bashWords(commandSuggestions(command))} -- "$cur") )`,
@@ -203,16 +196,8 @@ function renderZshCompletion(): string {
     "  esac",
     "",
     "  case \"$words[2]\" in",
-    `    ${shellQuote("extensions")})`,
-    "      if [[ \"$words[3]\" == \"author\" ]]; then",
-    `        values=(${zshArray([...EXTENSION_AUTHOR_COMMANDS, ...optionTokens(managementOptions("extensions")), ...HELP_TOKENS])})`,
-    "      else",
-    `        values=(${zshArray(commandSuggestions("extensions"))})`,
-    "      fi",
-    "      ;;",
   );
-  for (const command of ["help", ...AGENT_CLI_COMMANDS, ...MANAGEMENT_CLI_COMMANDS.map((entry) => entry.name)]) {
-    if (command === "extensions") continue;
+  for (const command of ["help", ...AGENT_CLI_COMMANDS, ...managementCommands.map((entry) => entry.name)]) {
     lines.push(
       `    ${shellQuote(command)})`,
       `      values=(${zshArray(commandSuggestions(command))})`,
@@ -247,15 +232,15 @@ function fishOption(option: CliOptionMetadata, condition: string): string {
 }
 
 function renderFishCompletion(): string {
-  const topCommands = ["help", ...AGENT_CLI_COMMANDS, ...MANAGEMENT_CLI_COMMANDS.map((command) => command.name)];
-  const managementAndHelp = ["help", ...MANAGEMENT_CLI_COMMANDS.map((command) => command.name)];
+  const topCommands = ["help", ...AGENT_CLI_COMMANDS, ...managementCommands.map((command) => command.name)];
+  const managementAndHelp = ["help", ...managementCommands.map((command) => command.name)];
   const agentCondition = `not __fish_seen_subcommand_from ${managementAndHelp.join(" ")}`;
   const lines = [
     "# fish completion for ohm",
     `complete -c ohm -f ${fishCondition(`not __fish_seen_subcommand_from ${topCommands.join(" ")}`)} -a ${shellQuote(topCommands.join(" "))}`,
     "complete -c ohm -s h -l help",
   ];
-  for (const option of AGENT_CLI_OPTIONS) {
+  for (const option of agentOptions) {
     if (option.name === "help") continue;
     lines.push(fishOption(option, agentCondition));
   }
@@ -267,10 +252,7 @@ function renderFishCompletion(): string {
       lines.push(`complete -c ohm -f ${fishCondition(condition)} -a ${shellQuote(suggestions.join(" "))}`);
     }
   }
-  lines.push(
-    `complete -c ohm -f ${fishCondition("__fish_seen_subcommand_from extensions; and __fish_seen_subcommand_from author")} -a ${shellQuote(EXTENSION_AUTHOR_COMMANDS.join(" "))}`,
-    "",
-  );
+  lines.push("");
   return lines.join("\n");
 }
 

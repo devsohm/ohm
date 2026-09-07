@@ -24,8 +24,8 @@ gh auth login
 Convert an existing durable session to HTML without starting a provider:
 
 ```sh
-ohm --export path/to/session.jsonl conversation.html
-ohm --export path/to/session.jsonl conversation.html --redact
+ohm --export path/to/session.sqlite conversation.html
+ohm --export path/to/session.sqlite conversation.html --redact
 ```
 
 Embedded callers can use:
@@ -34,6 +34,9 @@ Embedded callers can use:
 - `AgentSession.exportToJsonl(outputPath?, { redact })`
 - `renderSessionHtml()`
 - `exportSessionFile()`
+
+Existing JSONL files are also accepted by the standalone HTML exporter. Reading
+them for export does not create a SQLite copy or modify the source.
 
 File exports are published only after the complete output has been written to a
 private same-directory staging file. The final file is owner-readable (`0600`)
@@ -49,7 +52,7 @@ conversation branch. The result has:
 - one V4 header;
 - ordered V4 commit records;
 - preserved conversation node IDs, ancestry, timestamps, selections,
-  summaries, extension content, tool content, images, provider state, and
+  summaries, plugin content, tool content, images, provider state, and
   stored usage;
 - no open operation, pending queue, checkpoint, or tool-effect recovery state.
 
@@ -69,21 +72,22 @@ a stable snapshot boundary.
 The HTML viewer embeds its style, program, and session payload. It does not
 fetch scripts, stylesheets, fonts, or a rendering service.
 
-An ordinary HTML export from a durable file embeds the exact original V4
-journal bytes. A redacted HTML export embeds a regenerated, settled V4
-journal.
+An ordinary HTML export serializes every committed V4 record from one captured
+SQLite journal, including recovery state. Standalone export of a legacy JSONL
+file preserves its source bytes. A redacted HTML export embeds a regenerated,
+settled V4 journal.
 
 The viewer includes:
 
 - the complete exported conversation graph and selected path;
-- labels, summaries, compactions, model and thinking changes, and extension
+- labels, summaries, compactions, model and thinking changes, and plugin
   content;
 - user, assistant, system, shell, tool-call, and tool-result rows;
 - stored images, reasoning-shaped provider blocks, ANSI rows, and preserved
   whitespace;
 - historical token and recorded cost totals;
 - branch navigation, deep links, search, and filters;
-- the active system prompt, tool schemas, skills, and extension tool
+- the active system prompt, tool schemas, skills, and plugin tool
   presentation when available.
 
 The viewer evaluates every token counter independently. A successful metered
@@ -113,7 +117,7 @@ metadata where possible and uses the safe generic tool renderer.
 ## Security and privacy
 
 An export can contain source code, local paths, prompts, tool output, pasted
-credentials, personal data, and extension-authored content. Inspect it before
+credentials, personal data, and plugin-authored content. Inspect it before
 sharing.
 
 The viewer treats session values as data. It stores them in a base64-encoded

@@ -7,14 +7,14 @@ import { test } from "node:test";
 
 import type { EventEnvelope } from "../../src/core/events.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import { loadDirectExtensions } from "../../src/extensions/runtime.js";
+import { loadDirectPlugins } from "../../src/plugins/runtime.js";
 import {
-  EXTENSION_WIRE_SERVICE_LIMITS,
-  type ExtensionWireServiceDescriptor,
-  type ExtensionWireServiceRequest,
-  type ExtensionWireServiceResponse,
-} from "../../src/extensions/wire-services.js";
-import { REPLICATED_JSON_STATE_LIMITS } from "../../src/extensions/replicated-state.js";
+  PLUGIN_WIRE_SERVICE_LIMITS,
+  type PluginWireServiceDescriptor,
+  type PluginWireServiceRequest,
+  type PluginWireServiceResponse,
+} from "../../src/plugins/wire-services.js";
+import { REPLICATED_JSON_STATE_LIMITS } from "../../src/plugins/replicated-state.js";
 import {
   PORTABLE_PRESENTATION_LIMITS,
   type PortablePresentationActionRequest,
@@ -66,10 +66,10 @@ class FakeSession implements ServeSessionRuntime {
     options: Parameters<ServeSessionRuntime["prompt"]>[1],
   ) => void | Promise<void>) | undefined;
   readonly recoveryCalls: AgentSessionRecoveryOptions[] = [];
-  readonly wireRequests: ExtensionWireServiceRequest[] = [];
+  readonly wireRequests: PluginWireServiceRequest[] = [];
   readonly presentationActions: PortablePresentationActionRequest[] = [];
   readonly presentations: PortablePresentationEvent[] = [];
-  readonly wireServices: ExtensionWireServiceDescriptor[] = [{
+  readonly wireServices: PluginWireServiceDescriptor[] = [{
     protocolVersion: 1,
     name: "fixture.echo",
     version: 1,
@@ -116,14 +116,14 @@ class FakeSession implements ServeSessionRuntime {
     return this.portablePresentationsReady ? this.presentations : [];
   }
 
-  listExtensionWireServices(): readonly ExtensionWireServiceDescriptor[] {
+  listPluginWireServices(): readonly PluginWireServiceDescriptor[] {
     return this.wireServices;
   }
 
-  async invokeExtensionWireService(
-    request: ExtensionWireServiceRequest,
+  async invokePluginWireService(
+    request: PluginWireServiceRequest,
     signal?: AbortSignal,
-  ): Promise<ExtensionWireServiceResponse> {
+  ): Promise<PluginWireServiceResponse> {
     signal?.throwIfAborted();
     this.wireRequests.push(request);
     return {
@@ -407,12 +407,12 @@ test("serve default request admission covers advertised action, wire, and state 
     });
     assert.equal(created.status, 201);
 
-    const wirePayload = "w".repeat(EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes - 2);
+    const wirePayload = "w".repeat(PLUGIN_WIRE_SERVICE_LIMITS.maxPayloadBytes - 2);
     assert.equal(
       Buffer.byteLength(JSON.stringify(wirePayload), "utf8"),
-      EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+      PLUGIN_WIRE_SERVICE_LIMITS.maxPayloadBytes,
     );
-    const wireRequest: ExtensionWireServiceRequest = {
+    const wireRequest: PluginWireServiceRequest = {
       protocolVersion: 1,
       service: `s${"x".repeat(95)}`,
       serviceVersion: Number.MAX_SAFE_INTEGER,
@@ -420,7 +420,7 @@ test("serve default request admission covers advertised action, wire, and state 
       payload: wirePayload,
     };
     const wireBody = JSON.stringify(wireRequest);
-    assert.ok(Buffer.byteLength(wireBody, "utf8") > EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes);
+    assert.ok(Buffer.byteLength(wireBody, "utf8") > PLUGIN_WIRE_SERVICE_LIMITS.maxPayloadBytes);
     const wire = await fetch(`${server.origin}/v1/sessions/request-limits/wire-services`, {
       method: "POST",
       headers: authHeaders(true),
@@ -488,7 +488,7 @@ test("serve default request admission covers advertised action, wire, and state 
       body: JSON.stringify({
         ...wireRequest,
         payload: "x".repeat(
-          EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes + 64 * 1024,
+          PLUGIN_WIRE_SERVICE_LIMITS.maxPayloadBytes + 64 * 1024,
         ),
       }),
     });
@@ -1135,7 +1135,7 @@ test("serve projects portable presentations and brokers versioned extension serv
       services: session.wireServices,
     });
 
-    const wireRequest: ExtensionWireServiceRequest = {
+    const wireRequest: PluginWireServiceRequest = {
       protocolVersion: 1,
       service: "fixture.echo",
       serviceVersion: 1,
@@ -1224,11 +1224,11 @@ test("serve projects portable presentations and brokers versioned extension serv
 test("serve snapshots presentations created while a real AgentSession starts", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-serve-portable-session-"));
   context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace,
     mode: "serve",
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "serve-portable-session",
       async factory(extension) {
         await extension.facets.register({
@@ -1250,7 +1250,7 @@ test("serve snapshots presentations created while a real AgentSession starts", a
     sessionManager: SessionManager.inMemory(workspace, { id: "serve-portable" }),
     providers: new ProviderRegistry([]),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: [],
   });
   context.after(async () => await session.close());
@@ -1270,14 +1270,14 @@ test("serve snapshots presentations created while a real AgentSession starts", a
     onEvent(listener) { return session.onEvent(listener); },
     onPortablePresentation(listener) { return session.onPortablePresentation(listener); },
     listPortablePresentations() { return session.listPortablePresentations(); },
-    listExtensionWireServices() { return session.listExtensionWireServices(); },
-    async invokeExtensionWireService(request, signal) {
-      return await session.invokeExtensionWireService(request, signal);
+    listPluginWireServices() { return session.listPluginWireServices(); },
+    async invokePluginWireService(request, signal) {
+      return await session.invokePluginWireService(request, signal);
     },
     async invokePortablePresentationAction(request, signal) {
       return await session.invokePortablePresentationAction(request, signal);
     },
-    async start(signal) { await session.bindExtensions({ mode: "serve" }, signal); },
+    async start(signal) { await session.bindPlugins({ mode: "serve" }, signal); },
     async prompt(text, options) { return await session.prompt(text, options); },
     async recoverInterruptedRun(options) { return await session.recoverInterruptedRun(options); },
     async abort(reason) { await session.abort(reason); },

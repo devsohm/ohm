@@ -8,11 +8,11 @@ import * as config from "ohm/config";
 import * as context from "ohm/context";
 import * as core from "ohm/core";
 import * as embedding from "ohm/embedding";
-import * as extensions from "ohm/extensions";
 import * as images from "ohm/images";
 import * as interfaces from "ohm/interfaces";
 import * as modes from "ohm/modes";
 import * as net from "ohm/net";
+import * as plugins from "ohm/plugins";
 import * as processApi from "ohm/process";
 import * as prompts from "ohm/prompts";
 import * as providers from "ohm/providers";
@@ -31,11 +31,12 @@ const capability = {
   observedAt: "2026-01-01T00:00:00.000Z",
 };
 
-test("extension contract internals cannot resolve as package subpaths", () => {
+test("plugin contract internals and the removed compatibility subpath cannot resolve", () => {
   for (const specifier of [
-    "ohm/extensions/capabilities/internal/api/lifecycle",
-    "ohm/extensions/capabilities/internal/events/tools",
-    "ohm/extensions/runtime-internal/generation-lifecycle",
+    "ohm/extensions",
+    "ohm/plugins/capabilities/internal/api/lifecycle",
+    "ohm/plugins/capabilities/internal/events/tools",
+    "ohm/plugins/runtime-internal/generation-lifecycle",
   ]) {
     assert.throws(
       () => import.meta.resolve(specifier),
@@ -79,8 +80,8 @@ test("every published subpath performs a representative runtime operation", asyn
   ]);
   assert.equal(cache.status, "effective");
 
-  extensions.validateTemplatePlaceholders("Review {{args}}", new Set(["args"]), "consumer command");
-  assert.equal(extensions.renderExtensionCommand({ template: "Review {{args}}" }, "src"), "Review src");
+  plugins.validateTemplatePlaceholders("Review {{args}}", new Set(["args"]), "consumer command");
+  assert.equal(plugins.renderPluginCommand({ template: "Review {{args}}" }, "src"), "Review src");
 
   assert.equal(
     images.sniffImageMediaType(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
@@ -143,7 +144,7 @@ test("every published subpath performs a representative runtime operation", asyn
     skills: [],
     selectedTools: [],
   });
-  assert.match(systemPrompt, /Available tools:\nOnly the names listed below are callable tools\.[^\n]*\n\(none\)/u);
+  assert.match(systemPrompt, /Available tools:\n[^\n]*\n\(none\)/u);
 
   const registryProvider = providers.defineProviderAdapter({
     id: "subpath-provider",
@@ -248,7 +249,7 @@ test("every published subpath performs a representative runtime operation", asyn
       },
     },
     state: { messages: [] },
-    async bindExtensions() {},
+    async bindPlugins() {},
     subscribe() { return () => {}; },
     async prompt() {
       this.state.messages.push({

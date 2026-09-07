@@ -60,7 +60,7 @@ test("login separates browser/account methods from key, token, and local methods
     { id: "openrouter_browser", kind: "openrouter_browser", label: "OpenRouter", detail: "Browser API key" },
     { id: "api_key", kind: "api_key", label: "API key", detail: "Secure store" },
     { id: "environment", kind: "environment", label: "Environment", detail: "OPENAI_API_KEY", variable: "OPENAI_API_KEY" },
-    { id: "external", kind: "external", label: "Extension", detail: "Provider managed" },
+    { id: "external", kind: "external", label: "Plugin", detail: "Provider managed" },
   ];
   assert.deepEqual(methods.map(authMethodLoginPath), [
     "subscription",

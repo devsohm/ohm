@@ -70,7 +70,7 @@
   <path class="edge" d="M958 678v88"/>
   <rect class="card" x="282" y="766" width="518" height="94"/>
   <text class="label" x="314" y="808">persistent SessionManager</text>
-  <text class="detail" x="314" y="838">strict V4 JSONL journal</text>
+  <text class="detail" x="314" y="838">SQLite · strict V4 journal</text>
   <rect class="card" x="800" y="766" width="518" height="94"/>
   <text class="label" x="832" y="808">in-memory SessionManager</text>
   <text class="detail" x="832" y="838">same V4 reducer · no file</text>

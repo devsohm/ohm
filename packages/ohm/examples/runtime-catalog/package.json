@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "description": "Active tool, model, command, and resource discovery example for ohm",
-  "ohm": { "extensions": ["extensions/index.mjs"] }
+  "ohm": { "entrypoints": ["src/index.mjs"] }
 }

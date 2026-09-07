@@ -12,6 +12,7 @@ import {
   type RuntimeValue,
 } from "./value-guards.js";
 import { terminalPattern } from "./terminal-pattern.js";
+import { composerGeometry } from "./composer-layout.js";
 import { optionalProperties } from "../core/optional-properties.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -25,6 +26,7 @@ import {
   type EditorComponent,
   type KeybindingsManager,
   type OverlayHandle,
+  type OverlayBounds,
   type OverlayOptions,
 } from "@ohm/terminal";
 import type { CustomMessage } from "@ohm/kernel";
@@ -33,9 +35,9 @@ import type { EventEnvelope } from "../core/events.js";
 import { errorMessage } from "../core/errors.js";
 import type { CanonicalMessage, ImageBlock, NormalizedUsage } from "../core/types.js";
 import type {
-  ExtensionUISlotContribution,
-  ExtensionUISlotPath,
-} from "../extensions/capabilities/ui-slots.js";
+  PluginUISlotContribution,
+  PluginUISlotPath,
+} from "../plugins/capabilities/ui-slots.js";
 import { readSecretFrom } from "../interfaces/terminal.js";
 import { copyToNativeClipboard } from "../images/clipboard-text.js";
 import { interactiveCommand, interactiveCommandPalette } from "../interactive/commands.js";
@@ -79,6 +81,7 @@ import {
   INTERNAL_TUI_FRAME_PROJECTOR,
   INTERNAL_TUI_FRAME_PROJECTOR_CLEAR,
   INTERNAL_TUI_PERSISTENT_POINTER_MAP,
+  INTERNAL_TUI_OVERLAY_BOUNDS,
   INTERNAL_TUI_PERSISTENT_POINTER_SOURCE,
   INTERNAL_TUI_TOOL_DETAIL_CACHE,
   INTERNAL_TUI_TRANSCRIPT_SEARCH,
@@ -126,6 +129,7 @@ import {
   type OhmNativeToolDetailCache,
 } from "./native-renderer/view.js";
 import { formatCompactionUsageReceipt, TuiModel } from "./model.js";
+import type { TuiTranscriptHistory, TuiTranscriptHistoryPage, TuiTranscriptHistoryRequest } from "./transcript-history.js";
 import type { FooterDataSnapshot } from "./footer-data.js";
 import { syncPublicTheme } from "./public-theme.js";
 import type {
@@ -178,7 +182,7 @@ import type {
   TuiControllerOptions,
   TuiEditorMiddleware,
   TuiEditorMiddlewareResult,
-  TuiExtensionShortcut,
+  TuiPluginShortcut,
   TuiInput,
   TuiInputImageAttachment,
   TuiLatestCacheUsage,
@@ -198,8 +202,8 @@ import type {
 import { byteTruncate, cellWidth, sanitizeTerminalText, splitGraphemes, truncateCells } from "./unicode.js";
 import { fileReferenceQuery } from "./workspace-files.js";
 import {
-  ExtensionUISlotCompositor,
-  type ExtensionUISlotToken,
+  PluginUISlotCompositor,
+  type PluginUISlotToken,
 } from "./ui-slot-compositor.js";
 
 interface PickerObjectValue {
@@ -444,10 +448,10 @@ const TERMINAL_PROGRESS_CLEAR = "\u001b]9;4;0;\u0007";
 const TERMINAL_TITLE_RESET = "\u001b]0;\u0007";
 const TERMINAL_PROGRESS_REFRESH_MS = 1_000;
 const MAX_TERMINAL_TITLE_BYTES = 256;
-const MAX_EXTENSION_TEXT_BYTES = 32 * 1024;
-const MAX_EXTENSION_STATUS_BYTES = 4 * 1024;
-const MAX_EXTENSION_TEXT_SLOTS = 64;
-const MAX_EXTENSION_UI_KEY_BYTES = 256;
+const MAX_PLUGIN_TEXT_BYTES = 32 * 1024;
+const MAX_PLUGIN_STATUS_BYTES = 4 * 1024;
+const MAX_PLUGIN_TEXT_SLOTS = 64;
+const MAX_PLUGIN_UI_KEY_BYTES = 256;
 const TMUX_DIAGNOSTIC_TIMEOUT_MS = 300;
 const MAX_TMUX_OPTION_OUTPUT_BYTES = 4 * 1024;
 
@@ -629,6 +633,8 @@ interface TranscriptSearchState {
   selectedMatch: number | undefined;
   anchorRow: number | undefined;
   reveal: boolean;
+  journalMatch?: string;
+  status?: string;
 }
 
 interface TerminalColorSchemeNotificationOwner {
@@ -786,6 +792,16 @@ interface RetainedSessionEntry {
   bytes: number;
 }
 
+interface CachedSessionRenderBlock {
+  readonly retained: RetainedSessionEntry;
+  readonly width: number;
+  readonly theme: Theme;
+  readonly expanded: boolean;
+  readonly outputPad: 0 | 1;
+  readonly block: RuntimeUiBlock | undefined;
+  readonly bytes: number;
+}
+
 function retainedValueBytes<Value>(value: Value, seen = new Set<object>(), depth = 0): number {
   if (value === null || value === undefined) return 4;
   if (isStringValue(value)) return Buffer.byteLength(value, "utf8") + 2;
@@ -821,8 +837,8 @@ function retainSessionEntry(entry: TuiSessionEntry): RetainedSessionEntry {
   };
 }
 
-interface ExtensionShortcutOwner {
-  shortcuts: Map<string, TuiExtensionShortcut>;
+interface PluginShortcutOwner {
+  shortcuts: Map<string, TuiPluginShortcut>;
   signal: AbortSignal;
   onAbort(): void;
 }
@@ -937,19 +953,19 @@ interface ToolOutputExpansionOwner {
   onAbort(): void;
 }
 
-interface ExtensionValueOwner {
+interface PluginValueOwner {
   signal: AbortSignal;
   onAbort(): void;
 }
 
-interface ExtensionUISlotOwner extends ExtensionValueOwner {
+interface PluginUISlotOwner extends PluginValueOwner {
   ownerKey: string;
-  path: ExtensionUISlotPath;
+  path: PluginUISlotPath;
   key: string;
-  token: ExtensionUISlotToken;
+  token: PluginUISlotToken;
 }
 
-interface TerminalTitleOwner extends ExtensionValueOwner {
+interface TerminalTitleOwner extends PluginValueOwner {
   key: string;
   value: string;
 }
@@ -971,6 +987,7 @@ interface RuntimeComponentOwner {
   restoreWhenVisible: boolean;
   handle?: RuntimeUiComponentHandle;
   pointerSurface?: RuntimePointerSurface;
+  renderedBounds?: { bounds: OverlayBounds; columns: number; rows: number };
 }
 
 interface RuntimePointerSurface {
@@ -991,10 +1008,10 @@ interface PersistentRuntimePointerFrame {
 
 type PersistentRuntimePointerRow = TuiPersistentPointerMap["rows"][number];
 
-interface ExtensionUiRouteOwner {
+interface PluginUiRouteOwner {
   ownerKey: string;
   name: string;
-  token: ExtensionUISlotToken;
+  token: PluginUISlotToken;
   component: RuntimeComponentOwner;
 }
 
@@ -1007,6 +1024,7 @@ interface RawComponentOwner {
   preFocus: RawComponentOwner | null;
   restoreWhenVisible: boolean;
   handle?: RuntimeUiComponentHandle;
+  renderedBounds?: { bounds: OverlayBounds; columns: number; rows: number };
 }
 
 interface RawEditorOwner {
@@ -1284,66 +1302,6 @@ function resolveRuntimeHeight(options: RuntimeUiOverlayOptions, total: number, f
   const bottom = isNumberValue(margin) ? margin : margin?.bottom ?? 0;
   const available = Math.max(1, total - top - bottom);
   return Math.max(1, Math.min(available, resolveRuntimeLength(options.maxHeight, total, fallback)));
-}
-
-function runtimeOverlayPointerSurface(
-  options: RuntimeUiOverlayOptions,
-  terminalWidth: number,
-  terminalHeight: number,
-  width: number,
-  blockRows: number,
-  context: RuntimeUiRenderContext,
-): RuntimePointerSurface | undefined {
-  const margin = options.margin;
-  const topMargin = isNumberValue(margin) ? margin : margin?.top ?? 0;
-  const rightMargin = isNumberValue(margin) ? margin : margin?.right ?? 0;
-  const bottomMargin = isNumberValue(margin) ? margin : margin?.bottom ?? 0;
-  const leftMargin = isNumberValue(margin) ? margin : margin?.left ?? 0;
-  const availableWidth = Math.max(1, terminalWidth - leftMargin - rightMargin);
-  const availableHeight = Math.max(1, terminalHeight - topMargin - bottomMargin);
-  const selectedWidth = Math.max(1, Math.min(availableWidth, width));
-  const selectedHeight = Math.min(availableHeight, blockRows);
-  if (selectedHeight < 1) return undefined;
-  const left = Math.min(terminalWidth - 1, leftMargin);
-  const right = Math.max(left + 1, terminalWidth - Math.min(terminalWidth - left - 1, rightMargin));
-  const top = Math.min(terminalHeight - 1, topMargin);
-  const bottom = Math.max(top + 1, terminalHeight - Math.min(terminalHeight - top - 1, bottomMargin));
-  const horizontalSpace = Math.max(0, right - left - selectedWidth);
-  const verticalSpace = Math.max(0, bottom - top - selectedHeight);
-  const anchor = options.anchor ?? "center";
-  const anchoredColumn = anchor.endsWith("left") || anchor === "left-center"
-    ? 0
-    : anchor.endsWith("right") || anchor === "right-center"
-      ? horizontalSpace
-      : Math.floor(horizontalSpace / 2);
-  const anchoredRow = anchor.startsWith("top")
-    ? 0
-    : anchor.startsWith("bottom")
-      ? verticalSpace
-      : Math.floor(verticalSpace / 2);
-  const coordinate = (value: RuntimeUiOverlayLength | undefined, origin: number, available: number): number | undefined => {
-    if (value === undefined) return undefined;
-    return isNumberValue(value) ? value : origin + Math.floor(available * Number.parseFloat(value) / 100);
-  };
-  const explicitColumn = coordinate(options.col, left, horizontalSpace);
-  const explicitRow = coordinate(options.row, top, verticalSpace);
-  const row = Math.max(
-    top,
-    Math.min(bottom - selectedHeight, (explicitRow ?? top + anchoredRow) + (options.offsetY ?? 0)),
-  );
-  const column = Math.max(
-    left,
-    Math.min(right - selectedWidth, (explicitColumn ?? left + anchoredColumn) + (options.offsetX ?? 0)),
-  );
-  return {
-    row,
-    column,
-    width: selectedWidth,
-    height: selectedHeight,
-    terminalWidth,
-    terminalHeight,
-    context,
-  };
 }
 
 function inputLabel(prompt: string): string {
@@ -1717,15 +1675,15 @@ export class TuiController {
   readonly #draftRecoveredQueue = new Map<string, boolean>();
   readonly #customThemes = new Map<string, ThemeDefinition>();
   readonly #extensionStatuses = new Map<string, string>();
-  readonly #extensionStatusOwners = new Map<string, ExtensionValueOwner>();
+  readonly #extensionStatusOwners = new Map<string, PluginValueOwner>();
   readonly #extensionWidgets = new Map<string, string>();
-  readonly #extensionWidgetOwners = new Map<string, ExtensionValueOwner>();
+  readonly #extensionWidgetOwners = new Map<string, PluginValueOwner>();
   readonly #extensionHeaders = new Map<string, string>();
-  readonly #extensionHeaderOwners = new Map<string, ExtensionValueOwner>();
+  readonly #extensionHeaderOwners = new Map<string, PluginValueOwner>();
   readonly #extensionFooters = new Map<string, string>();
-  readonly #extensionFooterOwners = new Map<string, ExtensionValueOwner>();
-  readonly #extensionUiSlots = new ExtensionUISlotCompositor();
-  readonly #extensionUiSlotOwners = new Map<string, ExtensionUISlotOwner>();
+  readonly #extensionFooterOwners = new Map<string, PluginValueOwner>();
+  readonly #extensionUiSlots = new PluginUISlotCompositor();
+  readonly #extensionUiSlotOwners = new Map<string, PluginUISlotOwner>();
   readonly #lineReasoningParts = new Map<string, string>();
   readonly #linePendingText = new Map<string, { chunks: string[]; bytes: number }>();
   readonly #lineTextStarted = new Set<string>();
@@ -1735,10 +1693,11 @@ export class TuiController {
   readonly #omittedToolRenderBlocks = new Map<TranscriptEntry, OmittedToolRenderBlock>();
   #toolRenderBlockCacheBytes = 0;
   #sessionRenderers: SessionRendererOwner | undefined;
+  #sessionRenderBlocks = new Map<string, CachedSessionRenderBlock>();
   #editorRenderer: EditorRendererOwner | undefined;
   readonly #sessionEntries = new Map<string, RetainedSessionEntry>();
   #sessionEntryBytes = 0;
-  #extensionShortcuts: ExtensionShortcutOwner | undefined;
+  #extensionShortcuts: PluginShortcutOwner | undefined;
   #commandCompletion: CommandCompletionOwner | undefined;
   #pendingCommandCompletion: PendingCommandCompletion | undefined;
   #autocomplete: AutocompleteOwner | undefined;
@@ -1775,7 +1734,7 @@ export class TuiController {
   #toolOutputExpansionBaseline: boolean | undefined;
   readonly #normalizedKeyObservers = new Map<string, NormalizedKeyObserverOwner>();
   #runtimeComponent: RuntimeComponentOwner | undefined;
-  #extensionUiRoute: ExtensionUiRouteOwner | undefined;
+  #extensionUiRoute: PluginUiRouteOwner | undefined;
   #extensionUiRouteOpening = false;
   readonly #runtimeOverlays: RuntimeComponentOwner[] = [];
   #runtimeFocusOrder = 0;
@@ -1806,8 +1765,8 @@ export class TuiController {
   }>();
   readonly #extensionWorkingMessages = new Map<string, string>();
   readonly #extensionWorkingVisibility = new Map<string, boolean>();
-  readonly #extensionWorkingMessageOwners = new Map<string, ExtensionValueOwner>();
-  readonly #extensionWorkingVisibilityOwners = new Map<string, ExtensionValueOwner>();
+  readonly #extensionWorkingMessageOwners = new Map<string, PluginValueOwner>();
+  readonly #extensionWorkingVisibilityOwners = new Map<string, PluginValueOwner>();
   #started = false;
   #closed = false;
   #closing = false;
@@ -1842,10 +1801,19 @@ export class TuiController {
   #transcriptNavigation: Frame["transcriptNavigation"];
   #transcriptSearch: TranscriptSearchState | undefined;
   #transcriptSearchProjection: TuiTranscriptSearchProjection | undefined;
+  #transcriptHistory: TuiTranscriptHistory | undefined;
+  #historyPage: { page: TuiTranscriptHistoryPage; model: TuiModel } | undefined;
+  #historyRequest: AbortController | undefined;
+  #historySearchRequest: AbortController | undefined;
+  #historySearchTimer: NodeJS.Timeout | undefined;
+  #historyReveal: { edge: "first" | "last"; kind?: "user" | "tool"; entryId?: string } | undefined;
+  #historyStatus: string | undefined;
   #richTranscriptViewportAnchor: RichTranscriptViewportAnchor | undefined;
+  #richTranscriptRanges: RichTranscriptAnchorState["ranges"] | undefined;
   #transcriptSnapshotFingerprint: string | undefined;
   #transcriptLayoutRevision = 0;
   #renderScheduled = false;
+  #scheduledFrame = false;
   #renderGeneration = 0;
   #nativeToolDetailPrewarm: NodeJS.Immediate | undefined;
   #nativeToolDetailPrewarmCompletedKey: string | undefined;
@@ -1920,7 +1888,7 @@ export class TuiController {
             this.#selectionCopyInFlight = undefined;
           }
           if (event.type === "press" && event.button === "left") this.#selectionGeneration += 1;
-          const handled = !this.#corePointerActive && this.#handleExtensionPointer(event);
+          const handled = !this.#corePointerActive && this.#handlePluginPointer(event);
           if (!handled) {
             const decisions = this.#alternateInteraction!.handle(event);
             if (event.type === "wheel" && decisions.some((decision) => decision.type === "scroll")) {
@@ -1954,6 +1922,12 @@ export class TuiController {
 
   readonly #onResize = () => {
     this.#cancelNativeToolDetailPrewarm();
+    this.#cancelRuntimePointer();
+    for (const owner of this.#runtimeOwners()) {
+      delete owner.pointerSurface;
+      delete owner.renderedBounds;
+    }
+    for (const owner of this.#rawOwners()) delete owner.renderedBounds;
     const active = [...this.#rawBackgrounds.values()].at(-1);
     if (active !== undefined) {
       try { active.component.invalidate(); }
@@ -2149,16 +2123,16 @@ export class TuiController {
     this.#lastEscapeAt = 0;
   }
 
-  setExtensionShortcuts(shortcuts?: readonly TuiExtensionShortcut[], signal?: AbortSignal): void {
+  setPluginShortcuts(shortcuts?: readonly TuiPluginShortcut[], signal?: AbortSignal): void {
     const previous = this.#extensionShortcuts;
     if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
     this.#extensionShortcuts = undefined;
     if (shortcuts === undefined) return;
-    if (signal === undefined) throw new Error("Extension shortcuts require a generation signal");
+    if (signal === undefined) throw new Error("Plugin shortcuts require a generation signal");
     signal.throwIfAborted();
-    const selected = new Map<string, TuiExtensionShortcut>();
+    const selected = new Map<string, TuiPluginShortcut>();
     for (const shortcut of shortcuts) selected.set(normalizeKeybinding(shortcut.shortcut), { ...shortcut });
-    const owner: ExtensionShortcutOwner = {
+    const owner: PluginShortcutOwner = {
       shortcuts: selected,
       signal,
       onAbort: () => {
@@ -2302,6 +2276,7 @@ export class TuiController {
   /** @internal Schedules host repair after an unsafe out-of-band write. */
   requestUnsafeTerminalRender(): void {
     this.assertNativeUiAvailable();
+    this.#sessionRenderBlocks.clear();
     this.#surface.resetAnchor();
     this.#scheduleRender();
   }
@@ -2848,6 +2823,7 @@ export class TuiController {
       focus: runtimeHandle.focus,
       unfocus: () => runtimeHandle.unfocus(),
       isFocused: runtimeHandle.isFocused,
+      getBounds: () => runtimeHandle.getBounds?.(),
     };
     this.#scheduleRender();
     return { handle, result, close: (value) => mount.close(value) };
@@ -2905,7 +2881,7 @@ export class TuiController {
       const index = this.#rawEditors.indexOf(owner);
       if (index < 0) return;
       const wasActive = index === this.#rawEditors.length - 1;
-      const text = wasActive ? component.getText() : undefined;
+      const text = wasActive ? component.getExpandedText?.() ?? component.getText() : undefined;
       this.#rawEditors.splice(index, 1);
       if (text !== undefined) {
         const successor = this.#rawEditors.at(-1)?.component;
@@ -2953,6 +2929,7 @@ export class TuiController {
 
   /** @internal Lets a trusted raw component invalidate the host frame. */
   requestRawRender(force = false): void {
+    this.#sessionRenderBlocks.clear();
     if (force) {
       const output = this.#surface.clear(terminalSize(this.output, this.capabilities));
       if (output !== "") this.#write(`${HIDE_CURSOR}${output}`);
@@ -3442,6 +3419,145 @@ export class TuiController {
     else this.#renderLineSessionEntry(entry.id);
   }
 
+  /** @internal Binds durable history without transferring ownership of the live model. */
+  setTranscriptHistory(history: TuiTranscriptHistory | undefined): void {
+    this.#closeTranscriptSearch();
+    this.#historyRequest?.abort();
+    this.#historyRequest = undefined;
+    this.#historyStatus = undefined;
+    if (this.#historyPage !== undefined) this.#returnToLiveTranscript();
+    this.#transcriptHistory = history;
+    if (this.#started && !this.#closed && this.mode === "full") this.#scheduleRender();
+  }
+
+  #visibleTranscriptModel(): TuiModel {
+    return this.#historyPage?.model ?? this.#model;
+  }
+
+  #returnToLiveTranscript(): void {
+    this.#historyRequest?.abort();
+    this.#historyRequest = undefined;
+    if (this.#historyPage !== undefined) this.#clearPointerSelection();
+    this.#historyPage = undefined;
+    this.#historyReveal = undefined;
+    this.#historyStatus = undefined;
+    this.#transcriptOffset = 0;
+    this.#transcriptNavigation = undefined;
+    this.#richTranscriptViewportAnchor = undefined;
+    this.#invalidateTranscriptLayout();
+    this.#pruneSessionEntries();
+  }
+
+  #loadTranscriptHistory(
+    request: TuiTranscriptHistoryRequest,
+    reveal: { edge: "first" | "last"; kind?: "user" | "tool"; entryId?: string },
+  ): void {
+    const history = this.#transcriptHistory;
+    if (history === undefined || this.mode !== "full") return;
+    this.#historyRequest?.abort();
+    const controller = new AbortController();
+    this.#historyRequest = controller;
+    const signal = AbortSignal.any([controller.signal, this.#lifecycleAbort.signal]);
+    this.#historyStatus = "Loading history…";
+    this.#scheduleRender();
+    void (async () => {
+      let next = request;
+      while (true) {
+        const page = await history.page({ ...next,
+          limit: Math.max(1, Math.min(100, Math.floor(this.#limits.maxTranscriptEntries / 2))),
+          maxBytes: Math.max(1024, Math.min(256 * 1024, Math.floor(this.#limits.maxTranscriptBytes / 4))),
+        }, signal);
+        signal.throwIfAborted();
+        if (this.#historyRequest !== controller || this.#transcriptHistory !== history) return;
+        const model = new TuiModel({ ...this.#limits,
+          maxTranscriptBytes: Math.min(this.#limits.maxTranscriptBytes, 1024 * 1024),
+          maxTranscriptEntries: Math.min(this.#limits.maxTranscriptEntries, 500),
+        });
+        model.setToolOutputExpanded(this.#model.toolOutputExpanded);
+        if (model.reasoningExpanded !== this.#model.reasoningExpanded) model.toggleReasoning();
+        model.applyAll(page.items, { historical: true });
+        const found = reveal.kind === undefined
+          ? model.entries.length > 0
+          : model.entries.some((entry) => entry.kind === reveal.kind);
+        const cursor = reveal.edge === "last" ? page.firstId : page.lastId;
+        const more = reveal.edge === "last" ? page.hasMoreBefore : page.hasMoreAfter;
+        if (!found && more && cursor !== undefined) {
+          next = { ...optionalProperties(page.from === undefined ? undefined : { from: page.from }),
+            ...(reveal.edge === "last" ? { before: cursor } : { after: cursor }) };
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
+          continue;
+        }
+        // Retain cursors, not the unbounded source payload of an oversized journal entry.
+        this.#historyPage = { page: { ...page, items: [] }, model };
+        this.#historyReveal = { ...reveal,
+          ...optionalProperties(reveal.entryId === undefined && request.query !== undefined && request.from !== undefined && request.before === undefined
+            && request.after === undefined && page.focusId !== undefined ? { entryId: page.focusId } : undefined),
+        };
+        this.#historyStatus = `History · ${this.#bindingHint("tui.transcript.bottom", 1)} live`;
+        this.#historyRequest = undefined;
+        this.#transcriptNavigation = undefined;
+        this.#richTranscriptViewportAnchor = undefined;
+        this.#transcriptOffset = reveal.edge === "last" ? 0 : 1_000_000;
+        this.#clearPointerSelection();
+        this.#invalidateTranscriptLayout();
+        const retainedIds = new Set(model.entries.filter((entry) => entry.extension !== undefined).map((entry) => entry.id));
+        for (const item of page.items) {
+          if ("event" in item || item.type === "session_summary" || item.type === "shell_execution"
+            || !retainedIds.has(item.id)) continue;
+          const retained = retainSessionEntry(item);
+          const previous = this.#sessionEntries.get(item.id);
+          if (previous !== undefined) this.#sessionEntryBytes -= previous.bytes;
+          this.#sessionEntries.set(item.id, retained);
+          this.#sessionEntryBytes += retained.bytes;
+        }
+        this.#pruneSessionEntries();
+        this.#scheduleRender();
+        return;
+      }
+    })().catch((cause) => {
+      if (signal.aborted || this.#historyRequest !== controller) return;
+      this.#historyRequest = undefined;
+      this.#historyStatus = `History unavailable: ${boundedTuiFailureText(cause)}`;
+      this.#scheduleRender();
+    });
+  }
+
+  #pageTranscriptHistory(direction: "previous" | "next", kind?: "user" | "tool"): boolean {
+    if (this.#transcriptHistory === undefined) return false;
+    if (this.#historyRequest !== undefined) return true;
+    const page = this.#historyPage?.page;
+    const reveal = { edge: direction === "previous" ? "last" as const : "first" as const,
+      ...optionalProperties(kind === undefined ? undefined : { kind }) };
+    if (page === undefined) {
+      if (direction === "next") return false;
+      const first = this.#model.entries.find((entry) => entry.kind !== "startup" && !entry.id.startsWith("local:"));
+      this.#loadTranscriptHistory({ ...optionalProperties(first === undefined ? undefined : {
+        beforeVisibleId: first.sourceMessageId ?? first.id,
+      }) }, reveal);
+      return true;
+    }
+    const cursor = direction === "previous" ? page.firstId : page.lastId;
+    const more = direction === "previous" ? page.hasMoreBefore : page.hasMoreAfter;
+    if (!more || cursor === undefined) {
+      if (direction === "next") this.#returnToLiveTranscript();
+      return false;
+    }
+    this.#loadTranscriptHistory({ ...optionalProperties(page.from === undefined ? undefined : { from: page.from }),
+      ...(direction === "previous" ? { before: cursor } : { after: cursor }) }, reveal);
+    return true;
+  }
+
+  #scrollTranscript(rows: number): void {
+    const navigation = this.#transcriptNavigation;
+    if (rows > 0 && navigation?.startRow === 0 && this.#pageTranscriptHistory("previous")) return;
+    if (rows < 0 && this.#transcriptOffset === 0 && this.#historyPage !== undefined) {
+      this.#pageTranscriptHistory("next");
+      return;
+    }
+    this.#transcriptOffset = Math.max(0, Math.min(1_000_000, this.#transcriptOffset + rows));
+  }
+
   replaceTranscript(
     items: readonly TuiTranscriptItem[],
     branch?: string,
@@ -3484,20 +3600,20 @@ export class TuiController {
         }))
       : [];
     this.#resetTranscript();
-    this.#model.applyAll(items);
+    this.#model.applyAll(items, { historical: true });
     this.#transcriptSnapshotFingerprint = snapshotFingerprint;
     if (this.mode === "full") {
       for (const item of items) if ("event" in item) this.#trackToolProgressLifecycle(item);
     }
     for (const entry of preservedLocalEntries) this.#model.addLocal(entry.kind, entry.text, entry.title, entry.id);
-    const liveExtensionEntries = new Set(this.#model.entries.flatMap((entry) =>
+    const livePluginEntries = new Set(this.#model.entries.flatMap((entry) =>
       entry.extension === undefined ? [] : [entry.id]));
     for (const item of items) {
       if (
         "event" in item
         || item.type === "session_summary"
         || item.type === "shell_execution"
-        || !liveExtensionEntries.has(item.id)
+        || !livePluginEntries.has(item.id)
       ) continue;
       if (item.type === "custom_message" && item.display !== true) continue;
       const retained = retainSessionEntry(item);
@@ -3605,6 +3721,8 @@ export class TuiController {
   }
 
   #resetTranscript(): void {
+    this.#closeTranscriptSearch();
+    this.#returnToLiveTranscript();
     if (this.mode === "full") this.#flushDeferredToolStream();
     this.#clearPendingActiveMessages();
     this.#model.clearTranscript();
@@ -3615,6 +3733,7 @@ export class TuiController {
     this.#acceptedToolProgressSequences.clear();
     this.#seenToolProgressSequences.clear();
     this.#sessionEntries.clear();
+    this.#sessionRenderBlocks.clear();
     this.#sessionEntryBytes = 0;
     this.#terminalImages.clear();
     this.#transcriptSnapshotFingerprint = undefined;
@@ -3624,14 +3743,14 @@ export class TuiController {
   question(prompt: string, signal?: AbortSignal, options: { cancelable?: boolean } = {}): Promise<string> {
     this.#ensureStarted();
     if (this.#extensionUiRouteOpening || this.#extensionUiRoute !== undefined) {
-      return Promise.reject(new Error("Close the active extension UI route before opening a terminal question"));
+      return Promise.reject(new Error("Close the active plugin UI route before opening a terminal question"));
     }
     if (this.#pendingQuestion !== undefined) return Promise.reject(new Error("Another terminal question is active"));
     if (this.#overlay?.resolve !== undefined) return Promise.reject(new Error("A terminal picker is active"));
     signal?.throwIfAborted();
     const previousInputLabel = this.#inputLabel;
     this.#inputLabel = inputLabel(prompt);
-    if (this.mode !== "full") this.#write(prompt);
+    if (this.mode !== "full") this.#write(byteTruncate(sanitizeTerminalText(prompt), 8 * 1024));
     this.#scheduleRender();
     return new Promise<string>((resolve, reject) => {
       const onAbort = () => {
@@ -3658,7 +3777,7 @@ export class TuiController {
   async readSecret(prompt: string, signal?: AbortSignal): Promise<string> {
     this.#ensureStarted();
     if (this.#extensionUiRouteOpening || this.#extensionUiRoute !== undefined) {
-      throw new Error("Close the active extension UI route before opening a terminal question");
+      throw new Error("Close the active plugin UI route before opening a terminal question");
     }
     if (this.#pendingQuestion !== undefined || this.#overlay !== undefined || this.#secretAbort !== undefined || this.#externalEditing) {
       throw new Error("Another terminal question is active");
@@ -3691,10 +3810,8 @@ export class TuiController {
   choose<T>(prompt: string, choices: TerminalChoice<T>[], signal?: AbortSignal): Promise<T> {
     this.#ensureStarted();
     if (choices.length === 0) return Promise.reject(new Error("No choices are available"));
-    if (this.#extensionUiRouteOpening || this.#extensionUiRoute !== undefined) {
-      return Promise.reject(new Error("Close the active extension UI route before opening a terminal picker"));
-    }
-    if (this.#overlay !== undefined) return Promise.reject(new Error("Another terminal picker is active"));
+    const conflict = this.#pickerConflict();
+    if (conflict !== undefined) return Promise.reject(conflict);
     signal?.throwIfAborted();
     if (this.mode !== "full") return this.#chooseByLine(prompt, choices, signal);
     const source = choices.slice(0, this.#limits.maxPickerItems).map((choice, index): PickerItem<T> => ({
@@ -3703,19 +3820,11 @@ export class TuiController {
       value: choice.value,
       ...optionalProperties(choice.detail === undefined ? undefined : { detail: choice.detail }),
     }));
-    return new Promise<T>((resolve, reject) => {
-      const onAbort = () => this.#closeOverlay(cancellationError(signal?.reason, "Selection cancelled"));
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.#openOverlay("generic", prompt, source, {
-        resolve: (item) => {
-          const selected = source.find((candidate) => candidate.id === item.id);
-          if (selected === undefined) reject(new Error("Selected choice is no longer available"));
-          else resolve(selected.value);
-        },
-        reject,
-        cleanup: () => signal?.removeEventListener("abort", onAbort),
-      });
-    });
+    return this.#chooseOverlay("generic", prompt, source, (item) => {
+      const selected = source.find((candidate) => candidate.id === item.id);
+      if (selected === undefined) throw new Error("Selected choice is no longer available");
+      return selected.value;
+    }, signal);
   }
 
   async #chooseByLine<T>(prompt: string, choices: TerminalChoice<T>[], signal?: AbortSignal): Promise<T> {
@@ -3803,7 +3912,8 @@ export class TuiController {
   ): Promise<void> {
     this.#ensureStarted();
     if (items.length === 0) return Promise.reject(new Error("No settings are available"));
-    if (this.#overlay !== undefined) return Promise.reject(new Error("Another terminal picker is active"));
+    const conflict = this.#pickerConflict();
+    if (conflict !== undefined) return Promise.reject(conflict);
     signal?.throwIfAborted();
     const settingSource = items.slice(0, Math.max(1, this.#limits.maxPickerItems - 1)).map((item) => {
       if (!/^[a-z][a-z0-9-]{0,62}$/u.test(item.id) || item.values.length === 0 || !item.values.includes(item.value)) {
@@ -3815,15 +3925,10 @@ export class TuiController {
       return this.#chooseSettingsByLine(settingSource.map((item) => item.value), onChange, signal);
     }
     const source = [...settingSource, settingsDonePickerItem()];
-    return new Promise<void>((resolve, reject) => {
-      const onAbort = () => this.#closeOverlay(cancellationError(signal?.reason, "Settings cancelled"));
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.#openOverlay("generic", "Settings", source, {
-        resolve: () => resolve(),
-        reject: (cause) => cause instanceof TuiSelectionCancelledError ? resolve() : reject(cause),
-        cleanup: () => signal?.removeEventListener("abort", onAbort),
-      });
-      if (this.#overlay !== undefined) this.#overlay.settings = { onChange, busy: false };
+    const selection = this.#chooseOverlay("generic", "Settings", source, () => undefined, signal, "Settings cancelled");
+    if (this.#overlay !== undefined) this.#overlay.settings = { onChange, busy: false };
+    return selection.then(() => undefined, (cause: unknown) => {
+      if (!(cause instanceof TuiSelectionCancelledError)) throw cause;
     });
   }
 
@@ -3897,7 +4002,7 @@ export class TuiController {
     });
   }
 
-  openExtensionUiRoute(
+  openPluginUiRoute(
     ownerKey: string,
     name: string,
     title: string,
@@ -3906,14 +4011,14 @@ export class TuiController {
     onClosed?: () => void,
   ): RuntimeUiComponentHandle {
     this.#ensureStarted();
-    if (this.mode !== "full") throw new Error("Extension UI routes require the rich interactive viewport");
-    if (!isStringValue(ownerKey) || ownerKey.trim() === "") throw new TypeError("Extension UI route owner is invalid");
-    if (!isStringValue(name) || name.trim() === "") throw new TypeError("Extension UI route name is invalid");
-    if (!isStringValue(title) || title.trim() === "") throw new TypeError("Extension UI route title is invalid");
-    if (!isFunctionValue(factory)) throw new TypeError("Extension UI route factory must be a function");
-    if (onClosed !== undefined && !isFunctionValue(onClosed)) throw new TypeError("Extension UI route close callback must be a function");
+    if (this.mode !== "full") throw new Error("Plugin UI routes require the rich interactive viewport");
+    if (!isStringValue(ownerKey) || ownerKey.trim() === "") throw new TypeError("Plugin UI route owner is invalid");
+    if (!isStringValue(name) || name.trim() === "") throw new TypeError("Plugin UI route name is invalid");
+    if (!isStringValue(title) || title.trim() === "") throw new TypeError("Plugin UI route title is invalid");
+    if (!isFunctionValue(factory)) throw new TypeError("Plugin UI route factory must be a function");
+    if (onClosed !== undefined && !isFunctionValue(onClosed)) throw new TypeError("Plugin UI route close callback must be a function");
     signal.throwIfAborted();
-    if (this.#extensionUiRouteOpening) throw new Error("Extension UI route navigation is already in progress");
+    if (this.#extensionUiRouteOpening) throw new Error("Plugin UI route navigation is already in progress");
     if (
       this.#overlay !== undefined
       || this.#pendingQuestion !== undefined
@@ -3963,7 +4068,7 @@ export class TuiController {
 
     const token = {};
     let componentOwner: RuntimeComponentOwner | undefined;
-    let routeOwner: ExtensionUiRouteOwner | undefined;
+    let routeOwner: PluginUiRouteOwner | undefined;
     let closeNotified = false;
     let mount: RuntimeUiComponentMount<void>;
     this.#extensionUiRouteOpening = true;
@@ -3993,7 +4098,7 @@ export class TuiController {
           },
           onError: (cause) => {
             try {
-              this.notify(`Extension UI route ${name} failed: ${boundedTuiFailureText(cause)}`, "warning");
+              this.notify(`Plugin UI route ${name} failed: ${boundedTuiFailureText(cause)}`, "warning");
             } catch {}
           },
         });
@@ -4010,7 +4115,7 @@ export class TuiController {
         }
       } catch (cause) {
         try {
-          this.notify(`Extension UI route ${name} failed: ${boundedTuiFailureText(cause)}`, "warning");
+          this.notify(`Plugin UI route ${name} failed: ${boundedTuiFailureText(cause)}`, "warning");
         } catch {}
         throw error(cause);
       }
@@ -4108,6 +4213,7 @@ export class TuiController {
       },
       unfocus: (options?: RuntimeUiOverlayUnfocusOptions) => this.#unfocusRuntimeOwner(owner, options),
       isFocused: () => owner.focused && !owner.mount.closed,
+      getBounds: () => this.#renderedOverlayBounds(owner, this.#runtimeOwnerVisible(owner)),
     });
   }
 
@@ -4177,6 +4283,8 @@ export class TuiController {
     if (owner.mount.closed || owner.hidden === hidden) return;
     if (hidden) this.#cancelRuntimePointer(owner);
     owner.hidden = hidden;
+    delete owner.renderedBounds;
+    delete owner.pointerSurface;
     if (hidden) {
       owner.restoreWhenVisible = false;
       if (owner.focused) this.#setRuntimeFocus(this.#fallbackRuntimeOwner(owner), false);
@@ -4229,6 +4337,7 @@ export class TuiController {
         if (!isBooleanValue(hidden)) throw new TypeError("Raw overlay hidden state must be boolean");
         if (owner.mount.closed || owner.hidden === hidden) return;
         owner.hidden = hidden;
+        delete owner.renderedBounds;
         if (hidden && owner.focused) this.#setRawFocus(this.#fallbackRawOwner(owner), false);
         else if (!hidden && this.#rawOwnerCaptures(owner) && this.#rawOwnerVisible(owner)) this.#setRawFocus(owner, true);
         this.#scheduleRender();
@@ -4243,7 +4352,15 @@ export class TuiController {
         this.#scheduleRender();
       },
       isFocused: () => owner.focused && !owner.mount.closed,
+      getBounds: () => this.#renderedOverlayBounds(owner, this.#rawOwnerVisible(owner)),
     });
+  }
+
+  #renderedOverlayBounds(owner: RawComponentOwner | RuntimeComponentOwner, visible: boolean): OverlayBounds | undefined {
+    const painted = owner.renderedBounds;
+    const size = terminalSize(this.output, this.capabilities);
+    return visible && painted !== undefined && painted.columns === size.columns && painted.rows === size.rows
+      ? { ...painted.bounds } : undefined;
   }
 
   #rawOwners(): RawComponentOwner[] {
@@ -4316,21 +4433,14 @@ export class TuiController {
   ): Promise<T> {
     this.#ensureStarted();
     if (items.length === 0 && kind !== "session") return Promise.reject(new Error("No choices are available"));
-    if (this.#overlay !== undefined) return Promise.reject(new Error("Another terminal picker is active"));
+    const conflict = this.#pickerConflict();
+    if (conflict !== undefined) return Promise.reject(conflict);
     signal?.throwIfAborted();
-    return new Promise<T>((resolve, reject) => {
-      const onAbort = () => this.#closeOverlay(cancellationError(signal?.reason, "Selection cancelled"));
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.#openOverlay(kind, prompt, items, {
-        resolve: (item) => {
-          const selected = items.find((candidate) => candidate.id === item.id);
-          if (selected === undefined) reject(new Error("Selected picker item is no longer available"));
-          else resolve(selected.value);
-        },
-        reject,
-        cleanup: () => signal?.removeEventListener("abort", onAbort),
-      });
-    });
+    return this.#chooseOverlay(kind, prompt, items, (item) => {
+      const selected = items.find((candidate) => candidate.id === item.id);
+      if (selected === undefined) throw new Error("Selected picker item is no longer available");
+      return selected.value;
+    }, signal);
   }
 
   chooseSessionTree<T>(
@@ -4346,7 +4456,8 @@ export class TuiController {
   ): Promise<T> {
     this.#ensureStarted();
     if (items.length === 0) return Promise.reject(new Error("No choices are available"));
-    if (this.#overlay !== undefined) return Promise.reject(new Error("Another terminal picker is active"));
+    const conflict = this.#pickerConflict();
+    if (conflict !== undefined) return Promise.reject(conflict);
     signal?.throwIfAborted();
     const seen = new Set<string>();
     const boundedStrings = (values: readonly string[]): string[] => values.slice(0, 128)
@@ -4393,21 +4504,14 @@ export class TuiController {
         value: item.value,
       })), signal);
     }
-    return new Promise<T>((resolve, reject) => {
-      const onAbort = () => this.#closeOverlay(cancellationError(signal?.reason, "Selection cancelled"));
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.#openOverlay("generic", prompt, source, {
-        resolve: (item) => {
-          const eventId = item.tree?.eventId;
-          const selected = source.find((candidate) => candidate.tree?.eventId === eventId);
-          if (selected === undefined) reject(new Error("Selected tree entry is no longer available"));
-          else resolve(selected.value);
-        },
-        reject,
-        cleanup: () => signal?.removeEventListener("abort", onAbort),
-      });
-      const overlay = this.#overlay;
-      if (overlay === undefined) return;
+    const selection = this.#chooseOverlay("generic", prompt, source, (item) => {
+      const eventId = item.tree?.eventId;
+      const selected = source.find((candidate) => candidate.tree?.eventId === eventId);
+      if (selected === undefined) throw new Error("Selected tree entry is no longer available");
+      return selected.value;
+    }, signal);
+    const overlay = this.#overlay;
+    if (overlay !== undefined) {
       overlay.tree = {
         folded: new Set(),
         activeOnly: false,
@@ -4420,7 +4524,8 @@ export class TuiController {
       };
       this.#refreshOverlay();
       this.#scheduleRender();
-    });
+    }
+    return selection;
   }
 
   getPickerItemLimit(): number {
@@ -4691,7 +4796,7 @@ export class TuiController {
     const raw = this.#rawEditors.at(-1)?.component;
     if (raw?.handleInput !== undefined) {
       raw.handleInput(`\u001b[200~${value}\u001b[201~`);
-      this.#editor.setText(raw.getText());
+      this.#editor.setText(raw.getExpandedText?.() ?? raw.getText());
     } else this.#editor.insertPaste(value);
     this.#jumpDirection = undefined;
     this.#inputMode = "normal";
@@ -4699,7 +4804,8 @@ export class TuiController {
   }
 
   getEditorText(): string {
-    return this.#rawEditors.at(-1)?.component.getText() ?? this.#editor.text;
+    const raw = this.#rawEditors.at(-1)?.component;
+    return raw?.getExpandedText?.() ?? raw?.getText() ?? this.#editor.text;
   }
 
   async requestInput(title: string, placeholder?: string, signal?: AbortSignal): Promise<string> {
@@ -4921,15 +5027,11 @@ export class TuiController {
   }
 
   toggleTool(callId?: string): boolean {
-    const target = !this.#model.toolOutputExpanded;
-    const transcriptChanged = callId !== undefined || this.#model.entries.some((entry) => (
-      entry.kind === "tool"
-      || entry.kind === "startup"
-      || entry.expandable === true
-    ) && entry.expanded !== target);
-    const changed = this.#model.toggleTool(callId);
+    const visible = this.#visibleTranscriptModel();
+    const changed = visible.toggleTool(callId);
+    if (visible !== this.#model && callId === undefined) this.#model.setToolOutputExpanded(visible.toolOutputExpanded);
     if (changed) {
-      if (transcriptChanged) this.#invalidateTranscriptLayout();
+      this.#invalidateTranscriptLayout();
       this.#scheduleRender();
     }
     return changed;
@@ -4944,6 +5046,8 @@ export class TuiController {
 
   toggleReasoning(): boolean {
     const changed = this.#model.toggleReasoning();
+    const history = this.#historyPage?.model;
+    if (history !== undefined && history.reasoningExpanded !== this.#model.reasoningExpanded) history.toggleReasoning();
     if (changed) {
       this.#invalidateTranscriptLayout();
       this.#scheduleRender();
@@ -4952,15 +5056,7 @@ export class TuiController {
   }
 
   #toggleDetails(): void {
-    const expanded = !this.#model.toolOutputExpanded;
-    const transcriptChanged = this.#model.entries.some((entry) => (
-      entry.kind === "tool"
-      || entry.kind === "startup"
-      || entry.expandable === true
-    ) && entry.expanded !== expanded);
-    if (!this.#model.setToolOutputExpanded(expanded)) return;
-    if (transcriptChanged) this.#invalidateTranscriptLayout();
-    this.#scheduleRender();
+    this.toggleTool();
   }
 
   setTheme(name: ThemeName): void {
@@ -5266,7 +5362,7 @@ export class TuiController {
     return remove;
   }
 
-  #clearExtensionValueOwner(owners: Map<string, ExtensionValueOwner>, key: string): void {
+  #clearPluginValueOwner(owners: Map<string, PluginValueOwner>, key: string): void {
     const previous = owners.get(key);
     if (previous === undefined) return;
     previous.signal.removeEventListener("abort", previous.onAbort);
@@ -5274,13 +5370,13 @@ export class TuiController {
   }
 
   #extensionUiKey(key: string): string {
-    if (Buffer.byteLength(key) > MAX_EXTENSION_UI_KEY_BYTES) {
-      throw new RangeError(`Extension UI keys cannot exceed ${MAX_EXTENSION_UI_KEY_BYTES} bytes`);
+    if (Buffer.byteLength(key) > MAX_PLUGIN_UI_KEY_BYTES) {
+      throw new RangeError(`Plugin UI keys cannot exceed ${MAX_PLUGIN_UI_KEY_BYTES} bytes`);
     }
     return key;
   }
 
-  #setExtensionText(
+  #setPluginText(
     values: Map<string, string>,
     key: string,
     value: string | undefined,
@@ -5291,23 +5387,23 @@ export class TuiController {
       values.delete(selectedKey);
       return selectedKey;
     }
-    if (!values.has(selectedKey) && values.size >= MAX_EXTENSION_TEXT_SLOTS) {
-      throw new RangeError(`Extension UI text is limited to ${MAX_EXTENSION_TEXT_SLOTS} slots`);
+    if (!values.has(selectedKey) && values.size >= MAX_PLUGIN_TEXT_SLOTS) {
+      throw new RangeError(`Plugin UI text is limited to ${MAX_PLUGIN_TEXT_SLOTS} slots`);
     }
     values.set(selectedKey, byteTruncate(sanitizeTerminalText(value), maximumBytes));
     return selectedKey;
   }
 
-  #setExtensionValueOwner(
-    owners: Map<string, ExtensionValueOwner>,
+  #setPluginValueOwner(
+    owners: Map<string, PluginValueOwner>,
     key: string,
     signal: AbortSignal | undefined,
     onAbort: () => void,
   ): void {
-    this.#clearExtensionValueOwner(owners, key);
+    this.#clearPluginValueOwner(owners, key);
     if (signal === undefined) return;
     signal.throwIfAborted();
-    const owner: ExtensionValueOwner = {
+    const owner: PluginValueOwner = {
       signal,
       onAbort: () => {
         if (owners.get(key) !== owner) return;
@@ -5320,9 +5416,9 @@ export class TuiController {
     if (signal.aborted) owner.onAbort();
   }
 
-  #setOwnedExtensionText(
+  #setOwnedPluginText(
     values: Map<string, string>,
-    owners: Map<string, ExtensionValueOwner>,
+    owners: Map<string, PluginValueOwner>,
     key: string,
     value: string | undefined,
     maximumBytes: number,
@@ -5331,11 +5427,11 @@ export class TuiController {
   ): void {
     signal?.throwIfAborted();
     key = this.#extensionUiKey(key);
-    this.#clearExtensionValueOwner(owners, key);
+    this.#clearPluginValueOwner(owners, key);
     if (value === undefined || value === "") values.delete(key);
     else {
-      this.#setExtensionText(values, key, value, maximumBytes);
-      this.#setExtensionValueOwner(owners, key, signal, () => {
+      this.#setPluginText(values, key, value, maximumBytes);
+      this.#setPluginValueOwner(owners, key, signal, () => {
         values.delete(key);
         refresh();
         this.#scheduleRender();
@@ -5345,19 +5441,19 @@ export class TuiController {
     this.#scheduleRender();
   }
 
-  setExtensionWorkingMessage(key: string, value?: string, signal?: AbortSignal): void {
+  setPluginWorkingMessage(key: string, value?: string, signal?: AbortSignal): void {
     signal?.throwIfAborted();
     key = this.#extensionUiKey(key);
-    this.#clearExtensionValueOwner(this.#extensionWorkingMessageOwners, key);
+    this.#clearPluginValueOwner(this.#extensionWorkingMessageOwners, key);
     if (value === undefined || value === "") this.#extensionWorkingMessages.delete(key);
     else {
-      this.#setExtensionText(
+      this.#setPluginText(
         this.#extensionWorkingMessages,
         key,
         value.replaceAll("\n", " "),
-        MAX_EXTENSION_STATUS_BYTES,
+        MAX_PLUGIN_STATUS_BYTES,
       );
-      this.#setExtensionValueOwner(this.#extensionWorkingMessageOwners, key, signal, () => {
+      this.#setPluginValueOwner(this.#extensionWorkingMessageOwners, key, signal, () => {
         this.#extensionWorkingMessages.delete(key);
         this.#scheduleRender();
       });
@@ -5365,18 +5461,18 @@ export class TuiController {
     this.#scheduleRender();
   }
 
-  setExtensionWorkingVisible(key: string, visible?: boolean, signal?: AbortSignal): void {
+  setPluginWorkingVisible(key: string, visible?: boolean, signal?: AbortSignal): void {
     signal?.throwIfAborted();
     key = this.#extensionUiKey(key);
-    this.#clearExtensionValueOwner(this.#extensionWorkingVisibilityOwners, key);
+    this.#clearPluginValueOwner(this.#extensionWorkingVisibilityOwners, key);
     if (visible === undefined) this.#extensionWorkingVisibility.delete(key);
     else {
-      if (!this.#extensionWorkingVisibility.has(key) && this.#extensionWorkingVisibility.size >= MAX_EXTENSION_TEXT_SLOTS) {
-        throw new RangeError(`Extension UI text is limited to ${MAX_EXTENSION_TEXT_SLOTS} slots`);
+      if (!this.#extensionWorkingVisibility.has(key) && this.#extensionWorkingVisibility.size >= MAX_PLUGIN_TEXT_SLOTS) {
+        throw new RangeError(`Plugin UI text is limited to ${MAX_PLUGIN_TEXT_SLOTS} slots`);
       }
       this.#extensionWorkingVisibility.delete(key);
       this.#extensionWorkingVisibility.set(key, visible);
-      this.#setExtensionValueOwner(this.#extensionWorkingVisibilityOwners, key, signal, () => {
+      this.#setPluginValueOwner(this.#extensionWorkingVisibilityOwners, key, signal, () => {
         this.#extensionWorkingVisibility.delete(key);
         this.#scheduleRender();
       });
@@ -5384,13 +5480,13 @@ export class TuiController {
     this.#scheduleRender();
   }
 
-  setExtensionStatus(key: string, value?: string, signal?: AbortSignal): void {
-    this.#setOwnedExtensionText(
+  setPluginStatus(key: string, value?: string, signal?: AbortSignal): void {
+    this.#setOwnedPluginText(
       this.#extensionStatuses,
       this.#extensionStatusOwners,
       key,
       value?.replaceAll("\n", " "),
-      MAX_EXTENSION_STATUS_BYTES,
+      MAX_PLUGIN_STATUS_BYTES,
       signal,
       () => this.#model.setContext({ extensionStatus: [...this.#extensionStatuses.values()].join(" · ") }),
     );
@@ -5400,7 +5496,7 @@ export class TuiController {
   setTransientStatus(value?: string): void {
     this.#ensureStarted();
     if (this.mode === "full") {
-      this.setExtensionStatus("core:transient", value);
+      this.setPluginStatus("core:transient", value);
       return;
     }
     if (value === undefined || value === "") {
@@ -5420,48 +5516,48 @@ export class TuiController {
     this.#transientStatusColumns = columns;
   }
 
-  setExtensionWidget(key: string, value?: string, signal?: AbortSignal): void {
-    this.#setOwnedExtensionText(
+  setPluginWidget(key: string, value?: string, signal?: AbortSignal): void {
+    this.#setOwnedPluginText(
       this.#extensionWidgets,
       this.#extensionWidgetOwners,
       key,
       value,
-      MAX_EXTENSION_TEXT_BYTES,
+      MAX_PLUGIN_TEXT_BYTES,
       signal,
       () => this.#model.setContext({ widgets: [...this.#extensionWidgets.values()] }),
     );
   }
 
-  setExtensionHeader(key: string, value?: string, signal?: AbortSignal): void {
-    this.#setOwnedExtensionText(
+  setPluginHeader(key: string, value?: string, signal?: AbortSignal): void {
+    this.#setOwnedPluginText(
       this.#extensionHeaders,
       this.#extensionHeaderOwners,
       key,
       value,
-      MAX_EXTENSION_TEXT_BYTES,
+      MAX_PLUGIN_TEXT_BYTES,
       signal,
       () => this.#model.setContext({ extensionHeaders: [...this.#extensionHeaders.values()] }),
     );
   }
 
-  setExtensionFooter(key: string, value?: string, signal?: AbortSignal): void {
-    this.#setOwnedExtensionText(
+  setPluginFooter(key: string, value?: string, signal?: AbortSignal): void {
+    this.#setOwnedPluginText(
       this.#extensionFooters,
       this.#extensionFooterOwners,
       key,
       value,
-      MAX_EXTENSION_TEXT_BYTES,
+      MAX_PLUGIN_TEXT_BYTES,
       signal,
       () => this.#model.setContext({ extensionFooters: [...this.#extensionFooters.values()] }),
     );
   }
 
-  setExtensionUiSlot(
+  setPluginUiSlot(
     ownerKey: string,
-    path: ExtensionUISlotPath,
+    path: PluginUISlotPath,
     key: string,
-    contribution: ExtensionUISlotContribution | undefined,
-    token: ExtensionUISlotToken,
+    contribution: PluginUISlotContribution | undefined,
+    token: PluginUISlotToken,
     signal?: AbortSignal,
   ): void {
     const selectedKey = JSON.stringify([ownerKey, path, key]);
@@ -5474,11 +5570,11 @@ export class TuiController {
       this.#scheduleRender();
       return;
     }
-    if (this.mode !== "full") throw new Error("Extension UI slots require the full rich TUI");
-    if (signal === undefined) throw new Error("Extension UI slots require a generation signal");
+    if (this.mode !== "full") throw new Error("Plugin UI slots require the full rich TUI");
+    if (signal === undefined) throw new Error("Plugin UI slots require a generation signal");
     signal.throwIfAborted();
     const rollback = this.#extensionUiSlots.set(ownerKey, path, key, contribution, token);
-    const owner: ExtensionUISlotOwner = {
+    const owner: PluginUISlotOwner = {
       ownerKey,
       path,
       key,
@@ -5603,6 +5699,7 @@ export class TuiController {
   }
 
   setSessionRenderers(binding?: RuntimeSessionRendererBinding, signal?: AbortSignal): void {
+    this.#sessionRenderBlocks.clear();
     const previous = this.#sessionRenderers;
     if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
     this.#sessionRenderers = undefined;
@@ -5615,6 +5712,7 @@ export class TuiController {
         onAbort: () => {
           if (this.#sessionRenderers !== owner) return;
           this.#sessionRenderers = undefined;
+          this.#sessionRenderBlocks.clear();
           this.#scheduleRender();
         },
       };
@@ -5625,11 +5723,11 @@ export class TuiController {
     this.#scheduleRender();
   }
 
-  clearExtensionUi(): void {
+  clearPluginUi(): void {
     this.setToolRenderers();
     this.setSessionRenderers();
     this.setEditorRenderer();
-    this.setExtensionShortcuts();
+    this.setPluginShortcuts();
     this.setCommandCompletionProvider();
     this.setAutocompleteProvider();
     this.setEditorMiddleware();
@@ -5651,13 +5749,13 @@ export class TuiController {
     this.#clearAdvancedUiOverrides();
     for (const owner of this.#normalizedKeyObservers.values()) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#normalizedKeyObservers.clear();
-    for (const [key] of this.#extensionStatusOwners) this.#clearExtensionValueOwner(this.#extensionStatusOwners, key);
-    for (const [key] of this.#extensionWidgetOwners) this.#clearExtensionValueOwner(this.#extensionWidgetOwners, key);
-    for (const [key] of this.#extensionHeaderOwners) this.#clearExtensionValueOwner(this.#extensionHeaderOwners, key);
-    for (const [key] of this.#extensionFooterOwners) this.#clearExtensionValueOwner(this.#extensionFooterOwners, key);
-    for (const [key] of this.#extensionWorkingMessageOwners) this.#clearExtensionValueOwner(this.#extensionWorkingMessageOwners, key);
-    for (const [key] of this.#extensionWorkingVisibilityOwners) this.#clearExtensionValueOwner(this.#extensionWorkingVisibilityOwners, key);
-    this.#clearExtensionUiSlots();
+    for (const [key] of this.#extensionStatusOwners) this.#clearPluginValueOwner(this.#extensionStatusOwners, key);
+    for (const [key] of this.#extensionWidgetOwners) this.#clearPluginValueOwner(this.#extensionWidgetOwners, key);
+    for (const [key] of this.#extensionHeaderOwners) this.#clearPluginValueOwner(this.#extensionHeaderOwners, key);
+    for (const [key] of this.#extensionFooterOwners) this.#clearPluginValueOwner(this.#extensionFooterOwners, key);
+    for (const [key] of this.#extensionWorkingMessageOwners) this.#clearPluginValueOwner(this.#extensionWorkingMessageOwners, key);
+    for (const [key] of this.#extensionWorkingVisibilityOwners) this.#clearPluginValueOwner(this.#extensionWorkingVisibilityOwners, key);
+    this.#clearPluginUiSlots();
     this.#extensionStatuses.clear();
     this.#extensionWidgets.clear();
     this.#extensionHeaders.clear();
@@ -5683,7 +5781,7 @@ export class TuiController {
     this.#restartActivityTimer();
   }
 
-  #clearExtensionUiSlots(): void {
+  #clearPluginUiSlots(): void {
     for (const owner of this.#extensionUiSlotOwners.values()) {
       owner.signal.removeEventListener("abort", owner.onAbort);
     }
@@ -5692,7 +5790,8 @@ export class TuiController {
   }
 
   #pruneSessionEntries(): void {
-    const live = new Set(this.#model.entries.flatMap((entry) => entry.extension === undefined ? [] : [entry.id]));
+    const live = new Set([...this.#model.entries, ...(this.#historyPage?.model.entries ?? [])]
+      .flatMap((entry) => entry.extension === undefined ? [] : [entry.id]));
     for (const [entryId, retained] of this.#sessionEntries) {
       if (live.has(entryId)) continue;
       this.#sessionEntries.delete(entryId);
@@ -5859,7 +5958,7 @@ export class TuiController {
         failures.push({ index, sequence: failureSequence++, failure });
       };
       if (owner.signal.aborted || this.#toolRenderers !== owner) break;
-      const directResultContent = this.#model.directToolResultContent(entry);
+      const directResultContent = this.#visibleTranscriptModel().directToolResultContent(entry);
       const cached = previousBlocks.get(entry);
       const omitted = previousOmissions.get(entry);
       const matchesView = (candidate: CachedToolRenderBlock | OmittedToolRenderBlock | undefined): boolean =>
@@ -6102,27 +6201,49 @@ export class TuiController {
     const owner = this.#sessionRenderers;
     const blocks = new Map<string, RuntimeUiBlock>();
     if (owner === undefined || owner.signal.aborted) return blocks;
-    const theme = this.currentThemeObject();
+    let theme: Theme | undefined;
+    const renderTheme = this.#theme;
+    const previous = this.#sessionRenderBlocks;
+    const retainedBlocks = new Map<string, CachedSessionRenderBlock>();
+    this.#sessionRenderBlocks = retainedBlocks;
+    let retainedBytes = 0;
     for (const entry of entries) {
       if (entry.extension === undefined) continue;
       const retained = this.#sessionEntries.get(entry.id);
       if (retained === undefined || owner.signal.aborted || this.#sessionRenderers !== owner) continue;
       try {
         const options = { expanded: entry.expanded === true, outputPad: this.#outputPad };
+        const cached = previous.get(entry.id);
+        if (cached?.retained === retained && cached.width === width && cached.theme === renderTheme
+          && cached.expanded === options.expanded && cached.outputPad === options.outputPad) {
+          if (retainedBytes + cached.bytes <= MAX_RETAINED_TOOL_RENDER_BYTES) {
+            retainedBlocks.set(entry.id, cached);
+            retainedBytes += cached.bytes;
+          }
+          if (cached.block !== undefined) blocks.set(entry.id, cached.block);
+          continue;
+        }
+        theme ??= this.currentThemeObject();
         const component = retained.entry.type === "custom"
           ? owner.binding.renderEntry(retained.entry, options, theme)
           : retained.message === undefined
             ? undefined
             : owner.binding.renderMessage(retained.message, options, theme);
-        if (component === undefined || owner.signal.aborted || this.#sessionRenderers !== owner) continue;
-        const value: RuntimeUiBlock = {
+        if (owner.signal.aborted || this.#sessionRenderers !== owner) continue;
+        const block = component === undefined ? undefined : sanitizeRuntimeUiBlock({
           lines: component.render(width).map((line) => ({ spans: [{ text: line }] })),
-        };
-        blocks.set(entry.id, sanitizeRuntimeUiBlock(value, {
+        }, {
           width,
           maxLines: 2_000,
           maxBytes: 2 * 1024 * 1024,
-        }));
+        });
+        if (owner.signal.aborted || this.#sessionRenderers !== owner) continue;
+        if (block !== undefined) blocks.set(entry.id, block);
+        const bytes = block === undefined ? 0 : retainedValueBytes(block);
+        if (retainedBytes + bytes <= MAX_RETAINED_TOOL_RENDER_BYTES) {
+          retainedBytes += bytes;
+          retainedBlocks.set(entry.id, { retained, width, theme: renderTheme, ...options, block, bytes });
+        }
       } catch {
         // The layout renders the data-only fallback for a failed extension renderer.
       }
@@ -6170,18 +6291,8 @@ export class TuiController {
 
   #editorViewport(): EditorViewport {
     const size = terminalSize(this.output, this.capabilities);
-    const frameWidth = size.columns;
-    const editorWidth = Math.max(1, frameWidth - 1);
-    const contentWidth = Math.max(1, editorWidth - (this.#editorPaddingX * 2));
-    const label = this.#inputMode === "follow_up" ? "follow" : this.#inputLabel;
-    const safeLabel = sanitizeTerminalText(label);
-    const prompt = safeLabel === "you" ? "> " : `${safeLabel}> `;
-    const prefix = truncateCells(
-      `  | ${" ".repeat(this.#editorPaddingX)}${prompt}`,
-      Math.max(0, contentWidth - 1),
-    );
     return {
-      width: Math.max(1, contentWidth - cellWidth(prefix)),
+      width: composerGeometry(size.columns, this.#editorPaddingX).width,
       rows: Math.min(6, Math.max(2, Math.floor(Math.max(8, size.rows) / 3))),
     };
   }
@@ -6269,7 +6380,7 @@ export class TuiController {
       "session.beforeEditor",
       "session.afterEditor",
       "session.footer",
-    ] as const satisfies readonly ExtensionUISlotPath[]) {
+    ] as const satisfies readonly PluginUISlotPath[]) {
       const projection = this.#extensionUiSlots.project(path);
       if (projection.lines.length === 0) continue;
       const role: "accent" | "muted" = path === "session.header" || path === "session.beforeEditor"
@@ -6411,7 +6522,8 @@ export class TuiController {
         ) continue;
         try {
           const projected = projectOhmTuiToolEntry(entry);
-          const details = projected?.details?.filter((detail) => detail.preview !== true && detail.markdown !== true) ?? [];
+          const details = projected?.details?.filter((detail) => detail.markdown !== true
+            && (entry.status === "completed" || detail.preview !== true)) ?? [];
           if (details.length === 0) continue;
           state.pendingDetails = details;
           state.pendingDetailIndex = 0;
@@ -6514,6 +6626,7 @@ export class TuiController {
   }
 
   renderNow(): void {
+    if (!this.#scheduledFrame) this.#sessionRenderBlocks.clear();
     this.#cancelNativeToolDetailPrewarm();
     if (!this.#started || this.#closed || this.#suspended || this.#secretAbort !== undefined || this.#externalEditing || this.mode !== "full") return;
     this.#renderGeneration += 1;
@@ -6526,10 +6639,10 @@ export class TuiController {
     this.#streamingUpdatePending = false;
     if (streamed) this.#lastStreamingRenderAt = performance.now();
     this.#flushDeferredToolStream();
-    this.#terminalImages.prune(new Set(this.#model.entries.flatMap((entry) => (entry.images ?? []).map((image) => image.key))));
+    this.#terminalImages.prune(new Set(this.#visibleTranscriptModel().entries.flatMap((entry) => (entry.images ?? []).map((image) => image.key))));
     const size = terminalSize(this.output, this.capabilities);
     const overlay = this.#overlay;
-    const transcript = this.#model.entries;
+    const transcript = this.#visibleTranscriptModel().entries;
     const toolRenderBlocks = this.#renderToolBlocks(transcript, size.columns, size.rows);
     const sessionRenderBlocks = this.#renderSessionBlocks(transcript, size.columns, size.rows);
     const transformMarkdown = this.#markdownTransformer();
@@ -6541,6 +6654,8 @@ export class TuiController {
     let runtimeComponent: RuntimeUiBlock | undefined;
     let rawRuntimeComponent: import("./types.js").TuiRawBlock | undefined;
     const runtimeOverlays: NonNullable<TuiViewState["runtimeOverlays"]>[number][] = [];
+    const overlayBlocks = new Map<RawComponentOwner | RuntimeComponentOwner, object>();
+    const overlayContexts = new Map<RuntimeComponentOwner, RuntimeUiRenderContext>();
     const rawRuntimeOverlays: NonNullable<TuiViewState["rawRuntimeOverlays"]>[number][] = [];
     const componentOwner = this.#runtimeComponent;
     for (const owner of this.#runtimeOwners()) delete owner.pointerSurface;
@@ -6623,20 +6738,11 @@ export class TuiController {
           focused: overlayOwner.focused,
           width: componentWidth,
         });
-        const pointerSurface = runtimeOverlayPointerSurface(
-          overlayOptions,
-          size.columns,
-          size.rows,
-          componentWidth,
-          rendered.block.lines.length,
-          context,
-        );
-        if (pointerSurface !== undefined) overlayOwner.pointerSurface = pointerSurface;
+        overlayBlocks.set(overlayOwner, rendered.block);
+        overlayContexts.set(overlayOwner, context);
       }
       else overlayOwner.mount.close();
     }
-    if (this.#runtimePointerCapture?.pointerSurface === undefined) this.#runtimePointerCapture = undefined;
-    if (this.#runtimePointerHover?.pointerSurface === undefined) this.#runtimePointerHover = undefined;
     if (this.#copyToast !== undefined) {
       const label = this.capabilities.unicode ? `✓ ${this.#copyToast}` : this.#copyToast;
       const inner = ` ${label} `;
@@ -6686,17 +6792,21 @@ export class TuiController {
         Math.max(1, size.rows),
       );
       const rendered = rawOverlayOwner.mount.render(componentWidth, componentHeight);
-      if (rendered.ok) rawRuntimeOverlays.push({
-        block: rendered.block,
-        options: overlayOptions,
-        focused: rawOverlayOwner.focused,
-        width: componentWidth,
-      });
+      if (rendered.ok) {
+        rawRuntimeOverlays.push({
+          block: rendered.block,
+          options: overlayOptions,
+          focused: rawOverlayOwner.focused,
+          width: componentWidth,
+        });
+        overlayBlocks.set(rawOverlayOwner, rendered.block);
+      }
       else rawOverlayOwner.mount.close();
     }
     const selectionNavigation = `${this.#bindingHint("tui.select.up", 1)}/${this.#bindingHint("tui.select.down", 1)} navigate`;
     const selectionConfirm = this.#bindingHint("tui.select.confirm", 1);
     const selectionCancel = this.#bindingHint("tui.select.cancel", 1);
+    const promptSeparator = this.capabilities.unicode ? " · " : " | ";
     const selectedDescription = overlay?.settings === undefined
       ? undefined
       : overlay.items[overlay.selected]?.description;
@@ -6718,12 +6828,13 @@ export class TuiController {
         ? overlay.tree.mode === "label"
           ? {
               title: overlay.tree.target?.tree?.label === undefined ? "Add entry label" : "Edit entry label",
+              promptMode: "input" as const,
               queryLabel: "label> ",
               query: overlay.query.text,
               selected: 0,
               items: [],
               hints: [
-                `${this.#bindingHint("tui.select.confirm", 1)} save · empty removes · ${this.#bindingHint("tui.select.cancel", 1)} cancel`,
+                `${selectionConfirm} save${promptSeparator}empty removes${promptSeparator}${selectionCancel} cancel`,
               ],
               ...optionalProperties(overlay.tree.status === undefined ? undefined : { status: overlay.tree.status }),
             }
@@ -6767,11 +6878,11 @@ export class TuiController {
         : overlay.session.mode === "confirm_delete"
             ? {
                 title: "Delete session",
-                queryLabel: "confirm> ",
+                promptMode: "confirmation" as const,
                 query: "",
                 selected: 0,
                 items: [],
-                hints: [`${selectionConfirm} delete · ${selectionCancel} cancel`],
+                hints: [`${selectionConfirm} delete${promptSeparator}${selectionCancel} cancel`],
                 ...optionalProperties(overlay.session.status === undefined ? undefined : { status: overlay.session.status }),
               }
             : {
@@ -6849,6 +6960,7 @@ export class TuiController {
         transcriptSearch: {
           query: this.#transcriptSearch.query.text,
           cursor: this.#transcriptSearch.query.cursor,
+          ...optionalProperties(this.#transcriptSearch.status === undefined ? undefined : { status: this.#transcriptSearch.status }),
           ...optionalProperties(this.#transcriptSearch.selectedMatch === undefined ? undefined : {
             selectedMatch: this.#transcriptSearch.selectedMatch,
           }),
@@ -6882,7 +6994,12 @@ export class TuiController {
             ],
           }),
       ...optionalProperties(this.#model.usage === undefined ? undefined : { usage: this.#model.usage }),
-      ...optionalProperties(this.#model.notice === undefined ? undefined : { notice: this.#model.notice }),
+      ...optionalProperties((this.#historyStatus ?? this.#model.notice) === undefined ? undefined : {
+        notice: this.#historyStatus ?? (this.#transcriptHistory !== undefined
+          && this.#model.notice === "Older transcript entries were discarded from the viewport"
+          ? `Earlier history available · ${this.#bindingHint("tui.transcript.top", 1)} to browse`
+          : this.#model.notice!),
+      }),
       ...optionalProperties(backgroundCells === undefined ? undefined : { backgroundCells }),
       ...optionalProperties(persistentComponents.header.length === 0 ? undefined : { runtimeHeaderComponents: persistentComponents.header }),
       ...optionalProperties(persistentComponents.footer.length === 0 ? undefined : { runtimeFooterComponents: persistentComponents.footer }),
@@ -6976,6 +7093,26 @@ export class TuiController {
     let frame = projectFrame(view);
     let nextNavigation = frame.transcriptNavigation;
     let nextRichAnchorState = richTranscriptAnchorState(frame);
+    const historyReveal = this.#historyReveal;
+    if (historyReveal !== undefined && nextNavigation !== undefined) {
+      this.#historyReveal = undefined;
+      const entries = this.#visibleTranscriptModel().entries;
+      const matching = entries.filter((entry) => historyReveal.entryId !== undefined
+        ? entry.id === historyReveal.entryId || entry.sourceMessageId === historyReveal.entryId
+        : historyReveal.kind === undefined || entry.kind === historyReveal.kind);
+      const selected = historyReveal.edge === "last" ? matching.at(-1) : matching[0];
+      const range = nextRichAnchorState?.ranges.find((range) => selected !== undefined && range.entryIds.includes(selected.id));
+      if (range !== undefined) {
+        this.#transcriptOffset = Math.max(0, nextNavigation.totalRows - range.start - nextNavigation.viewportRows);
+        if (this.#transcriptSearch !== undefined && historyReveal.entryId !== undefined) {
+          this.#transcriptSearch.anchorRow = range.start;
+          this.#transcriptSearch.reveal = true;
+        }
+        frame = projectFrame({ ...view, transcriptOffset: this.#transcriptOffset });
+        nextNavigation = frame.transcriptNavigation;
+        nextRichAnchorState = richTranscriptAnchorState(frame);
+      }
+    }
     if (
       previousNavigation !== undefined
       && nextNavigation !== undefined
@@ -7058,6 +7195,7 @@ export class TuiController {
     } else this.#transcriptSearchProjection = undefined;
     this.#transcriptNavigation = nextNavigation;
     this.#richTranscriptViewportAnchor = nextRichAnchorState?.viewport;
+    this.#richTranscriptRanges = nextRichAnchorState?.ranges;
     if (nextNavigation !== undefined) {
       this.#transcriptOffset = Math.max(
         0,
@@ -7093,6 +7231,20 @@ export class TuiController {
       : { ...frame, text: this.#alternateInteraction.decorateFrame(frame.text) };
     const update = this.#surface.render(selectedFrame, size);
     if (update.output !== "") this.#write(`${HIDE_CURSOR}${update.output}${this.#showHardwareCursor ? SHOW_CURSOR : HIDE_CURSOR}`);
+    for (const owner of [...this.#runtimeOwners(), ...this.#rawOwners()]) {
+      const block = overlayBlocks.get(owner);
+      const bounds = block === undefined ? undefined : frame[INTERNAL_TUI_OVERLAY_BOUNDS]?.get(block);
+      if (bounds === undefined) delete owner.renderedBounds;
+      else owner.renderedBounds = { bounds, columns: size.columns, rows: size.rows };
+    }
+    for (const [owner, context] of overlayContexts) {
+      const bounds = owner.renderedBounds?.bounds;
+      if (bounds !== undefined) owner.pointerSurface = {
+        ...bounds, terminalWidth: size.columns, terminalHeight: size.rows, context,
+      };
+    }
+    if (this.#runtimePointerCapture?.pointerSurface === undefined) this.#runtimePointerCapture = undefined;
+    if (this.#runtimePointerHover?.pointerSurface === undefined) this.#runtimePointerHover = undefined;
     if (frame.transcriptNavigation !== undefined) {
       const scrollbarReserved = this.#fullscreenScrollbar === "always"
         || frame.transcriptNavigation.pointerRegion?.scrollbar !== undefined;
@@ -7107,6 +7259,7 @@ export class TuiController {
 
   close(): void {
     if (this.#closed || this.#closing) return;
+    this.setTranscriptHistory(undefined);
     this.#cancelNativeToolDetailPrewarm();
     if (this.mode === "full") this.#flushDeferredToolStream();
     this.#clearPendingActiveMessages();
@@ -7127,7 +7280,7 @@ export class TuiController {
     }
     this.#writtenTerminalTitle = "";
     this.#lifecycleAbort.abort(new Error("Terminal closed"));
-    this.#clearExtensionUiSlots();
+    this.#clearPluginUiSlots();
     if (this.#toolRenderers !== undefined) {
       this.#toolRenderers.signal.removeEventListener("abort", this.#toolRenderers.onAbort);
       this.#disposeToolRenderers(this.#toolRenderers);
@@ -7138,6 +7291,7 @@ export class TuiController {
     this.#frameProjector?.[INTERNAL_TUI_FRAME_PROJECTOR_CLEAR]?.();
     if (this.#sessionRenderers !== undefined) this.#sessionRenderers.signal.removeEventListener("abort", this.#sessionRenderers.onAbort);
     this.#sessionRenderers = undefined;
+    this.#sessionRenderBlocks.clear();
     if (this.#editorRenderer !== undefined) this.#editorRenderer.signal.removeEventListener("abort", this.#editorRenderer.onAbort);
     this.#editorRenderer = undefined;
     this.#lineReasoningParts.clear();
@@ -7400,6 +7554,12 @@ export class TuiController {
     this.#scheduleRender();
   }
 
+  #renderScheduledFrame(): void {
+    this.#scheduledFrame = true;
+    try { this.renderNow(); }
+    finally { this.#scheduledFrame = false; }
+  }
+
   #scheduleRender(): void {
     this.#cancelNativeToolDetailPrewarm();
     if (this.#streamingRender !== undefined || this.#streamingRenderTimer !== undefined) {
@@ -7415,7 +7575,7 @@ export class TuiController {
     queueMicrotask(() => {
       if (generation !== this.#renderGeneration) return;
       try {
-        this.renderNow();
+        this.#renderScheduledFrame();
       } catch (cause) {
         this.#fail(error(cause));
       }
@@ -7433,7 +7593,7 @@ export class TuiController {
     const render = () => {
       this.#streamingRender = undefined;
       try {
-        this.renderNow();
+        this.#renderScheduledFrame();
       } catch (cause) {
         this.#fail(error(cause));
       }
@@ -7688,7 +7848,7 @@ export class TuiController {
     return handled;
   }
 
-  #handleExtensionPointer(event: AlternateScreenMouseEvent): boolean {
+  #handlePluginPointer(event: AlternateScreenMouseEvent): boolean {
     if (this.#runtimePointerCapture !== undefined) return this.#handleRuntimePointer(event);
     if (this.#persistentRuntimePointerCapture !== undefined) return this.#handlePersistentRuntimePointer(event);
     if (this.#handleRuntimePointer(event)) {
@@ -7818,10 +7978,7 @@ export class TuiController {
   #handleAlternateDecision(decisions: readonly AlternateScreenDecision[]): void {
     for (const decision of decisions) {
       if (decision.type === "scroll") {
-        this.#transcriptOffset = Math.max(
-          0,
-          Math.min(1_000_000, this.#transcriptOffset + decision.rows),
-        );
+        this.#scrollTranscript(decision.rows);
         this.#scheduleRender();
         continue;
       }
@@ -8004,8 +8161,13 @@ export class TuiController {
       return true;
     }
     const action = KEYBINDING_ACTIONS.find((candidate) =>
-      candidate.startsWith("app.") && this.#keybindings.matches(candidate, event));
+      (candidate.startsWith("app.") || candidate.startsWith("tui.transcript.")) && this.#keybindings.matches(candidate, event));
     if (action === undefined) return false;
+    if (action === "tui.transcript.pageUp" || action === "tui.transcript.pageDown") {
+      const rows = Math.max(1, terminalSize(this.output, this.capabilities).rows - 6);
+      this.#scrollTranscript(action === "tui.transcript.pageUp" ? rows : -rows);
+      return true;
+    }
     const component = owner.component;
     if (
       action === "app.interrupt"
@@ -8022,22 +8184,22 @@ export class TuiController {
       && component.getText() !== ""
     ) {
       component.handleInput("\u001b[3~");
-      this.#editor.setText(component.getText());
+      this.#editor.setText(component.getExpandedText?.() ?? component.getText());
       return true;
     }
     if (action === "app.message.followUp" && this.#steering === undefined) {
       if (component.insertTextAtCursor !== undefined) component.insertTextAtCursor("\n");
-      else component.setText(`${component.getText()}\n`);
-      this.#editor.setText(component.getText());
+      else component.setText(`${component.getExpandedText?.() ?? component.getText()}\n`);
+      this.#editor.setText(component.getExpandedText?.() ?? component.getText());
       return true;
     }
-    const text = component.getText();
+    const text = component.getExpandedText?.() ?? component.getText();
     if (this.#editor.text !== text) this.#editor.setText(text);
     if (this.#interruptHandler !== undefined && action === "app.interrupt") {
       if (this.#interruptHandler() !== false) return true;
     }
     this.#handleEditorKey(event);
-    if (component.getText() !== this.#editor.text) component.setText(this.#editor.text);
+    if ((component.getExpandedText?.() ?? component.getText()) !== this.#editor.text) component.setText(this.#editor.text);
     return true;
   }
 
@@ -8057,9 +8219,13 @@ export class TuiController {
         this.#handleTerminalReplies(replies);
         continue;
       }
+      if (this.#transcriptSearch !== undefined) {
+        for (const event of events) this.#handleTranscriptSearchKey(event);
+        continue;
+      }
       if (events.some((event) => this.#handleRawEditorHostEvent(owner, event))) continue;
       owner.component.handleInput(data);
-      this.#editor.setText(owner.component.getText());
+      this.#editor.setText(owner.component.getExpandedText?.() ?? owner.component.getText());
     }
   }
 
@@ -8585,6 +8751,15 @@ export class TuiController {
   }
 
   #closeTranscriptSearch(): void {
+    if (this.#transcriptSearch !== undefined) {
+      this.#historyRequest?.abort();
+      this.#historyRequest = undefined;
+      if (this.#historyStatus === "Loading history…") this.#historyStatus = undefined;
+    }
+    this.#historySearchRequest?.abort();
+    this.#historySearchRequest = undefined;
+    if (this.#historySearchTimer !== undefined) clearTimeout(this.#historySearchTimer);
+    this.#historySearchTimer = undefined;
     this.#transcriptSearch = undefined;
     this.#transcriptSearchProjection = undefined;
   }
@@ -8592,6 +8767,10 @@ export class TuiController {
   #navigateTranscriptSearch(direction: "previous" | "next"): void {
     const search = this.#transcriptSearch;
     if (search === undefined) return;
+    if (this.#transcriptHistory !== undefined) {
+      this.#searchTranscriptHistory(direction);
+      return;
+    }
     const projection = this.#transcriptSearchProjection;
     if (projection === undefined || projection.query !== search.query.text || projection.matches.length === 0) {
       search.reveal = true;
@@ -8603,6 +8782,47 @@ export class TuiController {
       : (selected - 1 + projection.matches.length) % projection.matches.length;
     search.anchorRow = projection.matches[search.selectedMatch]?.startRow;
     search.reveal = true;
+  }
+
+  #searchTranscriptHistory(direction: "previous" | "next" = "next"): void {
+    const search = this.#transcriptSearch;
+    const history = this.#transcriptHistory;
+    if (search === undefined || history === undefined) return;
+    if (this.#historySearchTimer !== undefined) clearTimeout(this.#historySearchTimer);
+    this.#historySearchTimer = undefined;
+    this.#historySearchRequest?.abort();
+    const controller = new AbortController();
+    this.#historySearchRequest = controller;
+    const signal = AbortSignal.any([controller.signal, this.#lifecycleAbort.signal]);
+    const query = search.query.text.trim();
+    if (query === "") {
+      search.status = "Journal";
+      return;
+    }
+    search.status = "Searching journal…";
+    this.#scheduleRender();
+    const cursor = search.journalMatch === undefined ? {}
+      : direction === "next" ? { before: search.journalMatch } : { after: search.journalMatch };
+    void history.search(query, cursor, signal).then((result) => {
+      if (signal.aborted || this.#transcriptSearch !== search || this.#transcriptHistory !== history) return;
+      this.#historySearchRequest = undefined;
+      const match = result.matches[0];
+      if (match === undefined) {
+        search.status = search.journalMatch === undefined ? "Journal: no matches"
+          : direction === "next" ? "No older matches" : "No newer matches";
+      } else {
+        search.journalMatch = match.id;
+        search.selectedMatch = undefined;
+        search.status = "Journal match";
+        this.#loadTranscriptHistory({ from: match.id, query }, { edge: "last" });
+      }
+      this.#scheduleRender();
+    }).catch((cause) => {
+      if (signal.aborted || this.#transcriptSearch !== search) return;
+      this.#historySearchRequest = undefined;
+      search.status = `Search failed: ${boundedTuiFailureText(cause)}`;
+      this.#scheduleRender();
+    });
   }
 
   #editTranscriptSearch(change: (query: MultilineEditor) => void): void {
@@ -8617,6 +8837,19 @@ export class TuiController {
       search.anchorRow = this.#transcriptSearchAnchorRow();
       search.reveal = true;
       this.#transcriptSearchProjection = undefined;
+      if (this.#transcriptHistory !== undefined) {
+        this.#historySearchRequest?.abort();
+        this.#historyRequest?.abort();
+        this.#historyRequest = undefined;
+        delete search.journalMatch;
+        search.status = "Searching journal…";
+        if (this.#historySearchTimer !== undefined) clearTimeout(this.#historySearchTimer);
+        this.#historySearchTimer = setTimeout(() => {
+          this.#historySearchTimer = undefined;
+          if (this.#transcriptSearch === search) this.#searchTranscriptHistory();
+        }, 120);
+        this.#historySearchTimer.unref();
+      }
     }
   }
 
@@ -8637,12 +8870,12 @@ export class TuiController {
     }
     if (this.#keybindings.matches("tui.transcript.pageUp", event)) {
       const rows = terminalSize(this.output, this.capabilities).rows;
-      this.#transcriptOffset = Math.min(1_000_000, this.#transcriptOffset + Math.max(1, rows - 6));
+      this.#scrollTranscript(Math.max(1, rows - 6));
       return true;
     }
     if (this.#keybindings.matches("tui.transcript.pageDown", event)) {
       const rows = terminalSize(this.output, this.capabilities).rows;
-      this.#transcriptOffset = Math.max(0, this.#transcriptOffset - Math.max(1, rows - 6));
+      this.#scrollTranscript(-Math.max(1, rows - 6));
       return true;
     }
     if (this.#keybindings.matches("tui.transcript.top", event)) {
@@ -8796,7 +9029,9 @@ export class TuiController {
       session.mode = "confirm_delete";
       session.target = target;
       session.listQuery = overlay.query.snapshot();
-      session.status = `Delete “${target.session?.name ?? target.label}”? Recycle when available; otherwise permanent.`;
+      const name = target.session?.name ?? target.label;
+      const quotedName = this.capabilities.unicode ? `“${name}”` : `"${name}"`;
+      session.status = `Delete ${quotedName}? Recycle when available; otherwise permanent.`;
       overlay.query.clear({ recordUndo: false });
     };
 
@@ -8837,25 +9072,46 @@ export class TuiController {
     return false;
   }
 
-  #moveTranscript(direction: "previous" | "next" | "top" | "bottom"): void {
-    const navigation = this.#transcriptNavigation;
-    if (navigation === undefined) return;
+  #moveTranscript(direction: "previous" | "next" | "top" | "bottom", kind: "user" | "tool" = "user"): void {
     if (direction === "bottom") {
-      this.#transcriptOffset = 0;
+      if (this.#transcriptHistory !== undefined) this.#closeTranscriptSearch();
+      this.#returnToLiveTranscript();
       return;
     }
+    if (direction === "top" && this.#transcriptHistory !== undefined) {
+      this.#loadTranscriptHistory({ edge: "oldest",
+        ...optionalProperties(this.#historyPage?.page.from === undefined ? undefined : { from: this.#historyPage.page.from }),
+      }, { edge: "first" });
+      return;
+    }
+    const navigation = this.#transcriptNavigation;
+    if (navigation === undefined) return;
     if (direction === "top") {
       this.#transcriptOffset = Math.max(0, navigation.totalRows - navigation.viewportRows);
       return;
     }
+    const toolIds = kind === "tool"
+      ? new Set(this.#visibleTranscriptModel().entries.filter((entry) => entry.kind === "tool").map((entry) => entry.id))
+      : undefined;
+    const rows = toolIds === undefined ? navigation.messageRows
+      : (this.#richTranscriptRanges ?? []).filter((range) => range.entryIds.some((id) => toolIds.has(id))).map((range) => range.start);
     const target = direction === "previous"
-      ? navigation.messageRows.findLast((row) => row < navigation.startRow)
-      : navigation.messageRows.find((row) => row > navigation.startRow);
-    if (target === undefined) return;
+      ? rows.findLast((row) => row < navigation.startRow)
+      : rows.find((row) => row > navigation.startRow);
+    if (target === undefined) {
+      this.#pageTranscriptHistory(direction, kind);
+      return;
+    }
     this.#transcriptOffset = Math.max(0, navigation.totalRows - target - navigation.viewportRows);
   }
 
   #handleEditorKey(event: KeyEvent): void {
+    if (event.key === "escape" && this.#historyRequest !== undefined) {
+      this.#historyRequest.abort();
+      this.#historyRequest = undefined;
+      this.#historyStatus = this.#historyPage === undefined ? undefined : "History loading cancelled";
+      return;
+    }
     if (this.mode === "full" && this.#keybindings.matches("tui.transcript.searchOpen", event)) {
       this.#openTranscriptSearch();
       return;
@@ -8876,6 +9132,14 @@ export class TuiController {
       this.#moveTranscript("next");
       return;
     }
+    if (this.capabilities.alternateScreen && this.#keybindings.matches("tui.transcript.previousTool", event)) {
+      this.#moveTranscript("previous", "tool");
+      return;
+    }
+    if (this.capabilities.alternateScreen && this.#keybindings.matches("tui.transcript.nextTool", event)) {
+      this.#moveTranscript("next", "tool");
+      return;
+    }
     if (this.#inputBlocked !== undefined) {
       if (this.#keybindings.matches("app.thinking.toggle", event)) {
         this.#emit({ type: "toggle_thinking_visibility" });
@@ -8884,10 +9148,10 @@ export class TuiController {
       else if (this.#keybindings.matches("app.interrupt", event)) this.#emit({ type: "cancel" });
       else if (this.capabilities.alternateScreen && this.#keybindings.matches("tui.transcript.pageUp", event)) {
         const rows = terminalSize(this.output, this.capabilities).rows;
-        this.#transcriptOffset = Math.min(1_000_000, this.#transcriptOffset + Math.max(1, rows - 6));
+        this.#scrollTranscript(Math.max(1, rows - 6));
       } else if (this.capabilities.alternateScreen && this.#keybindings.matches("tui.transcript.pageDown", event)) {
         const rows = terminalSize(this.output, this.capabilities).rows;
-        this.#transcriptOffset = Math.max(0, this.#transcriptOffset - Math.max(1, rows - 6));
+        this.#scrollTranscript(-Math.max(1, rows - 6));
       }
       return;
     }
@@ -9020,7 +9284,7 @@ export class TuiController {
         return;
       }
       const rows = terminalSize(this.output, this.capabilities).rows;
-      this.#transcriptOffset = Math.min(1_000_000, this.#transcriptOffset + Math.max(1, rows - 6));
+      this.#scrollTranscript(Math.max(1, rows - 6));
       return;
     }
     if (this.#keybindings.matches("tui.editor.pageDown", event)) {
@@ -9033,7 +9297,7 @@ export class TuiController {
         return;
       }
       const rows = terminalSize(this.output, this.capabilities).rows;
-      this.#transcriptOffset = Math.max(0, this.#transcriptOffset - Math.max(1, rows - 6));
+      this.#scrollTranscript(-Math.max(1, rows - 6));
       return;
     }
     if (this.#keybindings.matches("app.message.dequeue", event)) {
@@ -9374,6 +9638,42 @@ export class TuiController {
       ...optionalProperties(images.length === 0 ? undefined : { images }),
       ...optionalProperties(recoveredImages.length === 0 ? undefined : { recoveredImages }),
       ...optionalProperties(recoveredQueueDraft ? { recoveredQueueDraft: true as const } : undefined),
+    });
+  }
+
+  #pickerConflict(): Error | undefined {
+    if (this.#extensionUiRouteOpening || this.#extensionUiRoute !== undefined) {
+      return new Error("Close the active plugin UI route before opening a terminal picker");
+    }
+    return this.#overlay === undefined ? undefined : new Error("Another terminal picker is active");
+  }
+
+  #chooseOverlay<T>(
+    kind: PickerKind,
+    title: string,
+    source: readonly PickerItem[],
+    select: (item: PickerItem) => T,
+    signal?: AbortSignal,
+    cancellationMessage = "Selection cancelled",
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const complete = (item: PickerItem) => {
+        try {
+          resolve(select(item));
+        } catch (cause) {
+          reject(cause);
+        }
+      };
+      const onAbort = () => {
+        if (this.#overlay?.resolve !== complete) return;
+        this.#closeOverlay(cancellationError(signal?.reason, cancellationMessage));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.#openOverlay(kind, title, source, {
+        resolve: complete,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", onAbort),
+      });
     });
   }
 

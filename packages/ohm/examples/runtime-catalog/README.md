@@ -3,7 +3,7 @@
 This example shows bounded runtime discovery and explicit host selection.
 
 ```text
-ohm install ./packages/ohm/examples/runtime-catalog
+ohm plugins install ./packages/ohm/examples/runtime-catalog
 ```
 
 - `/example-runtime-catalog` reports active and available tools, registered

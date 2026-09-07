@@ -1,13 +1,15 @@
-import { optionalProperties } from "../core/optional-properties.js";
 import { open } from "node:fs/promises";
 
 import type { Api, Model } from "@ohm/models";
+import { streamSimple } from "@ohm/models/compat";
+import { Value } from "typebox/value";
 
 import { errorCode, errorMessage } from "../core/errors.js";
+import type { PluginProviderConfig, PluginProviderModelConfig } from "../plugins/model-boundary.js";
 import { isJsonObject, type JsonObject } from "../core/json.js";
+import { optionalProperties } from "../core/optional-properties.js";
 import { BOOLEAN_VALUE, NUMBER_VALUE, STRING_VALUE } from "../core/value-schemas.js";
 import { parseConfiguredModels } from "./registry.js";
-import { Value } from "typebox/value";
 
 const MAX_CONFIG_BYTES = 8 * 1024 * 1024;
 const MAX_PROVIDERS = 256;
@@ -76,6 +78,105 @@ export interface RuntimeProviderDefinition {
 export interface RuntimeModelConfiguration {
   providers: ReadonlyMap<string, RuntimeProviderDefinition>;
   error?: string;
+}
+
+function mergedCompatibility(
+  base: Model<Api>["compat"],
+  override: Model<Api>["compat"],
+): Model<Api>["compat"] {
+  if (override === undefined) return base;
+  if (base === undefined) return structuredClone(override);
+  return { ...base, ...override };
+}
+
+function configuredModel(
+  provider: string,
+  definition: RuntimeModelDefinition,
+  providerDefinition: RuntimeProviderDefinition,
+  fallback: Model<Api> | undefined,
+): Model<Api> {
+  const api = definition.api ?? providerDefinition.api ?? fallback?.api;
+  if (api === undefined) throw new Error(`Provider ${provider}, model ${definition.id}: API is required`);
+  const baseUrl = definition.baseUrl ?? providerDefinition.baseUrl ?? fallback?.baseUrl;
+  if (baseUrl === undefined) throw new Error(`Provider ${provider}, model ${definition.id}: base URL is required`);
+  const thinkingLevelMap = definition.thinkingLevelMap ?? fallback?.thinkingLevelMap;
+  const maxInputTokens = definition.maxInputTokens ?? fallback?.maxInputTokens;
+  const headers = definition.headers ?? fallback?.headers;
+  const compat = mergedCompatibility(mergedCompatibility(fallback?.compat, providerDefinition.compat), definition.compat);
+  return {
+    id: definition.id,
+    name: definition.name ?? fallback?.name ?? definition.id,
+    api,
+    provider,
+    baseUrl,
+    reasoning: definition.reasoning ?? fallback?.reasoning ?? false,
+    ...optionalProperties(thinkingLevelMap === undefined ? undefined : { thinkingLevelMap: { ...thinkingLevelMap } }),
+    input: [...(definition.input ?? fallback?.input ?? ["text"])],
+    cost: {
+      ...(fallback?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      ...definition.cost,
+    },
+    contextWindow: definition.contextWindow ?? fallback?.contextWindow ?? 128_000,
+    ...optionalProperties(maxInputTokens === undefined ? undefined : { maxInputTokens }),
+    maxTokens: definition.maxTokens ?? fallback?.maxTokens ?? 16_384,
+    ...optionalProperties(headers === undefined ? undefined : { headers: { ...headers } }),
+    ...optionalProperties(compat === undefined ? undefined : { compat }),
+  };
+}
+
+/** @internal Shared editable provider declarations for SDK and configured hosts. */
+export function runtimeProviderConfiguration(
+  provider: string,
+  definition: RuntimeProviderDefinition,
+  knownModels: readonly Model<Api>[],
+): PluginProviderConfig {
+  const existing = knownModels.filter((model) => model.provider === provider);
+  const configuresTransport = existing.length === 0 || definition.api !== undefined || definition.baseUrl !== undefined
+    || definition.models?.some((model) => model.api !== undefined || model.baseUrl !== undefined) === true;
+  let models: Model<Api>[] | undefined;
+  if ((definition.models?.length ?? 0) > 0 || definition.compat !== undefined || definition.api !== undefined) {
+    models = existing.map((model) => {
+      const compat = mergedCompatibility(model.compat, definition.compat);
+      return {
+        ...model,
+        ...optionalProperties(definition.api === undefined ? undefined : { api: definition.api }),
+        ...optionalProperties(definition.baseUrl === undefined ? undefined : { baseUrl: definition.baseUrl }),
+        ...optionalProperties(compat === undefined ? undefined : { compat }),
+      };
+    });
+    for (const entry of definition.models ?? []) {
+      const index = models.findIndex((model) => model.id === entry.id);
+      const fallback = index < 0 ? existing[0] : models[index];
+      const selected = configuredModel(provider, entry, definition, fallback);
+      if (index < 0) models.push(selected);
+      else models[index] = selected;
+    }
+  }
+  const configuredModels: PluginProviderModelConfig[] | undefined = models?.map((model) => ({
+    id: model.id,
+    name: model.name,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    ...optionalProperties(model.thinkingLevelMap === undefined ? undefined : { thinkingLevelMap: { ...model.thinkingLevelMap } }),
+    input: [...model.input],
+    cost: { ...model.cost },
+    contextWindow: model.contextWindow,
+    ...optionalProperties(model.maxInputTokens === undefined ? undefined : { maxInputTokens: model.maxInputTokens }),
+    maxTokens: model.maxTokens,
+    ...optionalProperties(model.headers === undefined ? undefined : { headers: { ...model.headers } }),
+    ...optionalProperties(model.compat === undefined ? undefined : { compat: model.compat }),
+  }));
+  return {
+    ...optionalProperties(configuresTransport ? { streamSimple } : undefined),
+    ...optionalProperties(definition.name === undefined ? undefined : { name: definition.name }),
+    ...optionalProperties(definition.baseUrl === undefined ? undefined : { baseUrl: definition.baseUrl }),
+    ...optionalProperties(definition.apiKey === undefined ? undefined : { apiKey: definition.apiKey }),
+    ...optionalProperties(definition.api === undefined ? undefined : { api: definition.api }),
+    ...optionalProperties(definition.headers === undefined ? undefined : { headers: { ...definition.headers } }),
+    ...optionalProperties(definition.authHeader === undefined ? undefined : { authHeader: definition.authHeader }),
+    ...optionalProperties(configuredModels === undefined ? undefined : { models: configuredModels }),
+  };
 }
 
 function object<Input>(value: Input, label: string): JsonObject {
@@ -311,6 +412,8 @@ function stripComments(input: string): string {
     if (current === "/" && next === "*") {
       index += 2;
       while (index < input.length && !(input[index] === "*" && input[index + 1] === "/")) index += 1;
+      if (index === input.length) throw new SyntaxError("Unterminated model configuration comment");
+      result += " ";
       index += 1;
       continue;
     }

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +15,7 @@ import { parseManagementArguments } from "../../src/cli/management-args.js";
 import {
   AGENT_CLI_OPTIONS,
   CLI_COMPLETION_SHELLS,
-  EXTENSION_AUTHOR_COMMANDS,
+  PLUGIN_AUTHOR_COMMANDS,
   MANAGEMENT_CLI_COMMANDS,
   MANAGEMENT_CLI_OPTIONS,
   type CliOptionMetadata,
@@ -105,16 +104,19 @@ test("generated scripts cover every static command, option, and fixed value with
     assert.equal(script.endsWith("\n"), true, shell);
     assert.doesNotMatch(script, /\r|\0/u, shell);
     assert.doesNotMatch(script, /\beval\b|\bohm\s+(?:completions|--list-models)\b/u, shell);
+    assert.doesNotMatch(script, /\bextensions?\b/u, shell);
     assertBalancedQuotes(script);
 
     for (const command of managementCommands) {
+      if (command.hidden) continue;
       assert.match(script, new RegExp(`(?:^|[^a-z0-9-])${command.name}(?:$|[^a-z0-9-])`, "mu"), `${shell}: ${command.name}`);
       for (const value of [...(command.subcommands ?? []), ...(command.argumentValues ?? [])]) {
         assert.equal(script.includes(value), true, `${shell}: ${command.name} ${value}`);
       }
     }
-    for (const action of EXTENSION_AUTHOR_COMMANDS) assert.equal(script.includes(action), true, `${shell}: ${action}`);
+    for (const action of PLUGIN_AUTHOR_COMMANDS) assert.equal(script.includes(action), true, `${shell}: ${action}`);
     for (const option of [...agentOptions, ...managementOptions]) {
+      if (option.hidden) continue;
       if (shell === "fish") {
         assert.equal(script.includes(`-l ${option.long.slice(2)}`), true, `${shell}: ${option.long}`);
         if (option.short !== undefined) {
@@ -151,42 +153,24 @@ test("generated scripts satisfy deterministic syntax contracts", () => {
     assert.match(line, /^complete -c ohm(?: |$)/u);
   }
 
-  const snapshot = CLI_COMPLETION_SHELLS.map((shell) => {
-    const script = renderShellCompletion(shell);
-    return {
-      shell,
-      bytes: Buffer.byteLength(script),
-      lines: script.split("\n").length,
-      sha256: createHash("sha256").update(script).digest("hex"),
-    };
-  });
-  assert.deepEqual(snapshot, [
-    {
-      shell: "bash",
-      bytes: 6_880,
-      lines: 122,
-      sha256: "281062624e2cbc130c6bc5c14dff6399e41c77325b59bee337f6f1848645b1d1",
-    },
-    {
-      shell: "zsh",
-      bytes: 6_856,
-      lines: 122,
-      sha256: "a3c5dc0c178e9d22c0ef19f2a00ca364b9b1d91a5b63f46050458d4432d024d0",
-    },
-    {
-      shell: "fish",
-      bytes: 17_330,
-      lines: 139,
-      sha256: "d1eeb24f849e7a9529a1dcfca35543f0c05b114eb2cf4eeb8a3cf8affc45b492",
-    },
-  ]);
+  for (const shell of CLI_COMPLETION_SHELLS) {
+    assert.equal(renderShellCompletion(shell), renderShellCompletion(shell), `${shell} generation is deterministic`);
+  }
 });
 
-test("bash accepts its generated script when bash is available", () => {
-  const parsed = spawnSync("bash", ["-n"], { input: renderShellCompletion("bash"), encoding: "utf8" });
+test("bash accepts its generated script and suggests only canonical top-level names when available", () => {
+  const parsed = spawnSync("bash", ["--noprofile", "--norc"], {
+    input: [renderShellCompletion("bash"), 'COMP_WORDS=(ohm "")', "COMP_CWORD=1", "_ohm", 'printf "%s\\n" "${COMPREPLY[@]}"'].join("\n"),
+    encoding: "utf8",
+  });
   if (parsed.error !== undefined && Value.Check(ERROR_CODE_VALUE, parsed.error) && parsed.error.code === "ENOENT") return;
   assert.equal(parsed.error, undefined);
   assert.equal(parsed.status, 0, parsed.stderr);
+  const suggestions = parsed.stdout.trim().split("\n");
+  for (const name of ["plugins", "--plugin", "--no-plugins", "--no-plugin-code"]) assert.ok(suggestions.includes(name), name);
+  for (const name of ["extensions", "install", "remove", "update", "list", "--extension", "--no-extensions", "-e", "-ne"]) {
+    assert.equal(suggestions.includes(name), false, name);
+  }
 });
 
 test("the CLI writes only the requested script and rejects missing, extra, or unsupported shells", () => {

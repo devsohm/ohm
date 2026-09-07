@@ -12,6 +12,8 @@ import {
 
 import { AuthStorage } from "../../src/auth/auth-storage.js";
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
+import { boundedRuntimeFailureMessage } from "../../src/plugins/runtime-internal/generation-lifecycle.js";
+import { boundedRpcErrorMessage } from "../../src/interfaces/rpc-error.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
 import { createModels, type Models as ProviderModels } from "../../src/providers/models.js";
 import {
@@ -399,6 +401,18 @@ test("authentication failures are bounded and redacted without reflecting hostil
   assert.equal(straddling.ok, false);
   assert.equal(straddling.ok ? true : straddling.error.includes(marker), false);
   assert.equal(straddling.ok ? false : Buffer.byteLength(straddling.error, "utf8") <= 4_096, true);
+
+  for (const [source, expected] of [
+    ["🙂".repeat(1_024), "🙂".repeat(1_024)],
+    ["🙂".repeat(1_025), `${"🙂".repeat(1_023)}...`],
+    [`${"p".repeat(4_093)}🙂`, `${"p".repeat(4_093)}...`],
+    [`${"p".repeat(4_093)}\uD800tail`, `${"p".repeat(4_093)}...`],
+  ] as const) {
+    failure = new Error(source);
+    assert.deepEqual(await registry.getApiKeyAndHeaders(model), { ok: false, error: expected });
+    assert.equal(boundedRuntimeFailureMessage(failure), expected);
+    assert.equal(boundedRpcErrorMessage(failure), expected);
+  }
 });
 
 test("stream and completion methods preserve generic and simple forwarding", async (context) => {

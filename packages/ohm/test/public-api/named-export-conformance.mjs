@@ -24,6 +24,7 @@ const SEMANTIC_FUNCTIONS = new Set([
   "createInMemoryHarness",
   "createNativeUiHost",
   "createOpenRouterLoopback",
+  "createServeSessionRuntime",
   "createUnsafeTerminalHost",
   "detectCapabilities",
   "detectTerminalCapabilities",
@@ -176,10 +177,11 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
   const modes = modules.get("modes");
   const providers = modules.get("providers");
   const service = modules.get("service");
+  const sdk = modules.get("sdk");
   const storage = modules.get("storage");
   const testing = modules.get("testing");
   const tui = modules.get("tui");
-  for (const value of [root, auth, config, embedding, images, interfaces, modes, providers, service, storage, testing, tui]) assert.ok(value);
+  for (const value of [root, auth, config, embedding, images, interfaces, modes, providers, service, sdk, storage, testing, tui]) assert.ok(value);
 
   const version = await runNode('import { main } from "ohm"; await main(["--version"]);');
   assert.deepEqual({ code: version.code, signal: version.signal }, { code: 0, signal: null });
@@ -190,7 +192,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     import { runRpcMode } from "ohm/modes";
     const listeners = new Set();
     const session = {
-      async bindExtensions() {},
+      async bindPlugins() {},
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
       get model() { return undefined; },
       get modelRegistry() { return { find() {}, getAvailable() { return []; } }; },
@@ -235,7 +237,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
       },
     },
     state: { messages: [] },
-    async bindExtensions() {},
+    async bindPlugins() {},
     subscribe() { return () => undefined; },
     async prompt() {
       this.state.messages.push({
@@ -273,6 +275,13 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     noTools: "all",
   });
   assert.equal(direct.session.sessionId, "named-export-direct");
+  const inspection = sdk.inspectAgentSession(direct.session);
+  assert.deepEqual(inspection.toolPolicy, direct.session.getToolPolicy());
+  assert.equal(inspection.toolPolicy.authorization.scope, "model_requested_tools");
+  assert.equal(inspection.sessionId, "named-export-direct");
+  assert.equal(inspection.counts.activeTools, 0);
+  assert.deepEqual(service.inspectAgentSession(direct.session), inspection);
+  assert.deepEqual(root.inspectAgentSession(direct.session), inspection);
   await direct.session.close();
 
   const services = await service.createAgentSessionServices({
@@ -281,7 +290,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     modelRuntime,
     settingsManager: config.SettingsManager.inMemory(),
     resourceLoaderOptions: {
-      noExtensions: true,
+      noPluginCode: true,
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -294,6 +303,9 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     noTools: "all",
   });
   assert.equal(composed.session.sessionId, "named-export-composed");
+  const served = root.createServeSessionRuntime(() => composed.session);
+  assert.equal(served.sessionId, composed.session.sessionId);
+  assert.equal(served.summary.messageCount, composed.session.messages.length);
   await composed.session.close();
 
   let runtimeClosed = 0;
@@ -323,7 +335,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     workspace: temporaryRoot,
     ephemeral: true,
     projectTrusted: false,
-    extensions: false,
+    pluginCode: false,
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -335,7 +347,7 @@ async function probeSemanticFunctions(modules, temporaryRoot) {
     workspace: temporaryRoot,
     ephemeral: true,
     projectTrusted: false,
-    extensions: false,
+    pluginCode: false,
     skills: false,
     promptTemplates: false,
     themes: false,

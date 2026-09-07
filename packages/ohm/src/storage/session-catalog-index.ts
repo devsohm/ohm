@@ -35,6 +35,7 @@ const SESSION_FILE_FINGERPRINT_VALUE = Type.Object({
   mode: Type.String(),
   mtimeNs: Type.String(),
   size: Type.String(),
+  wal: Type.Optional(Type.String()),
 }, { additionalProperties: false });
 const STORED_SESSION_INFO_VALUE = Type.Object({
   allMessagesText: Type.String(),
@@ -72,6 +73,7 @@ interface SessionFileFingerprint {
   mode: string;
   mtimeNs: string;
   size: string;
+  wal?: string;
 }
 
 interface StoredSessionInfo {
@@ -311,7 +313,10 @@ async function writeSnapshot(scope: string, serialized: SerializedSessionCatalog
 async function fingerprint(path: string): Promise<SessionFileFingerprint | undefined> {
   try {
     const details = await lstat(path, { bigint: true });
-    return fingerprintFromStats(details);
+    let wal = "";
+    try { wal = JSON.stringify(fingerprintFromStats(await lstat(`${path}-wal`, { bigint: true }))); }
+    catch (error) { if (!isMissing(error)) throw error; }
+    return { ...fingerprintFromStats(details), wal };
   } catch {
     return undefined;
   }
@@ -326,7 +331,8 @@ function sameFingerprint(left: SessionFileFingerprint | undefined, right: Sessio
     && left.ino === right.ino
     && left.mode === right.mode
     && left.mtimeNs === right.mtimeNs
-    && left.size === right.size;
+    && left.size === right.size
+    && left.wal === right.wal;
 }
 
 function storedValue(value: SessionInfo | SessionFileIssue): StoredSessionCatalogValue | undefined {

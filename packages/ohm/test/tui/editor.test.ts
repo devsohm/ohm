@@ -196,6 +196,25 @@ test("vertical and page movement preserve a sticky visual cell column across wra
   assert.equal(wrapped.cursor, 4);
 });
 
+test("vertical movement preserves display columns across CJK, emoji, and combining graphemes", () => {
+  const editor = new MultilineEditor();
+  editor.setText("abcd\n界🙂z", 7);
+  editor.moveUp(80);
+  assert.equal(editor.cursor, 4, "two wide graphemes occupy four columns");
+  editor.setText("abcd\n界🙂z", 2);
+  editor.moveDown(80);
+  assert.equal(editor.cursor, 6, "two columns select one wide grapheme");
+
+  editor.setText("abcd\n界🙂z\ne\u0301abc", 1);
+  editor.moveDown(80);
+  assert.equal(editor.cursor, 5, "a cursor never splits a wide grapheme");
+  editor.moveDown(80);
+  assert.equal(editor.cursor, 10, "a narrow intervening position retains the desired column");
+  editor.moveUp(80);
+  editor.moveUp(80);
+  assert.equal(editor.cursor, 1);
+});
+
 test("large paste markers are atomic and expand only when committed", () => {
   const payload = Array.from({ length: 12 }, (_, index) => `private-${index}`).join("\n");
   const editor = new MultilineEditor();

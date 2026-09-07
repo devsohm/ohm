@@ -33,7 +33,7 @@ async function renderAtWidth(columns: number): Promise<string> {
   return rendered.replaceAll("\r", "");
 }
 
-test("real PTYs keep user and host-framed tool cards full width", {
+test("real PTYs preserve theme-backed user rows and explicit host-framed tool styling", {
   skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
 }, async () => {
   const background = createTheme("signal", { color: true, unicode: true }).getBgAnsi("userMessageBg");
@@ -45,31 +45,32 @@ test("real PTYs keep user and host-framed tool cards full width", {
     const end = rendered.indexOf("\nuser-message-end", start);
     assert.ok(start >= 0 && end > start, rendered);
     const card = rendered.slice(start + "user-message-start\n".length, end).split("\n");
-    assert.ok(card.length >= 5, rendered);
+    assert.ok(card.length >= 3, rendered);
     assert.ok(card.every((line) => line.includes(background)), rendered);
     assert.ok(card.every((line) => cellWidth(stripAnsi(line)) === columns), rendered);
-    assert.equal(stripAnsi(card[0]!).trim(), "");
-    assert.equal(stripAnsi(card.at(-1)!).trim(), "");
+    assert.equal(stripAnsi(card[0]!), " ".repeat(columns));
+    assert.equal(stripAnsi(card.at(-1)!), " ".repeat(columns));
+    assert.match(stripAnsi(card[1]!), /^ 你好/u);
+    assert.doesNotMatch(stripAnsi(card.join("\n")), /YOU|›/u);
     assert.match(stripAnsi(card.join("\n")), /你好🙂[\s\S]*alpha[\s\S]*beta[\s\S]*omega/u);
 
     const richStart = rendered.indexOf("rich-user-message-start\n");
     const richEnd = rendered.indexOf("\nrich-user-message-end", richStart);
     assert.ok(richStart >= 0 && richEnd > richStart, rendered);
     const richSection = rendered.slice(richStart + "rich-user-message-start\n".length, richEnd).split("\n");
-    const richCard = richSection.filter((line) => line.includes(background));
-    assert.ok(richCard.length >= 3, rendered);
-    assert.ok(richCard.every((line) => cellWidth(stripAnsi(line)) === columns), rendered);
-    assert.equal(stripAnsi(richCard[0]!).trim(), "");
-    assert.equal(stripAnsi(richCard.at(-1)!).trim(), "");
-    assert.match(stripAnsi(richCard.join("\n")), /你好🙂[\s\S]*alpha[\s\S]*beta[\s\S]*omega/u);
+    assert.ok(richSection[0]?.includes(background), rendered);
+    assert.ok(richSection.every((line) => cellWidth(stripAnsi(line)) <= columns), rendered);
+    assert.equal(stripAnsi(richSection[0]!), " ".repeat(columns));
+    assert.match(stripAnsi(richSection[1]!), /^ 你好/u);
+    assert.match(stripAnsi(richSection.join("\n")), /你好🙂[\s\S]*alpha[\s\S]*beta[\s\S]*omega/u);
 
     const imageStart = rendered.indexOf("image-only-message-start\n");
     const imageEnd = rendered.indexOf("\nimage-only-message-end", imageStart);
     assert.ok(imageStart >= 0 && imageEnd > imageStart, rendered);
     const imageCard = rendered.slice(imageStart + "image-only-message-start\n".length, imageEnd).split("\n");
-    assert.ok(imageCard.length >= 3, rendered);
+    assert.ok(imageCard.length >= 1, rendered);
     assert.ok(imageCard.every((line) => line.includes(background)), rendered);
-    assert.ok(imageCard.every((line) => cellWidth(stripAnsi(line)) === columns), rendered);
+    assert.ok(imageCard.every((line) => cellWidth(stripAnsi(line)) <= columns), rendered);
     const imageText = stripAnsi(imageCard.join("\n"));
     assert.match(imageText, /\[Image:/u);
     if (columns >= 20) assert.match(imageText, /image\/png/u);

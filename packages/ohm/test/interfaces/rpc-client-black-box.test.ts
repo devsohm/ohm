@@ -91,7 +91,7 @@ test("every public RPC command method writes exactly its intended command", asyn
     await client.getMessagesPage();
     await client.getMessages();
     await client.getCommands();
-    await client.respondToExtensionUi({ type: "extension_ui_response", id: "ui", cancelled: true });
+    await client.respondToPluginUi({ type: "extension_ui_response", id: "ui", cancelled: true });
     await complete;
 
     assert.deepEqual(received, [

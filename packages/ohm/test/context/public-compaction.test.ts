@@ -38,7 +38,7 @@ import type {
   CustomMessageEntry,
   SessionEntry,
   SessionMessageEntry,
-} from "../../src/extensions/session-contract.js";
+} from "../../src/plugins/session-contract.js";
 
 function usage(input = 10, output = 5, cacheRead = 0, cacheWrite = 0): Usage {
   const totalTokens = input + output + cacheRead + cacheWrite;

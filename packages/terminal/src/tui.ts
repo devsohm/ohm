@@ -9,6 +9,8 @@ import { scheduleTimeout, type ManagedTimeout, validateTimerDelay } from "./inte
 import { visibleWidth } from "./utils.js";
 import { compositeTerminalLine } from "./compositor.js";
 import { deleteKittyImage } from "./terminal-image.js";
+import { TerminalPointer } from "./pointer-input.js";
+import { VIEWPORT_POINTER_REGIONS, type ViewportPointerRegion } from "./viewport.js";
 
 export const CURSOR_MARKER = "\x1b_ohm:c\x07";
 
@@ -41,6 +43,8 @@ export type OverlayAnchor = "top-left" | "top-center" | "top-right" | "left-cent
 export interface OverlayMargin { top?: number; right?: number; bottom?: number; left?: number }
 export interface OverlayOptions { width?: SizeValue; minWidth?: number; height?: SizeValue; maxHeight?: SizeValue; anchor?: OverlayAnchor; row?: SizeValue; col?: SizeValue; offsetX?: number; offsetY?: number; margin?: number | OverlayMargin; visible?: (width: number, height: number) => boolean; nonCapturing?: boolean }
 export interface OverlayUnfocusOptions { target: Component | null; restoreFocus?: boolean }
+export interface OverlayBounds { readonly row: number; readonly column: number; readonly width: number; readonly height: number }
+export interface TuiPointerOptions { mouse?: boolean; wheelScrollLines?: number; openUrl?: (target: string) => void }
 export interface OverlayHandle {
   hide(): void;
   setHidden(hidden: boolean): void;
@@ -48,23 +52,38 @@ export interface OverlayHandle {
   focus(): void;
   unfocus(options?: OverlayUnfocusOptions): void;
   isFocused(): boolean;
+  /** Last completed layout in zero-based screen cells; absent before layout or while hidden. */
+  getBounds(): OverlayBounds | undefined;
 }
 export type TuiInputListenerResult = void | { consume?: boolean; data?: string };
 export type TuiInputListener = (data: string) => TuiInputListenerResult;
 export interface ViewportTUI { setLayoutRoot(component: Component | undefined): void }
 
-interface OverlayState { component: Component; options: OverlayOptions; hidden: boolean; previousFocus?: Component }
+interface OverlayState { component: Component; options: OverlayOptions; hidden: boolean; previousFocus?: Component; bounds?: OverlayBounds }
+interface ComposedFrame { lines: string[]; overlays: Map<OverlayState, OverlayBounds> }
 interface PendingQuery<T> { accept: (value: T | undefined) => void; timer?: ManagedTimeout }
 
 export function isFocusable(value: Component): value is Focusable { return value.focused !== undefined && value.handleInput !== undefined; }
 export function isViewportTUI(value: TUI): value is TUI & ViewportTUI { return "setLayoutRoot" in value; }
 
 export class Container implements Component {
+  readonly [VIEWPORT_POINTER_REGIONS] = true as const;
+  #pointerRegions: ViewportPointerRegion[] = [];
   children: Component[] = [];
   addChild(component: Component): void { if (!this.children.includes(component)) this.children.push(component); }
   removeChild(component: Component): void { const index = this.children.indexOf(component); if (index >= 0) this.children.splice(index, 1); }
   clear(): void { this.children.length = 0; }
-  render(width: number): string[] { return this.children.flatMap((child) => child.render(width)); }
+  viewportPointerRegions(): readonly ViewportPointerRegion[] { return this.#pointerRegions; }
+  render(width: number): string[] {
+    const lines: string[] = [];
+    this.#pointerRegions = this.children.map((component) => {
+      const rendered = component.render(width);
+      const region = { component, row: lines.length, column: 0, width, height: rendered.length };
+      lines.push(...rendered);
+      return region;
+    });
+    return lines;
+  }
   invalidate(): void { for (const child of this.children) child.invalidate(); }
 }
 
@@ -87,13 +106,23 @@ export class TUI extends Container {
   #lines: string[] = [];
   #renderedColumns: number | undefined;
   #restoredColumns: number | undefined;
+  readonly #pointer: TerminalPointer;
+  #pointerRegions: ViewportPointerRegion[] = [];
+  #pointerFrame: string[] = [];
+  readonly #pointerRoot = {
+    [VIEWPORT_POINTER_REGIONS]: true as const,
+    viewportPointerRegions: (): readonly ViewportPointerRegion[] => this.#pointerRegions,
+    render: (): string[] => [],
+    invalidate(): void {},
+  };
   fullRedraws = 0;
   onDebug?: () => void;
 
-  constructor(terminal: Terminal, showHardwareCursor = false, logDirectory?: string) {
+  constructor(terminal: Terminal, showHardwareCursor = false, logDirectory?: string, options: TuiPointerOptions = {}) {
     super();
     this.terminal = terminal;
     this.#showHardwareCursor = showHardwareCursor;
+    this.#pointer = new TerminalPointer(options);
     const ohmHome = process.env.OHM_HOME;
     this.#logDirectory = logDirectory ?? (process.env.OHM_DEBUG_REDRAW === "1"
       ? join(ohmHome === undefined || ohmHome === "" ? join(homedir(), ".ohm") : ohmHome, "logs")
@@ -120,7 +149,9 @@ export class TUI extends Container {
     this.#running = true;
     try {
       this.beforeTerminalStart();
-      this.terminal.start((data) => this.#input(data), () => { this.fullRedraws += 1; this.requestRender(true); });
+      this.terminal.start((data) => this.#input(data), () => { this.#invalidateLayout(); this.fullRedraws += 1; this.requestRender(true); });
+      const pointerMode = this.#pointer.start();
+      if (pointerMode !== "") this.terminal.write(pointerMode);
       if (this.#showHardwareCursor) this.terminal.showCursor(); else this.terminal.hideCursor();
       const restored = this.mode === "regular" && this.#restoredColumns === this.terminal.columns;
       this.#restoredColumns = undefined;
@@ -130,7 +161,7 @@ export class TUI extends Container {
       }
       this.requestRender(!restored);
     } catch (error) {
-      try { this.beforeTerminalStop({}); } finally { this.terminal.showCursor(); this.terminal.stop(); this.#running = false; }
+      try { this.terminal.write(this.#pointer.stop()); this.beforeTerminalStop({}); } finally { this.terminal.showCursor(); this.terminal.stop(); this.#running = false; }
       throw error;
     }
   }
@@ -141,6 +172,8 @@ export class TUI extends Container {
     this.#settleQueries();
     const preserveScreen = options.preserveScreen === true && this.mode === "regular";
     try {
+      const pointerMode = this.#pointer.stop();
+      if (pointerMode !== "") this.terminal.write(pointerMode);
       if (!preserveScreen && this.#lines.some((line) => line.includes(CURSOR_MARKER))) this.terminal.write(" ");
       this.beforeTerminalStop(options);
       if (!preserveScreen && !(this instanceof Object && "setLayoutRoot" in this)) this.terminal.write("\r\n");
@@ -151,6 +184,7 @@ export class TUI extends Container {
       this.#scheduled = false;
       this.#lines = [];
       this.#renderedColumns = undefined;
+      this.#invalidateLayout();
     }
   }
 
@@ -200,11 +234,19 @@ export class TUI extends Container {
     this.requestRender();
     return {
       hide: () => this.#removeOverlay(state),
-      setHidden: (hidden) => { state.hidden = hidden; if (hidden && this.#focus === component) this.setFocus(state.previousFocus); else if (!hidden && options.nonCapturing !== true) this.setFocus(component); this.requestRender(); },
+      setHidden: (hidden) => {
+        if (!this.#overlays.includes(state) || state.hidden === hidden) return;
+        state.hidden = hidden;
+        if (hidden && this.#focus === component) this.setFocus(this.#visibleFocus(state.previousFocus));
+        else if (!hidden && options.nonCapturing !== true) this.setFocus(component);
+        this.compositionChanged();
+        this.requestRender();
+      },
       isHidden: () => state.hidden || !this.#overlays.includes(state),
-      focus: () => { if (!state.hidden) this.setFocus(component); },
-      unfocus: (selected) => { if (this.#focus === component) this.setFocus(selected?.target ?? (selected?.restoreFocus === false ? undefined : state.previousFocus)); },
+      focus: () => { if (!state.hidden && this.#overlays.includes(state) && options.visible?.(this.terminal.columns, this.terminal.rows) !== false) this.setFocus(component); },
+      unfocus: (selected) => { if (this.#focus === component) this.setFocus(selected?.target ?? (selected?.restoreFocus === false ? undefined : this.#visibleFocus(state.previousFocus))); },
       isFocused: () => this.#focus === component,
+      getBounds: () => options.visible?.(this.terminal.columns, this.terminal.rows) === false ? undefined : state.bounds,
     };
   }
 
@@ -232,7 +274,7 @@ export class TUI extends Container {
     });
   }
 
-  protected compositionChanged(): void {}
+  protected compositionChanged(): void { this.#invalidateLayout(); }
   protected frameComposed(_lines: readonly string[]): void {}
   protected beforeTerminalStart(): void {}
   protected beforeTerminalStop(_options: TuiStopOptions = {}): void {}
@@ -242,7 +284,13 @@ export class TUI extends Container {
     const index = this.#overlays.indexOf(state);
     if (index < 0) return;
     this.#overlays.splice(index, 1);
-    if (this.#focus === state.component) this.setFocus(state.previousFocus);
+    delete state.bounds;
+    for (const overlay of this.#overlays) {
+      if (overlay.previousFocus !== state.component) continue;
+      if (state.previousFocus === undefined) delete overlay.previousFocus;
+      else overlay.previousFocus = state.previousFocus;
+    }
+    if (this.#focus === state.component) this.setFocus(this.#visibleFocus(state.previousFocus));
     this.compositionChanged();
     this.requestRender();
   }
@@ -258,6 +306,9 @@ export class TUI extends Container {
     }
     let data = initial;
     try {
+      const pointer = this.#pointer.handle(data, this.#pointerRoot, this.terminal.columns, this.terminal.rows, this.#pointerFrame, () => this.requestRender());
+      if (pointer?.consume === true) return;
+      if (pointer?.data !== undefined) data = pointer.data;
       for (const listener of Array.from(this.#listeners)) {
         const result = listener(data);
         if (result?.data !== undefined) data = result.data;
@@ -274,6 +325,17 @@ export class TUI extends Container {
     for (let index = this.#overlays.length - 1; index >= 0; index -= 1) {
       const overlay = this.#overlays[index]!;
       if (!overlay.hidden && overlay.options.nonCapturing !== true && overlay.options.visible?.(this.terminal.columns, this.terminal.rows) !== false) return overlay.component;
+    }
+    return undefined;
+  }
+
+  #visibleFocus(component: Component | undefined): Component | undefined {
+    const seen = new Set<Component>();
+    while (component !== undefined && !seen.has(component)) {
+      seen.add(component);
+      const state = this.#overlays.find((overlay) => overlay.component === component);
+      if (state === undefined || (!state.hidden && state.options.visible?.(this.terminal.columns, this.terminal.rows) !== false)) return component;
+      component = state.previousFocus;
     }
     return undefined;
   }
@@ -307,8 +369,10 @@ export class TUI extends Container {
     return this.#focus ?? this.children.at(-1);
   }
 
-  #compose(): string[] {
+  #compose(): ComposedFrame {
     let lines = this.render(this.terminal.columns);
+    const scrollOffset = this.mode === "regular" ? Math.max(0, lines.length - this.terminal.rows) : 0;
+    const overlays = new Map<OverlayState, OverlayBounds>();
     for (const overlay of this.#overlays) {
       if (overlay.hidden || overlay.options.visible?.(this.terminal.columns, this.terminal.rows) === false) continue;
       const selectedMargin = overlay.options.margin;
@@ -367,9 +431,33 @@ export class TUI extends Container {
           position(overlay.options.col, left, horizontalSpace, horizontal) + (overlay.options.offsetX ?? 0),
         ),
       );
-      lines = this.#compositeRows(lines, rendered, row, column, width);
+      if (rendered.length > 0) overlays.set(overlay, Object.freeze({ row, column, width, height: rendered.length }));
+      lines = this.#compositeRows(lines, rendered, row + scrollOffset, column, width);
     }
-    return lines;
+    return { lines, overlays };
+  }
+
+  #invalidateLayout(): void {
+    this.#pointerRegions = [];
+    this.#pointerFrame = [];
+    for (const overlay of this.#overlays) delete overlay.bounds;
+    this.#pointer.cancel();
+  }
+
+  #publishLayout(frame: ComposedFrame): void {
+    if (this.#overlays.some((overlay) => (overlay.bounds !== undefined) !== frame.overlays.has(overlay))) this.#pointer.cancel();
+    const offset = this.mode === "regular" ? Math.max(0, frame.lines.length - this.terminal.rows) : 0;
+    this.#pointerRegions = [{ component: this, row: -offset, column: 0, width: this.terminal.columns, height: frame.lines.length }];
+    for (const overlay of this.#overlays) {
+      const bounds = frame.overlays.get(overlay);
+      if (bounds === undefined) delete overlay.bounds;
+      else {
+        overlay.bounds = bounds;
+        this.#pointerRegions.push({ component: overlay.component, ...bounds });
+      }
+    }
+    this.#pointerFrame = frame.lines.slice(offset, offset + this.terminal.rows);
+    this.#pointer.reconcile(this.#pointerRoot, this.terminal.columns, this.terminal.rows);
   }
 
   #size(value: SizeValue | undefined, total: number, fallback: number): number {
@@ -390,7 +478,8 @@ export class TUI extends Container {
   }
 
   #paint(): void {
-    const lines = this.#compose();
+    const frame = this.#compose();
+    const { lines } = frame;
     lines.forEach((line, row) => {
       const width = visibleWidth(line);
       if (width > this.terminal.columns) throw new Error(`render-width row=${row} width=${width} terminal=${this.terminal.columns} rows=${lines.length}`);
@@ -399,6 +488,7 @@ export class TUI extends Container {
     const changed = lines.length !== this.#lines.length || lines.some((line, index) => line !== this.#lines[index]);
     if (!changed && !this.#forceFullRedraw) {
       this.#renderedColumns = this.terminal.columns;
+      this.#publishLayout(frame);
       return;
     }
     const oldImageIds = new Set<number>();
@@ -438,6 +528,7 @@ export class TUI extends Container {
     this.#lines = [...lines];
     this.#renderedColumns = this.terminal.columns;
     this.#forceFullRedraw = false;
+    this.#publishLayout(frame);
   }
 
   #renderFailure(cause: unknown): void {

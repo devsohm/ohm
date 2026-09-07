@@ -19,7 +19,7 @@ function pathsFor(root: string): AgentPaths {
     sessions: join(agentDirectory, "sessions"),
     modelCatalog: join(agentDirectory, "models.json"),
     userSkills: join(agentDirectory, "skills"),
-    userExtensions: join(agentDirectory, "extensions"),
+    userPlugins: join(agentDirectory, "plugins"),
     userPrompts: join(agentDirectory, "prompts"),
     userThemes: join(agentDirectory, "themes"),
     logs: join(agentDirectory, "logs"),

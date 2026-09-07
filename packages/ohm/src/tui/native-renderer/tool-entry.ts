@@ -141,6 +141,7 @@ function lifecycleState(
   metadata: RuntimeRecord | undefined,
   truncated: boolean,
 ): string {
+  if (entry.historical === true) return "history · result not shown";
   const elapsed = durationText(entry.status === "running"
     ? entry.toolData?.progress?.elapsedMs
     : numberValue(metadata, "durationMs"));
@@ -203,21 +204,29 @@ export function projectOhmTuiToolEntry(entry: TranscriptEntry): OhmTuiToolEntry 
   }
 
   if (progress !== undefined) {
+    const finalResult = entry.toolData?.result;
+    const preview = finalResult === undefined
+      || (finalResult.content.trim() === "" && (finalResult.summary?.trim() ?? "") === "");
     if (progress.stdout !== "" && progress.stderr !== "") {
-      append("progress", `stdout · ${progress.stdoutBytes.toLocaleString("en-US")} bytes`, progress.stdout, { preview: true, tail: true });
-      append("error", `stderr · ${progress.stderrBytes.toLocaleString("en-US")} bytes`, progress.stderr, { preview: true, tail: true });
+      append("progress", `stdout · ${progress.stdoutBytes.toLocaleString("en-US")} bytes`, progress.stdout, { preview, tail: true });
+      append("error", `stderr · ${progress.stderrBytes.toLocaleString("en-US")} bytes`, progress.stderr, { preview, tail: true });
     } else {
-      append("progress", "Progress", progress.output ?? (progress.stdout || progress.stderr), { preview: true, tail: true });
+      append("progress", "Progress", progress.output ?? (progress.stdout || progress.stderr), { preview, tail: true });
     }
   }
 
   const output = result?.content ?? (progress === undefined ? entry.text : undefined);
+  const outputPreview = (output?.trim() ?? "") !== "";
+  const summaryPreview = result?.summary !== output && (result?.summary?.trim() ?? "") !== ""
+    && (!outputPreview || (entry.status === "failed" && entry.toolData?.result !== undefined));
   const outputError = result?.isError === true || entry.status === "failed" || entry.status === "in_doubt";
   append(outputError ? "error" : entry.status === "running" ? "progress" : "output", outputError ? "Error" : "Output", output, {
-    preview: true,
+    preview: outputPreview && !summaryPreview,
     tail: name === "bash" || name === "shell" || entry.status === "running",
   });
-  if (result?.summary !== undefined && result.summary !== output) append("output", "Result", result.summary, { preview: true });
+  if (result?.summary !== undefined && result.summary !== output) {
+    append("output", "Result", result.summary, { preview: summaryPreview });
+  }
   const nextActions = result?.nextActions;
   const addedToolNames = result?.addedToolNames;
   if ((nextActions?.length ?? 0) > 0) append("metadata", "Next", nextActions!.join("\n"));
@@ -233,7 +242,7 @@ export function projectOhmTuiToolEntry(entry: TranscriptEntry): OhmTuiToolEntry 
     id: entry.id,
     kind: "tool",
     name,
-    status: statusValue(entry.status),
+    status: entry.historical === true ? "unknown" : statusValue(entry.status),
     ...optionalProperties(headline === undefined ? undefined : { headline }),
     state: lifecycleState(entry, metadata, truncated),
     ...optionalProperties(entry.summary === undefined ? undefined : { summary: entry.summary }),

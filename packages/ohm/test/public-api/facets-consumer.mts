@@ -1,34 +1,34 @@
 import { Type } from "typebox";
 
 import {
-  EXTENSION_FACET_API_VERSION,
-  EXTENSION_FACET_KINDS,
-  MAX_EXTENSION_FACETS,
-  MAX_EXTENSION_FACET_STATES,
+  PLUGIN_FACET_API_VERSION,
+  PLUGIN_FACET_KINDS,
+  MAX_PLUGIN_FACETS,
+  MAX_PLUGIN_FACET_STATES,
   REPLICATED_JSON_STATE_PROTOCOL_VERSION,
-  createExtensionWireServiceEndpoint,
+  createPluginWireServiceEndpoint,
   createReplicatedJsonState,
-  describeExtensionWireServiceEndpoint,
-  defineExtensionWireService,
-  extensionFacetApplies,
-  extensionFacetStateServiceName,
-  extensionWireServiceRegistryName,
-  extensionWireServiceRequest,
-  validateExtensionFacetDefinition,
-  validateExtensionWireServiceRequest,
-  validateExtensionWireServiceResponse,
-  type ExtensionFacetDefinition,
-  type ExtensionFacetRegistration,
-  type ExtensionFacetService,
-  type ExtensionFacetSharedState,
-  type ExtensionFacetStateHost,
-  type ExtensionWireServiceDescriptor,
-  type ExtensionWireServiceEndpoint,
-  type ExtensionWireServiceRequest,
-  type ExtensionWireServiceResponse,
+  describePluginWireServiceEndpoint,
+  definePluginWireService,
+  pluginFacetApplies,
+  pluginFacetStateServiceName,
+  pluginWireServiceRegistryName,
+  pluginWireServiceRequest,
+  validatePluginFacetDefinition,
+  validatePluginWireServiceRequest,
+  validatePluginWireServiceResponse,
+  type PluginFacetDefinition,
+  type PluginFacetRegistration,
+  type PluginFacetService,
+  type PluginFacetSharedState,
+  type PluginFacetStateHost,
+  type PluginWireServiceDescriptor,
+  type PluginWireServiceEndpoint,
+  type PluginWireServiceRequest,
+  type PluginWireServiceResponse,
   type ReplicatedJsonState,
   type ReplicatedJsonStateDelta,
-} from "ohm/extensions";
+} from "ohm/plugins";
 import {
   PORTABLE_PRESENTATION_PROTOCOL_VERSION,
   createPortablePresentation,
@@ -44,20 +44,20 @@ import {
 } from "ohm/interfaces";
 import { projectPortablePresentationToRuntimeUiBlock } from "ohm/tui";
 
-const contract = defineExtensionWireService({
+const contract = definePluginWireService({
   name: "consumer.echo",
   version: 1,
   requestSchema: Type.Object({ text: Type.String() }),
   responseSchema: Type.Object({ text: Type.String() }),
 });
-const endpoint: ExtensionWireServiceEndpoint<{ text: string }, { text: string }> =
-  createExtensionWireServiceEndpoint(contract, ({ text }) => ({ text }));
-const wireRequest: ExtensionWireServiceRequest<{ text: string }> =
-  extensionWireServiceRequest(contract, "consumer-1", { text: "hello" });
-const wireResponse: Promise<ExtensionWireServiceResponse<{ text: string }>> = endpoint.request(wireRequest);
-const registryName: string = extensionWireServiceRegistryName(contract);
-const validatedRequest: ExtensionWireServiceRequest = validateExtensionWireServiceRequest(wireRequest);
-const validatedResponse: ExtensionWireServiceResponse = validateExtensionWireServiceResponse({
+const endpoint: PluginWireServiceEndpoint<{ text: string }, { text: string }> =
+  createPluginWireServiceEndpoint(contract, ({ text }) => ({ text }));
+const wireRequest: PluginWireServiceRequest<{ text: string }> =
+  pluginWireServiceRequest(contract, "consumer-1", { text: "hello" });
+const wireResponse: Promise<PluginWireServiceResponse<{ text: string }>> = endpoint.request(wireRequest);
+const registryName: string = pluginWireServiceRegistryName(contract);
+const validatedRequest: PluginWireServiceRequest = validatePluginWireServiceRequest(wireRequest);
+const validatedResponse: PluginWireServiceResponse = validatePluginWireServiceResponse({
   protocolVersion: 1,
   service: contract.name,
   serviceVersion: contract.version,
@@ -96,8 +96,8 @@ const presentationEvents: PortablePresentationEvent[] = [
   portablePresentationRemoveEvent("consumer.extension", document.id, document.revision),
 ];
 
-const facetDefinition: ExtensionFacetDefinition = validateExtensionFacetDefinition({
-  apiVersion: EXTENSION_FACET_API_VERSION,
+const facetDefinition: PluginFacetDefinition = validatePluginFacetDefinition({
+  apiVersion: PLUGIN_FACET_API_VERSION,
   kind: "session",
   name: "consumer",
   setup(context) {
@@ -105,24 +105,24 @@ const facetDefinition: ExtensionFacetDefinition = validateExtensionFacetDefiniti
     context.states.open("shared", { ready: true });
   },
 });
-declare const facets: ExtensionFacetService;
-declare const facetStates: ExtensionFacetStateHost;
-const facetRegistration: Promise<ExtensionFacetRegistration> = facets.register(facetDefinition);
-const sharedState: ExtensionFacetSharedState<{ ready: boolean }> | undefined =
+declare const facets: PluginFacetService;
+declare const facetStates: PluginFacetStateHost;
+const facetRegistration: Promise<PluginFacetRegistration> = facets.register(facetDefinition);
+const sharedState: PluginFacetSharedState<{ ready: boolean }> | undefined =
   facetStates.get<{ ready: boolean }>("shared");
-const stateServiceName: string = extensionFacetStateServiceName("consumer.extension", "shared");
-const descriptor: ExtensionWireServiceDescriptor =
-  describeExtensionWireServiceEndpoint(endpoint, "consumer.extension");
+const stateServiceName: string = pluginFacetStateServiceName("consumer.extension", "shared");
+const descriptor: PluginWireServiceDescriptor =
+  describePluginWireServiceEndpoint(endpoint, "consumer.extension");
 
 void [
-  EXTENSION_FACET_KINDS,
-  MAX_EXTENSION_FACETS,
-  MAX_EXTENSION_FACET_STATES,
+  PLUGIN_FACET_KINDS,
+  MAX_PLUGIN_FACETS,
+  MAX_PLUGIN_FACET_STATES,
   REPLICATED_JSON_STATE_PROTOCOL_VERSION,
   actionResult,
   delta,
   descriptor,
-  extensionFacetApplies("rich-tui", "tui", { components: true }),
+  pluginFacetApplies("rich-tui", "tui", { components: true }),
   facetRegistration,
   sharedState,
   stateServiceName,

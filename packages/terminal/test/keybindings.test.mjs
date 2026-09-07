@@ -45,6 +45,8 @@ const DEFAULT_KEYS = {
   "tui.transcript.pageDown": "pageDown",
   "tui.transcript.previousPrompt": "ctrl+shift+up",
   "tui.transcript.nextPrompt": "ctrl+shift+down",
+  "tui.transcript.previousTool": "alt+pageUp",
+  "tui.transcript.nextTool": "alt+pageDown",
   "tui.transcript.top": "ctrl+home",
   "tui.transcript.bottom": "ctrl+end",
 };

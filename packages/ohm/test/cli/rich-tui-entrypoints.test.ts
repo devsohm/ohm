@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,8 +7,10 @@ import test from "node:test";
 import {
   runPackageCommand,
   runPackageConfigCommand,
-} from "../../src/cli/extensions-command.js";
+} from "../../src/cli/plugins-command.js";
 import { parseManagementArguments } from "../../src/cli/management-args.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
+import { isStringValue } from "../../src/tui/value-guards.js";
 import { selectStartupSession } from "../../src/cli/session-picker.js";
 import type { SessionInfo } from "../../src/storage/types.js";
 import { TuiController } from "../../src/tui/index.js";
@@ -118,19 +120,19 @@ test("the public TuiController defaults to the updated rich projector", async ()
   }
 });
 
-test("TTY package resource settings use the rich overlay with one input owner", async () => {
+test("TTY plugin settings preserve canonical filters while toggling and saving through one input owner", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-rich-package-config-"));
   const workspace = join(root, "workspace");
   const agentDir = join(root, "agent");
   const packageRoot = join(root, "package");
   await mkdir(workspace);
-  await mkdir(join(packageRoot, "extensions"), { recursive: true });
+  await mkdir(join(packageRoot, "src"), { recursive: true });
   await writeFile(join(packageRoot, "package.json"), JSON.stringify({
     name: "rich-package-config",
     version: "1.0.0",
-    ohm: { extensions: ["extensions/index.mjs"] },
+    ohm: { entrypoints: ["src/index.mjs"] },
   }));
-  await writeFile(join(packageRoot, "extensions", "index.mjs"), "export default () => {};\n");
+  await writeFile(join(packageRoot, "src", "index.mjs"), "export default () => {};\n");
 
   const previousAgentDir = process.env.OHM_HOME;
   process.env.OHM_HOME = agentDir;
@@ -140,6 +142,11 @@ test("TTY package resource settings use the rich overlay with one input owner", 
     await runPackageCommand(parseManagementArguments([
       "install", packageRoot, "--workspace", workspace, "--json",
     ]));
+    const persisted = SettingsManager.create(workspace, agentDir);
+    const source = persisted.getPackages()[0];
+    assert.ok(isStringValue(source));
+    persisted.setPackages([{ source, entrypoints: ["!src/private.mjs"] }]);
+    await persisted.flush();
     tty.output.chunks.length = 0;
 
     config = runPackageConfigCommand(parseManagementArguments([
@@ -150,9 +157,16 @@ test("TTY package resource settings use the rich overlay with one input owner", 
     assert.match(rendered, /Settings\s+1\/2/u);
     assert.match(rendered, /Done\s+Close settings/u);
     assert.match(rendered, /rich-package-config|\.\.\/package/u);
-    assert.match(rendered, /extensions · extensions\/index\.mjs/u);
     assert.match(rendered, /─ Ask ohm /u);
     assert.equal(tty.input.listenerCount("data"), 1);
+
+    tty.input.write("\u001b[C");
+    await waitFor(() => /false|Could not save/u.test(stripAnsi(tty.output.text)));
+    assert.deepEqual(JSON.parse(await readFile(join(agentDir, "config.json"), "utf8")), {
+      plugins: [{ source, entrypoints: ["!src/private.mjs", "-src/index.mjs"] }],
+    });
+    assert.match(rendered, /entrypoints · src\/index\.mjs/u);
+    assert.doesNotMatch(stripAnsi(tty.output.text), /Could not save/u);
 
     tty.input.write(Buffer.from([3]));
     await config;

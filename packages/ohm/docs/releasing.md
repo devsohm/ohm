@@ -17,6 +17,41 @@ The same version must appear in all four release workspace manifests, their inte
 the top of the changelog. The first release uses an `Added` summary. Later releases classify release-visible work under
 `Added`, `Changed`, `Fixed`, `Security`, `Deprecated`, `Removed`, or `Breaking`.
 
+## Migrating to 0.2
+
+Before upgrading, close active sessions and preserve a backup of their files.
+Then update the complete four-package graph together, or use a verified
+standalone archive. Do not mix workspace package versions.
+
+- **Sessions:** resume an existing JSONL session explicitly to create its
+  validated SQLite copy. The source is preserved. Use the session API rather
+  than parsing `sessionFile` as text, and use [JSONL export](session-export.md)
+  when you need a readable transfer file. Do not give a new SQLite session to an
+  older runtime. See [storage and migration behavior](sessions.md).
+- **JSON/RPC clients:** assemble incremental `message_update` deltas instead of
+  reading the removed full partial-message field. The SDK still receives full
+  snapshots. Follow the [wire contract](rpc.md#raw-events) and update clients before
+  changing their server version.
+- **Plugins:** replace removed `childSessions` calls with plugin-owned workflows
+  through the public SDK, RPC client or managed processes. Replace imports from
+  `ohm/extensions` with `ohm/plugins` and authoring names such as `ExtensionAPI`
+  and `ExtensionFactory` with `PluginAPI` and `PluginFactory`. The old subpath and
+  duplicate type aliases are removed, not a second supported API. Use
+  `pluginsResult` on SDK construction results and `getPlugins()` on resource
+  loaders. Replace `getExtensionPaths()` with `getPluginPaths()` on `PluginRunner`.
+  New plugin directories use `.ohm/plugins`; historical configuration inputs,
+  source identities, data directories and RPC wire fields stay intact.
+  Do not rename or move installed data to update a source import. Use `ohm/plugins`,
+  declare executable code with `ohm.entrypoints`, and manage the package through
+  `ohm plugins`. Test against 0.2 before changing a plugin's host-version range.
+- **CLI:** replace `--extension`/`-e` with `--plugin`, and
+  `--no-extensions`/`-ne` with `--no-plugin-code`. Use `ohm plugins` instead of
+  `ohm extensions`: `plugins list` lists installed packages; `plugins resources`
+  lists discovered resources; authoring actions follow `plugins` directly.
+  `--no-plugin-code` suppresses automatic code discovery while retaining
+  declarative resources. `--no-plugins` suppresses all automatic plugin resource
+  discovery. Explicit `--plugin` paths still load in either case.
+
 ## Distribution model
 
 Every release contains four npm-compatible package archives, six standalone runtime archives, and one versioned
@@ -96,9 +131,11 @@ publication.
 3. Review migrations, public API changes, provider behavior, security impact, and platform notes.
 4. On macOS or Windows, run `npm run native:build --workspace @ohm/terminal` so local verification has matching terminal artifacts. On Windows also run `npm run native:build --workspace @ohm/kernel` for the Job Object launcher. macOS requires both `cc` and `swiftc`; Windows requires an architecture-matching MSVC developer shell. Then run `npm run check`, `npm run test:coverage:risk`, and `npm run benchmark:release-offline`; the offline release evaluation composes harness outcomes, runtime performance, and focused high-risk release contracts into one report, while risk coverage remains the source-level threshold guard. Run `npm run release:stage` only after collecting all 8 native artifacts; the release workflow does this automatically. A local standalone build also requires the official Node 26.7.0 distribution root and uses `npm run release:standalone -- --directory .release --output .standalone --runtime-root <node-root>`.
 5. Inspect `.release/RELEASE_NOTES.md`, `.release/release-manifest.json`, the SPDX SBOM, the versioned source archive, and `SHA256SUMS`.
-6. Push the reviewed commit to `main`, dispatch `release.yml` manually for `main`, and confirm the run's head SHA is
-   that exact commit. Require every regression, native-build, staging, standalone, and six-platform verification job
-   to pass; manual dispatch does not publish a release.
+6. Push the reviewed commit and dispatch `release.yml` manually for its branch;
+   confirm the run's head SHA is that exact commit. Require every regression,
+   native-build, staging, standalone, and six-platform verification job to pass.
+   Manual dispatch does not publish. Before tagging, place the reviewed release
+   commit on `main`; if its SHA changes, verify that new commit again.
 7. Create and push `v<version>` at that already verified commit. Do not move or reuse a published tag.
 8. Let the tag-triggered release workflow repeat the complete verification set and publish only its attested output.
 
@@ -143,9 +180,9 @@ Manual workflow dispatch performs the regression guards, staging, and full platf
 Download `SHA256SUMS`, the SBOM, and the artifact you plan to use from one tag. Then verify the bytes locally:
 
 ```sh
-tag=v0.1.1
-artifact=ohm-v0.1.1-linux-x64.tar.gz
-source=ohm-v0.1.1-source.tar.gz
+tag=v0.2.0
+artifact=ohm-v0.2.0-linux-x64.tar.gz
+source=ohm-v0.2.0-source.tar.gz
 gh release download "$tag" --repo devsohm/ohm --pattern SHA256SUMS --pattern '*.spdx.json' --pattern "$artifact" --pattern "$source"
 sha256sum --check --ignore-missing SHA256SUMS
 ```

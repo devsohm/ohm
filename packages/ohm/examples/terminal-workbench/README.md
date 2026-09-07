@@ -3,7 +3,7 @@
 This package requires the interactive terminal UI.
 
 ```text
-ohm install ./packages/ohm/examples/terminal-workbench
+ohm plugins install ./packages/ohm/examples/terminal-workbench
 ```
 
 `/example-terminal-workbench THEME` shows:

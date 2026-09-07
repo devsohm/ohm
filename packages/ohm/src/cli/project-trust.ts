@@ -7,7 +7,7 @@ import {
   TrustStore,
   type DefaultProjectTrust,
 } from "../config/index.js";
-import type { RuntimeExtensionHost, RuntimeProjectTrustUi } from "../extensions/runtime.js";
+import type { RuntimePluginHost, RuntimeProjectTrustUi } from "../plugins/runtime.js";
 import type { TerminalPrompter } from "../interfaces/index.js";
 import { projectConfigRootMatchesAgentDir } from "../utils/project-scope.js";
 
@@ -20,6 +20,7 @@ const PROJECT_FILES = [
 ] as const;
 
 const PROJECT_DIRECTORIES = [
+  ".ohm/plugins",
   ".ohm/extensions",
   ".ohm/packages",
   ".ohm/skills",
@@ -94,7 +95,7 @@ export interface ProjectTrustResolverOptions {
   defaultProjectTrust?: DefaultProjectTrust;
   cwd?: string;
   agentDirectory?: string;
-  preactivate?: (workspace: string) => Promise<RuntimeExtensionHost | undefined>;
+  preactivate?: (workspace: string) => Promise<RuntimePluginHost | undefined>;
 }
 
 /**
@@ -113,7 +114,7 @@ export class ProjectTrustResolver {
   readonly #prompted = new Map<string, { decision: boolean; persisted: boolean }>();
   readonly #resources = new Map<string, readonly string[]>();
   readonly #extensionEvaluated = new Set<string>();
-  readonly #preactivated = new Map<string, RuntimeExtensionHost>();
+  readonly #preactivated = new Map<string, RuntimePluginHost>();
   readonly #flights = new Map<string, Promise<boolean>>();
 
   constructor(store: TrustStore, options: ProjectTrustResolverOptions = {}) {
@@ -157,7 +158,7 @@ export class ProjectTrustResolver {
   }
 
   /** Transfers ownership of the pre-trust extension generation to the runtime loader. */
-  async takePreactivatedExtensions(workspace: string): Promise<RuntimeExtensionHost | undefined> {
+  async takePreactivatedPlugins(workspace: string): Promise<RuntimePluginHost | undefined> {
     const canonical = await canonicalExistingPath(workspace);
     await this.#flights.get(canonical);
     const host = this.#preactivated.get(canonical);

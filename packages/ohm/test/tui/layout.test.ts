@@ -3,6 +3,7 @@ import { isStringValue } from "../../src/tui/value-guards.js";
 import { terminalPattern } from "../../src/tui/terminal-pattern.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { sliceByColumn, wrapTextWithAnsi } from "@ohm/terminal";
 import { DEFAULT_TUI_LIMITS } from "../../src/tui/controller.js";
 import {
   renderTranscript,
@@ -24,9 +25,11 @@ function snapshot(value: string): string {
 
 function transcriptContent(value: string): string {
   const firstNewline = value.indexOf("\n");
-  return firstNewline >= 0 && stripAnsi(value.slice(0, firstNewline)) === ""
+  const content = firstNewline >= 0 && stripAnsi(value.slice(0, firstNewline)) === ""
     ? value.slice(firstNewline + 1)
     : value;
+  // These assertions exercise Markdown semantics; role-gutter geometry has its own tests.
+  return content.split("\n").map((line) => sliceByColumn(line, 6, Math.max(0, cellWidth(stripAnsi(line)) - 6), true)).join("\n");
 }
 
 function png(width = 20, height = 10): Buffer {
@@ -99,7 +102,7 @@ test("semantic terminal zones wrap stable messages without changing visible outp
   assert.equal(grouped.split("\u001b]133;A\u0007").length - 1, 1);
   assert.equal(grouped.split("\u001b]133;B\u0007").length - 1, 1);
   assert.equal(grouped.split("\u001b]133;C\u0007").length - 1, 1);
-  assert.match(stripAnsi(grouped), /first block\nsecond block/u);
+  assert.match(stripAnsi(grouped), /ohm   first block\nohm   second block/u);
 
   const reasoningGroup = renderTranscript([{
     id: "reasoning-block",
@@ -630,6 +633,19 @@ test("expanded compaction details use one bounded rail below the receipt", () =>
 
 
 
+test("assistant speaker labels use the theme info color without recoloring the answer", () => {
+  const theme = createTheme("speaker-color", { color: true, unicode: true }, {
+    schemaVersion: 1,
+    name: "speaker-color",
+    base: "dark",
+    styles: { info: { foreground: 51 }, assistant: { foreground: 252 } },
+  });
+  const rendered = renderTranscript([{ id: "assistant", kind: "assistant", text: "Done" }], 40, theme);
+  assert.ok(rendered.includes(`${theme.codes.info}ohm   \u001b[0m`));
+  assert.ok(rendered.includes(`${theme.codes.assistant}Done\u001b[0m`));
+  assert.equal(stripAnsi(rendered).trim(), "ohm   Done");
+});
+
 test("user transcript messages preserve styled Markdown and narrow Unicode bounds", () => {
   const width = 40;
   const theme = createTheme("signal", { color: true, unicode: true });
@@ -640,7 +656,8 @@ test("user transcript messages preserve styled Markdown and narrow Unicode bound
     { outputPad: 1 },
   );
   assert.ok(markdown.includes(theme.codes.title));
-  assert.ok(markdown.split("\n").every((line) => line.includes(theme.getBgAnsi("userMessageBg"))));
+  assert.match(stripAnsi(markdown).trim(), /^bold and code$/u);
+  assert.equal(markdown.includes(theme.getBgAnsi("userMessageBg")), true);
 
   const mono = createTheme("mono", { color: false, unicode: true });
   for (const columns of [1, 2, 3, 4, 5]) {
@@ -655,7 +672,7 @@ test("user transcript messages preserve styled Markdown and narrow Unicode bound
   }
 });
 
-test("interactive user messages use full-width padding by default", () => {
+test("interactive user messages use padded light-text cards without a speaker label", () => {
   const width = 40;
   const theme = createTheme("signal", { color: true, unicode: true });
   const lines = renderTranscript(
@@ -669,11 +686,31 @@ test("interactive user messages use full-width padding by default", () => {
     " same default layout",
     "",
   ]);
+  assert.ok(lines[1]?.includes(theme.codes.userMessage));
   assert.ok(lines.every((line) => line.includes(theme.getBgAnsi("userMessageBg"))));
   assert.ok(lines.every((line) => cellWidth(stripAnsi(line)) === width));
 });
 
-test("padded user messages preserve blank lines and wrap Unicode at wide and narrow widths", () => {
+test("user Markdown keeps its background across style resets and clears it after each row", () => {
+  const theme = createTheme("signal", { color: true, unicode: true });
+  const columns = 24;
+  const lines = renderTranscript([{
+    id: "styled-user",
+    kind: "user",
+    text: "**bold** and `code`\n\n```ts\nconst x = 1;\n```",
+  }], columns, theme).split("\n");
+  for (const line of lines) {
+    assert.equal(cellWidth(line), columns);
+    for (let column = 0; column < columns; column += 1) {
+      const cell = sliceByColumn(line, column, 1, true);
+      const continued = wrapTextWithAnsi(`${cell}\nprobe`, 1000).at(-1)!;
+      assert.match(continued, terminalPattern("\\u001b\\[[0-9;]*48;5;236(?:;[0-9;]*)?m", "u"));
+    }
+    assert.equal(wrapTextWithAnsi(`${line}\nprobe`, 1000).at(-1), "probe");
+  }
+});
+
+test("user cards preserve blank lines and wrap Unicode at wide and narrow widths", () => {
   const theme = createTheme("signal", { color: true, unicode: true });
   const render = (columns: number, text: string): string[] => renderTranscript(
     [{ id: `user-${columns}`, kind: "user", text }],
@@ -691,7 +728,7 @@ test("padded user messages preserve blank lines and wrap Unicode at wide and nar
     "",
   ]);
   assert.ok(wide.every((line) => line.includes(theme.getBgAnsi("userMessageBg"))));
-  assert.ok(wide.every((line) => cellWidth(stripAnsi(line)) === 24));
+  assert.ok(wide.every((line) => cellWidth(stripAnsi(line)) <= 24));
 
   const narrow = render(8, "你🙂abcdef");
   assert.deepEqual(narrow.map((line) => stripAnsi(line).trimEnd()), [
@@ -701,7 +738,10 @@ test("padded user messages preserve blank lines and wrap Unicode at wide and nar
     "",
   ]);
   assert.ok(narrow.every((line) => line.includes(theme.getBgAnsi("userMessageBg"))));
-  assert.ok(narrow.every((line) => cellWidth(stripAnsi(line)) === 8));
+  assert.ok(narrow.every((line) => cellWidth(stripAnsi(line)) <= 8));
+  const ascii = renderTranscript([{ id: "ascii-user", kind: "user", text: "hello" }], 8,
+    createTheme("mono", { color: false, unicode: false }));
+  assert.deepEqual(ascii.split("\n"), ["        ", " hello  ", "        "]);
 });
 
 
@@ -1172,7 +1212,7 @@ test("compact read classifications retain their labels without changing read sem
   });
   const entries = [
     read("ordinary-read", "/workspace/src/parser.ts"),
-    read("documentation-read", "/workspace/packages/ohm/docs/extension-capabilities.md"),
+    read("documentation-read", "/workspace/packages/ohm/docs/plugin-capabilities.md"),
     read("resource-read", "/workspace/AGENTS.md"),
     read("skill-read", "/workspace/skills/review/SKILL.md"),
   ];
@@ -1183,7 +1223,7 @@ test("compact read classifications retain their labels without changing read sem
   const background = theme.getBgAnsi("toolPendingBg");
   const expected = [
     ["read /workspace/src/parser.ts", "read", " /workspace/src/parser.ts"],
-    ["read docs docs/extension-capabilities.md", "read docs", " docs/extension-capabilities.md"],
+    ["read docs docs/plugin-capabilities.md", "read docs", " docs/plugin-capabilities.md"],
     ["read resource /workspace/AGENTS.md", "read resource", " /workspace/AGENTS.md"],
   ] as const;
 
@@ -1205,7 +1245,7 @@ test("compact read classifications retain their labels without changing read sem
   ));
   assert.doesNotMatch(plain, terminalPattern("\\u001b", "u"));
   assert.match(plain, /^\+ read \/workspace\/src\/parser\.ts:1-800 \| done$/mu);
-  assert.match(plain, /^\+ read docs docs\/extension-capabilities\.md:1-800 \| done$/mu);
+  assert.match(plain, /^\+ read docs docs\/plugin-capabilities\.md:1-800 \| done$/mu);
   assert.match(plain, /^\+ read resource \/workspace\/AGENTS\.md:1-800 \| done$/mu);
   assert.match(plain, /^\+ \[skill\] review:1-800 \| done$/mu);
   assert.doesNotMatch(plain, /Ctrl\+O|\bexpand\b/iu);
@@ -1841,7 +1881,7 @@ test("expanded rendererless extension messages keep an honest retained row cap",
     createTheme("mono", { color: false, unicode: true }),
   ));
   assert.ok(rendered.split("\n").length <= 126, "extension fallback exceeded its expanded row cap");
-  assert.match(rendered, /retained extension rows shortened/u);
+  assert.match(rendered, /retained plugin rows shortened/u);
 });
 
 test("global expansion bounds startup skill branch and compaction detail", () => {
@@ -3122,8 +3162,11 @@ test("transcript image payloads stay outside styled text while captions reserve 
   }], 40, coloredTheme, { resolveImage: resolvePng, maxImageRows: 4 });
   const imageOnlyLines = imageOnly.text.split("\n");
   assert.equal(imageOnly.images?.length, 1);
-  assert.ok(imageOnlyLines.every((line) => line.includes(coloredTheme.getBgAnsi("userMessageBg"))));
-  assert.ok(imageOnlyLines.every((line) => cellWidth(stripAnsi(line)) === 40));
+  assert.ok(imageOnlyLines[0]?.includes(coloredTheme.getBgAnsi("userMessageBg")));
+  assert.ok(imageOnlyLines[1]?.includes(coloredTheme.getBgAnsi("userMessageBg")));
+  assert.ok(imageOnlyLines.at(-1)?.includes(coloredTheme.getBgAnsi("userMessageBg")));
+  assert.ok(imageOnlyLines.slice(2, -1).every((line) => !line.includes(coloredTheme.getBgAnsi("userMessageBg"))));
+  assert.ok(imageOnlyLines.every((line) => cellWidth(stripAnsi(line)) <= 40));
 });
 
 
@@ -3160,15 +3203,15 @@ test("assistant Markdown presents list markers, table headers, separators, and f
   }], 120, theme);
   const lines = transcriptContent(colored).split("\n");
   assert.equal(transcriptContent(stripAnsi(colored)), source);
-  assert.ok(lines[0]?.startsWith(theme.codes.accent));
+  assert.ok(lines[0]?.includes(theme.codes.accent));
   assert.ok(lines[0]?.includes(theme.codes.success));
-  assert.ok(lines[2]?.startsWith(theme.codes.accent));
+  assert.ok(lines[2]?.includes(theme.codes.accent));
   assert.ok(lines[3]?.includes(theme.codes.title));
   assert.ok(lines[4]?.includes(theme.codes.accent));
-  assert.ok(lines[6]?.startsWith(theme.codes.muted));
+  assert.ok(lines[6]?.includes(theme.codes.muted));
   assert.ok(lines[6]?.includes(theme.codes.accent));
-  assert.ok(lines[10]?.startsWith(theme.codes.error));
-  assert.ok(lines[11]?.startsWith(theme.codes.success));
+  assert.ok(lines[10]?.includes(theme.codes.error));
+  assert.ok(lines[11]?.includes(theme.codes.success));
 });
 
 test("assistant Markdown wrapping is cell-aware and strips injected terminal controls", () => {
@@ -3179,7 +3222,7 @@ test("assistant Markdown wrapping is cell-aware and strips injected terminal con
     kind: "assistant",
     text: source,
   }], 20, createTheme("mono", { color: false, unicode: true }));
-  assert.equal(rendered.split("\n").join(""), expected);
+  assert.equal(transcriptContent(rendered).split("\n").join(""), expected);
   assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= 20));
   assert.doesNotMatch(rendered, terminalPattern("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f\\u001b]", "u"));
 });
@@ -3193,8 +3236,8 @@ test("assistant prose wraps on word boundaries at narrow widths", () => {
   const lines = rendered.split("\n");
 
   assert.deepEqual(lines.slice(-2), [
-    "I found the unsafe fallback. I’m checking the call ",
-    "sites before changing it.",
+    "ohm   I found the unsafe fallback. I’m checking the ",
+    "      call sites before changing it.",
   ]);
   assert.doesNotMatch(rendered, /\bs\nites\b/u);
 });
@@ -3374,7 +3417,7 @@ test("Markdown renderer retains a bounded recent tail for pathological output", 
 test("transcript dimensions are capped before Markdown allocation", () => {
   const theme = createTheme("mono", { color: false, unicode: true });
   const transcript = renderTranscript([{ id: "assistant", kind: "assistant", text: "x".repeat(1_001) }], 50_000, theme);
-  assert.deepEqual(transcript.split("\n").map(cellWidth), [0, 500, 500, 1]);
+  assert.deepEqual(transcript.split("\n").map(cellWidth), [0, 500, 500, 19]);
 });
 
 test("transcript cards distinguish speakers and every tool state with compact labels", () => {
@@ -3396,7 +3439,7 @@ test("transcript cards distinguish speakers and every tool state with compact la
   ], 48, theme));
 
   assert.match(rendered, /^ Fix the parser\n and keep the API stable/mu);
-  assert.match(rendered, /## Plan\nI will inspect the parser\./u);
+  assert.match(rendered, /ohm   ## Plan\n      I will inspect the parser\./u);
   assert.match(rendered, /^> read src\/parser\.ts \| queued$/mu);
   assert.match(rendered, /^\. \$ npm test \| running\n\|\n\| waiting$/mu);
   assert.match(rendered, /^\+ edit src\/parser\.ts \| done\n\|\n\| one[\s\S]*^\| six$/mu);
@@ -3416,7 +3459,7 @@ test("transcript cards distinguish speakers and every tool state with compact la
   ], 20, coloredTheme).split("\n");
   assert.ok(coloredLines.every((line) => cellWidth(line) <= 20));
   assert.ok(coloredLines[0]?.includes(coloredTheme.codes.userMessage));
-  assert.ok(coloredLines[0]?.includes(coloredTheme.getBgAnsi("userMessageBg")));
+  assert.equal(coloredLines[0]?.includes(coloredTheme.getBgAnsi("userMessageBg")), true);
   assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.toolPending)));
   assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.success)));
   assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.error)));
@@ -3521,7 +3564,7 @@ test("stable transcript layout cache follows content width theme and transformer
 
   entries[1]!.text = "```ts\nconst cached = true;\n```";
   const indented = renderTranscript(entries, 40, mono, { codeBlockIndent: "  " });
-  assert.match(indented, /^  const cached = true;$/mu);
+  assert.match(indented, /^        const cached = true;$/mu);
 });
 
 
@@ -3583,7 +3626,7 @@ test("streaming narrative caches invalidate on transformed text layout and theme
   assert.notEqual(narrow, grown);
 
   const indented = stripAnsi(render(64, monoUnicode, "  "));
-  assert.match(indented, /^  const assistant = true;$/mu);
+  assert.match(indented, /^        const assistant = true;$/mu);
   assert.match(indented, /[|│]   const reasoning = true;/u);
 
   const ascii = stripAnsi(render(64, createTheme("mono", { color: false, unicode: false }), "  "));

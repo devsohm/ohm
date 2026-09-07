@@ -47,4 +47,4 @@ export * from "./builtins/ls.js";
 export * from "./builtins/read.js";
 export * from "./builtins/shell.js";
 export * from "./builtins/write.js";
-export type { ToolDefinition } from "../extensions/direct.js";
+export type { ToolDefinition } from "../plugins/direct.js";

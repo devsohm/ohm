@@ -1,5 +1,6 @@
 import { optionalProperties } from "../core/optional-properties.js";
-import { createHash, timingSafeEqual } from "node:crypto";
+import type { AgentSessionInspection } from "../service/session-inspection.js";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -8,8 +9,10 @@ import {
 } from "node:http";
 import { isNativeError } from "node:util/types";
 import { Value } from "typebox/value";
+import { boundedJsonSnapshot } from "@ohm/kernel/runtime/core/bounded-json";
 
 import { errorMessage } from "../core/errors.js";
+import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { EventEnvelope } from "../core/events.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "../core/json.js";
 import { BOOLEAN_VALUE, STRING_VALUE } from "../core/value-schemas.js";
@@ -21,13 +24,13 @@ import {
   type PortablePresentationEvent,
 } from "../interfaces/portable-presentation.js";
 import {
-  EXTENSION_WIRE_SERVICE_LIMITS,
-  validateExtensionWireServiceRequest,
-  type ExtensionWireServiceDescriptor,
-  type ExtensionWireServiceRequest,
-  type ExtensionWireServiceResponse,
-} from "../extensions/wire-services.js";
-import { REPLICATED_JSON_STATE_LIMITS } from "../extensions/replicated-state.js";
+  PLUGIN_WIRE_SERVICE_LIMITS,
+  validatePluginWireServiceRequest,
+  type PluginWireServiceDescriptor,
+  type PluginWireServiceRequest,
+  type PluginWireServiceResponse,
+} from "../plugins/wire-services.js";
+import { REPLICATED_JSON_STATE_LIMITS } from "../plugins/replicated-state.js";
 import type {
   AgentSessionEnvelopeListener,
   AgentSessionPromptOptions,
@@ -38,6 +41,7 @@ import type {
   AgentSessionToolEffectResolution,
 } from "../service/agent-session.js";
 import { assertValidSessionId } from "../storage/session-manager.js";
+import type { SessionEntry } from "../plugins/session-contract.js";
 import { MAX_TOOL_RESULT_CONTENT_BYTES } from "../tools/coordinator.js";
 import { limitText } from "../tools/output.js";
 
@@ -45,7 +49,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_REQUEST_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
 const DEFAULT_MAX_BODY_BYTES = Math.max(
   PORTABLE_PRESENTATION_LIMITS.maxActionInputBytes,
-  EXTENSION_WIRE_SERVICE_LIMITS.maxPayloadBytes,
+  PLUGIN_WIRE_SERVICE_LIMITS.maxPayloadBytes,
   REPLICATED_JSON_STATE_LIMITS.maxStateBytes,
   REPLICATED_JSON_STATE_LIMITS.maxDeltaBytes,
 ) + DEFAULT_REQUEST_ENVELOPE_HEADROOM_BYTES;
@@ -65,6 +69,9 @@ const MAX_RECOVERY_EFFECT_ID_BYTES = 1_024;
 const MAX_RECOVERY_QUEUE_IDS = 100;
 const MAX_RECOVERY_RESOLUTIONS = 256;
 const MAX_RECOVERY_REASON_BYTES = 4_096;
+const MAX_HISTORY_ENTRIES = 500;
+const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+const HISTORY_ENVELOPE_BYTES = 4_096;
 const TOKEN68 = /^[A-Za-z0-9\-._~+/]+={0,}$/u;
 
 export interface ServeCreateSessionRequest {
@@ -100,18 +107,26 @@ export interface ServeSessionRuntime {
   readonly sessionId: string;
   readonly summary: ServeSessionSummary;
   readonly suspendedRun: AgentSessionSuspendedRun | undefined;
+  /** Read public projected entries, never native journal/provider state. Revision changes with tree metadata. */
+  getEntriesPage?(offset: number, limit: number): {
+    entries: SessionEntry[];
+    totalEntries: number;
+    leafId: string | null;
+    revision: number;
+  };
   onEvent(listener: AgentSessionEnvelopeListener): () => void;
   onPortablePresentation?(listener: (event: PortablePresentationEvent) => void): () => void;
   listPortablePresentations?(): readonly PortablePresentationEvent[];
+  inspect?(): AgentSessionInspection;
   invokePortablePresentationAction?(
     request: PortablePresentationActionRequest,
     signal?: AbortSignal,
   ): Promise<PortablePresentationActionResult>;
-  listExtensionWireServices?(): readonly ExtensionWireServiceDescriptor[];
-  invokeExtensionWireService?(
-    request: ExtensionWireServiceRequest,
+  listPluginWireServices?(): readonly PluginWireServiceDescriptor[];
+  invokePluginWireService?(
+    request: PluginWireServiceRequest,
     signal?: AbortSignal,
-  ): Promise<ExtensionWireServiceResponse>;
+  ): Promise<PluginWireServiceResponse>;
   start?(signal: AbortSignal): Promise<void>;
   prompt(
     text: string,
@@ -201,6 +216,7 @@ interface SessionRecord {
   closing: boolean;
   closeFlight?: Promise<void>;
   events: ReplayEvent[];
+  streamId: string;
   latestEventId: number;
   promptAdmissionBytes: number;
   promptAdmissionCancellation: AbortController;
@@ -329,9 +345,9 @@ function portablePresentationActionRequest(value: JsonObject): PortablePresentat
   }
 }
 
-function extensionWireRequest(value: JsonObject): ExtensionWireServiceRequest {
+function extensionWireRequest(value: JsonObject): PluginWireServiceRequest {
   try {
-    return validateExtensionWireServiceRequest(value);
+    return validatePluginWireServiceRequest(value);
   } catch (error) {
     throw new HttpProblem(400, errorMessage(error));
   }
@@ -574,6 +590,100 @@ function statePayload(runtime: ServeSessionRuntime) {
       hasSuspendedRun: summary.hasSuspendedRun,
     },
   };
+}
+
+function visibleHistoryEntry(entry: SessionEntry): SessionEntry {
+  if (entry.type !== "message" || entry.message.role !== "assistant") return entry;
+  const message = { ...entry.message, content: entry.message.content.map((block) => {
+    if (block.type === "text") return { type: "text" as const, text: block.text };
+    if (block.type === "thinking") return { type: "thinking" as const, thinking: block.thinking,
+      ...optionalProperties(block.redacted === undefined ? undefined : { redacted: block.redacted }) };
+    return { type: "toolCall" as const, id: block.id, name: block.name, arguments: block.arguments };
+  }) };
+  delete message.providerState;
+  return { ...entry, message };
+}
+
+function historyPayload(record: SessionRecord, query: URLSearchParams) {
+  for (const key of query.keys()) {
+    if (!["afterSequence", "limit", "snapshot"].includes(key) || query.getAll(key).length !== 1) {
+      throw new HttpProblem(400, "History query is invalid");
+    }
+  }
+  const integer = (name: string, fallback: number, minimum: number, maximum: number): number => {
+    const value = query.get(name);
+    if (value === null) return fallback;
+    const parsed = Number(value);
+    if (!/^(?:0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+      throw new HttpProblem(400, `History ${name} is invalid`);
+    }
+    return parsed;
+  };
+  const start = integer("afterSequence", 0, 0, Number.MAX_SAFE_INTEGER);
+  const limit = integer("limit", 100, 1, MAX_HISTORY_ENTRIES);
+  const requestedSnapshot = query.get("snapshot");
+  if (requestedSnapshot !== null && !/^[a-f0-9]{64}$/u.test(requestedSnapshot)) {
+    throw new HttpProblem(400, "History snapshot is invalid");
+  }
+  if (start > 0 && requestedSnapshot === null) {
+    throw new HttpProblem(400, "History continuation requires a snapshot");
+  }
+  if (record.runtime.getEntriesPage === undefined) throw new HttpProblem(501, "Session history is unavailable");
+  const read = (offset: number) => {
+    if (record.runtime.sessionId !== record.sessionId) throw new HttpProblem(409, "Session identity changed");
+    const page = record.runtime.getEntriesPage!(offset, 1);
+    if (record.runtime.sessionId !== record.sessionId) throw new HttpProblem(409, "Session identity changed");
+    return page;
+  };
+  const eventCursor = record.latestEventId;
+  let page = read(start);
+  const { totalEntries, leafId, revision } = page;
+  if (!Number.isSafeInteger(totalEntries) || totalEntries < 0 || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("Session history metadata is invalid");
+  }
+  if (leafId !== null) summaryString(leafId, "history leaf", 1_024);
+  const snapshot = createHash("sha256").update(JSON.stringify([
+    record.streamId, record.sessionId, totalEntries, leafId, revision,
+  ])).digest("hex");
+  if (requestedSnapshot !== null && requestedSnapshot !== snapshot) {
+    throw new HttpProblem(409, "Session history changed; restart from the first page");
+  }
+  if (start > totalEntries) throw new HttpProblem(400, "History afterSequence is outside the session history");
+  const entries: JsonValue[] = [];
+  let bytes = 2;
+  for (let offset = start; offset < totalEntries && entries.length < limit; offset += 1) {
+    if (offset !== start) page = read(offset);
+    if (page.totalEntries !== totalEntries || page.leafId !== leafId || page.revision !== revision) {
+      throw new HttpProblem(409, "Session history changed; restart from the first page");
+    }
+    if (page.entries.length !== 1) throw new Error("Session history projection did not advance");
+    let visible: JsonValue;
+    try {
+      visible = boundedJsonSnapshot(visibleHistoryEntry(page.entries[0]!), {
+        label: "Session history entry",
+        maximumBytes: MAX_HISTORY_BYTES - HISTORY_ENVELOPE_BYTES,
+        // Stay inside the shared redactor's budgets so it cannot truncate admitted entries.
+        maximumValues: 10_000,
+        maximumContainers: 10_000,
+        maximumDepth: 63,
+      }).value;
+    } catch {
+      if (entries.length === 0) throw new HttpProblem(413, "Session history entry exceeds safe response limits");
+      break;
+    }
+    const serialized = JSON.stringify(defaultSecretRedactor.redactPayloadValue(visible));
+    const nextBytes = bytes + Buffer.byteLength(serialized, "utf8") + (entries.length === 0 ? 0 : 1);
+    if (nextBytes > MAX_HISTORY_BYTES - HISTORY_ENVELOPE_BYTES) {
+      if (entries.length === 0) throw new HttpProblem(413, "Session history entry exceeds the response byte limit");
+      break;
+    }
+    entries.push(JSON.parse(serialized));
+    bytes = nextBytes;
+  }
+  const nextSequence = start + entries.length;
+  return { sessionId: record.sessionId, entries, leafId, totalEntries,
+    sequenceStart: entries.length === 0 ? nextSequence : start + 1,
+    nextSequence, hasMore: nextSequence < totalEntries, snapshot, eventCursor, streamId: record.streamId };
 }
 
 type ServeStreamEvent = EventEnvelope | PortablePresentationEvent;
@@ -968,6 +1078,12 @@ class RunningServeServer implements ServeServer {
         return;
       }
 
+      if (path[3] === "entries") {
+        if (method !== "GET") throw new HttpProblem(405, "Method not allowed", { Allow: "GET" });
+        writeJson(response, 200, historyPayload(record, url.searchParams));
+        return;
+      }
+
       if (path[3] === "cancel") {
         if (method !== "POST") throw new HttpProblem(405, "Method not allowed", { Allow: "POST" });
         const body = await readJsonBody(request, this.#maxBodyBytes, true);
@@ -1035,6 +1151,13 @@ class RunningServeServer implements ServeServer {
         return;
       }
 
+      if (path[3] === "inspection") {
+        if (method !== "GET") throw new HttpProblem(405, "Method not allowed", { Allow: "GET" });
+        if (record.runtime.inspect === undefined) throw new HttpProblem(404, "Runtime inspection is unavailable");
+        writeJson(response, 200, record.runtime.inspect());
+        return;
+      }
+
       if (path[3] === "presentations") {
         if (method !== "GET") throw new HttpProblem(405, "Method not allowed", { Allow: "GET" });
         writeJson(response, 200, {
@@ -1048,13 +1171,13 @@ class RunningServeServer implements ServeServer {
         if (method === "GET") {
           writeJson(response, 200, {
             sessionId,
-            services: record.runtime.listExtensionWireServices?.() ?? [],
+            services: record.runtime.listPluginWireServices?.() ?? [],
           });
           return;
         }
         if (method === "POST") {
-          const invoke = record.runtime.invokeExtensionWireService;
-          if (invoke === undefined) throw new HttpProblem(404, "Extension wire services are unavailable");
+          const invoke = record.runtime.invokePluginWireService;
+          if (invoke === undefined) throw new HttpProblem(404, "Plugin wire services are unavailable");
           const body = await readJsonBody(request, this.#maxBodyBytes);
           const wireRequest = extensionWireRequest(body);
           try {
@@ -1062,7 +1185,7 @@ class RunningServeServer implements ServeServer {
             writeJson(response, 200, { sessionId, result });
           } catch {
             signal.throwIfAborted();
-            throw new HttpProblem(404, "Extension wire service is unavailable");
+            throw new HttpProblem(404, "Plugin wire service is unavailable");
           }
           return;
         }
@@ -1219,6 +1342,7 @@ class RunningServeServer implements ServeServer {
       clients: new Map(),
       closing: false,
       events: [],
+      streamId: randomUUID(),
       latestEventId: 0,
       promptAdmissionBytes: 0,
       promptAdmissionCancellation: new AbortController(),
@@ -1623,6 +1747,15 @@ class RunningServeServer implements ServeServer {
     response: ServerResponse,
     record: SessionRecord,
   ): void {
+    const streamId = request.headers["x-ohm-stream-id"];
+    if (streamId !== undefined) {
+      if (!Value.Check(STRING_VALUE, streamId) || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(streamId)) {
+        throw new HttpProblem(400, "X-Ohm-Stream-ID is invalid");
+      }
+      if (streamId !== record.streamId) {
+        throw new HttpProblem(409, "Session event stream changed; recover committed history before reconnecting");
+      }
+    }
     const requestedId = lastEventId(request);
     if (requestedId > record.latestEventId) {
       throw new HttpProblem(409, "Last-Event-ID is ahead of the event stream");
@@ -1634,6 +1767,7 @@ class RunningServeServer implements ServeServer {
       "Content-Type": "text/event-stream; charset=utf-8",
       "X-Accel-Buffering": "no",
       "X-Content-Type-Options": "nosniff",
+      "X-Ohm-Stream-ID": record.streamId,
     });
     response.flushHeaders();
     const client: SseClient = {

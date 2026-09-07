@@ -97,7 +97,7 @@ test("live setup isolates runtime state without exposing the captured auth path 
             workspace: process.cwd(),
             projectTrusted: false,
             ephemeral: true,
-            extensions: false,
+            pluginCode: false,
             skills: false,
             promptTemplates: false,
             themes: false,

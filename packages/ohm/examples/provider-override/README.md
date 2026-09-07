@@ -1,11 +1,11 @@
-# Provider override extension
+# Provider override plugin
 
 This package replaces the active `ollama` catalog with one local
 OpenAI-compatible model. ohm restores the original registration when the
-extension generation unloads.
+plugin generation unloads.
 
 ```text
-ohm install ./packages/ohm/examples/provider-override
+ohm plugins install ./packages/ohm/examples/provider-override
 ```
 
 `/example-provider-disable` removes the replacement earlier through the host

@@ -4,7 +4,7 @@ import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import type { RuntimeEvent } from "../../src/core/events.js";
 import { MAX_RPC_LINE_BYTES } from "../../src/interfaces/rpc.js";
 import { runRpcMode } from "../../src/modes/rpc-mode.js";
-import type { AgentSession, ExtensionBindings } from "../../src/service/agent-session.js";
+import type { AgentSession, PluginBindings } from "../../src/service/agent-session.js";
 import type { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
 
 function rpcSessionFixture<Value>(value: Value): AgentSession {
@@ -30,7 +30,7 @@ if (process.env.OHM_RPC_BLOCK_PROMPT === "1") {
 }
 
 const session = rpcSessionFixture({
-  async bindExtensions(bindings?: ExtensionBindings) {
+  async bindPlugins(bindings?: PluginBindings) {
     assert.equal(bindings?.mode, "rpc");
     const extensionErrorSecret = process.env.OHM_RPC_EXTENSION_ERROR_SECRET;
     if (!emittedExtensionError && extensionErrorSecret !== undefined) {

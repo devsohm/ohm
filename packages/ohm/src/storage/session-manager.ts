@@ -6,12 +6,13 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
+  realpathSync,
   statSync,
-  unlinkSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -22,7 +23,6 @@ import {
   SESSION_V4_MAX_FILE_BYTES,
   SESSION_V4_MAX_RECORD_BYTES,
   SESSION_V4_PRIMARY_BRANCH_ID,
-  SessionV4SyncWriter,
   applySessionV4CommitOwned,
   cloneSessionV4State,
   createSessionV4State,
@@ -30,19 +30,25 @@ import {
   parseSessionV4Header,
   readSessionV4File,
   readSessionV4FileSync,
+  type SessionV4BranchRuntimeState,
   type SessionV4Changes,
   type SessionV4Commit,
   type SessionV4ConversationNode,
   type SessionV4Header,
   type SessionV4Json,
+  type SessionV4NodeMetadata,
+  type SessionV4OperationState,
   type SessionV4Parent,
+  type SessionV4QueueEntryState,
+  type SessionV4ReducerState,
   type SessionV4State,
   type SessionV4ThinkingLevel,
+  type SessionV4ToolEffectState,
 } from "@ohm/kernel/session-v4";
 import { getAgentDir, getSessionsDir } from "../config/paths.js";
 import { errorCode } from "../core/errors.js";
 import { isJsonObject, isJsonValue, type JsonObject } from "../core/json.js";
-import type { CanonicalMessage, ImageBlock, NormalizedUsage, TextBlock } from "../core/types.js";
+import type { AdapterError, CanonicalMessage, FinishReason, ImageBlock, NormalizedUsage, TextBlock } from "../core/types.js";
 import {
   addCompleteNormalizedUsage,
   addNormalizedUsage,
@@ -65,7 +71,7 @@ import {
   type CustomEntry,
   type CustomMessage,
   type CustomMessageEntry,
-  type ExtensionSessionProvenance,
+  type PluginSessionProvenance,
   type ModelChangeEntry,
   type NewSessionOptions,
   type PersistedSessionMessage,
@@ -87,22 +93,28 @@ import {
   validateSessionBranchQuery,
 } from "./session-branch-query.js";
 import { loadIndexedSessionInfos } from "./session-catalog-index.js";
-import {
-  acquireSessionWriterLeaseSync,
-  type SessionWriterLease,
-} from "./session-writer-lease.js";
 import { Value } from "typebox/value";
+import { SessionStorageJournal } from "./session-storage.js";
+import { isSqliteSessionFile, SqliteSessionStorageBackend } from "./sqlite-session-storage.js";
+import { acquireSessionWriterLeaseSync } from "./session-writer-lease.js";
 
 const SESSION_READ_NONBLOCK = constants.O_NONBLOCK ?? 0;
 const SESSION_READ_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const SESSION_DIRECTORY_SLUG_LENGTH = 80;
-const CUSTOM_ENTRY_EXTENSION = "ohm.session.custom";
-const CUSTOM_MESSAGE_EXTENSION = "ohm.session.custom-message";
-const MESSAGE_CUSTOM_EXTENSION = "ohm.session.message-custom";
-const BRANCH_SUMMARY_EXTENSION = "ohm.session.branch-summary";
+const CUSTOM_ENTRY_PLUGIN = "ohm.session.custom";
+const CUSTOM_MESSAGE_PLUGIN = "ohm.session.custom-message";
+const MESSAGE_CUSTOM_PLUGIN = "ohm.session.message-custom";
+const BRANCH_SUMMARY_PLUGIN = "ohm.session.branch-summary";
 const TOOLS_CHANGE_CUSTOM_TYPE = "ohm.session.tools-change";
 const PRIVATE_SESSION_DIRECTORY_MODE = 0o700;
-const activeSessionWriters = new Set<string>();
+const ACTIVITY_FINISH_REASONS = [
+  "stop", "tool_calls", "length", "context_limit", "content_filter", "refusal",
+  "pause", "cancelled", "aborted", "error", "incomplete", "unknown",
+] as const satisfies readonly FinishReason[];
+const ACTIVITY_ERROR_CATEGORIES = [
+  "authentication", "permission", "rate_limit", "invalid_request", "not_found", "overloaded",
+  "network", "timeout", "protocol", "cancelled", "provider",
+] as const satisfies readonly AdapterError["category"][];
 
 export interface ActiveBranchUsage {
   usage: NormalizedUsage;
@@ -120,15 +132,70 @@ export interface SessionEntryProjectionMetadata {
   projectedEntryCount: number;
 }
 
+export interface SessionHistoryPageOptions {
+  /** Fixed lineage tip. Omit to use the current active tip. */
+  from?: string;
+  before?: string;
+  after?: string;
+  edge?: "oldest";
+  limit?: number;
+  maxBytes?: number;
+}
+
+export interface SessionHistoryPage {
+  entries: SessionEntry[];
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
+export interface SessionHistorySearchOptions {
+  /** Limit search to this lineage. Omit to search every stored branch. */
+  from?: string;
+  before?: string;
+  after?: string;
+  limit?: number;
+  signal?: AbortSignal;
+}
+
+export interface SessionHistorySearchResult {
+  matches: Array<{ id: string; preview: string }>;
+  hasMore: boolean;
+  cursor?: string;
+}
+
+function historyLimit(value: number | undefined, fallback: number, maximum: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
+    throw new RangeError(`History limit must be between 1 and ${maximum}`);
+  }
+  return limit;
+}
+
+function entryPageRange(offset: number, limit: number, count: number) {
+  // Native ordinal APIs historically use slice(offset, offset + limit), including
+  // its fractional/NaN/infinite coercion. SQL receives only the resulting bounds.
+  const start = Math.min(Math.trunc(offset) || 0, count);
+  const end = Math.min(Math.trunc(offset + limit) || 0, count);
+  return { offset: start, limit: Math.max(0, end - start) };
+}
+
+function historyText(entry: SessionEntry): string {
+  if (entry.type === "compaction" || entry.type === "branch_summary") return entry.summary;
+  if (entry.type === "custom_message") {
+    if (!entry.display) return "";
+    return Value.Check(STRING_VALUE, entry.content)
+      ? entry.content
+      : entry.content.flatMap((block) => block.type === "text" ? [block.text] : []).join(" ");
+  }
+  if (entry.type !== "message") return "";
+  if (entry.message.role === "bashExecution") return `${entry.message.command}\n${entry.message.output}`;
+  if (entry.message.role === "custom" && !entry.message.display) return "";
+  return messageText(entry.message);
+}
+
 export const MAX_SESSION_RECORD_BYTES = SESSION_V4_MAX_RECORD_BYTES;
 export const MAX_SESSION_FILE_BYTES = SESSION_V4_MAX_FILE_BYTES;
 export const MAX_SESSION_ENTRY_COUNT = 100_000;
-
-interface OpenedPersistentSession {
-  writer: SessionV4SyncWriter;
-  lease: SessionWriterLease;
-  logicalFileBytes: number;
-}
 
 interface LoadedSessionState {
   state: SessionV4State;
@@ -143,30 +210,6 @@ interface SessionFileHeader {
 interface SessionContextMessagePage {
   messages: SessionContextMessage[];
   totalMessages: number;
-}
-
-function openPersistentSession(file: string): OpenedPersistentSession {
-  if (activeSessionWriters.has(file)) {
-    throw new Error(`Session file already has an active writer: ${file}`);
-  }
-  const lease = acquireSessionWriterLeaseSync(file);
-  let writer: SessionV4SyncWriter | undefined;
-  try {
-    writer = SessionV4SyncWriter.open(file);
-    lease.bindToFile();
-    const count = writer.inspectState((state) => state.nodes.size);
-    if (count > MAX_SESSION_ENTRY_COUNT) {
-      throw new Error(`Session entry count exceeds the limit of ${MAX_SESSION_ENTRY_COUNT}: ${file}`);
-    }
-    return { writer, lease, logicalFileBytes: statSync(file).size };
-  } catch (error) {
-    try {
-      writer?.close();
-    } finally {
-      lease.release();
-    }
-    throw error;
-  }
 }
 
 function expandedPath(path: string): string {
@@ -252,7 +295,7 @@ function numberField(value: SessionV4Json | undefined): number | undefined {
 
 function extensionSessionProvenance(
   value: SessionV4Json | undefined,
-): ExtensionSessionProvenance | undefined {
+): PluginSessionProvenance | undefined {
   const selected = value === undefined ? undefined : asRecord(value);
   if (selected === undefined || selected.schemaVersion !== 1) return undefined;
   const extensionId = stringField(selected.extensionId);
@@ -433,7 +476,7 @@ function projectedMessageEntryCount(value: SessionV4Json, fallbackRole?: string)
 
 function projectedSessionEntryCount(node: SessionV4ConversationNode): number {
   if (node.nodeType === "message") return projectedMessageEntryCount(node.content, node.role);
-  if (node.nodeType === "extension_context" && node.extensionId === MESSAGE_CUSTOM_EXTENSION) {
+  if (node.nodeType === "extension_context" && node.extensionId === MESSAGE_CUSTOM_PLUGIN) {
     return projectedMessageEntryCount(node.context);
   }
   return 1;
@@ -478,7 +521,7 @@ export function sessionEntryToV4Node(
       return {
         ...base,
         nodeType: "extension_context",
-        extensionId: MESSAGE_CUSTOM_EXTENSION,
+        extensionId: MESSAGE_CUSTOM_PLUGIN,
         context: asJson(entry.message),
       };
     }
@@ -513,7 +556,7 @@ export function sessionEntryToV4Node(
       return {
         ...base,
         nodeType: "extension_context",
-        extensionId: BRANCH_SUMMARY_EXTENSION,
+        extensionId: BRANCH_SUMMARY_PLUGIN,
         context: asJson({
           fromId: entry.fromId,
           summary: entry.summary,
@@ -541,7 +584,7 @@ export function sessionEntryToV4Node(
       return {
         ...base,
         nodeType: "extension_state",
-        extensionId: CUSTOM_ENTRY_EXTENSION,
+        extensionId: CUSTOM_ENTRY_PLUGIN,
         state: asJson({
           customType: entry.customType,
           ...optionalProperties(entry.data === undefined ? undefined : { data: entry.data }),
@@ -552,7 +595,7 @@ export function sessionEntryToV4Node(
       return {
         ...base,
         nodeType: "extension_context",
-        extensionId: CUSTOM_MESSAGE_EXTENSION,
+        extensionId: CUSTOM_MESSAGE_PLUGIN,
         context: asJson({
           customType: entry.customType,
           content: entry.content,
@@ -647,7 +690,7 @@ function projectedEntry(node: SessionV4ConversationNode): SessionEntry {
     }
     case "extension_context": {
       const value = asRecord(node.context);
-      if (node.extensionId === CUSTOM_MESSAGE_EXTENSION && value !== undefined) {
+      if (node.extensionId === CUSTOM_MESSAGE_PLUGIN && value !== undefined) {
         const provenance = extensionSessionProvenance(value.provenance);
         return {
           ...base,
@@ -659,7 +702,7 @@ function projectedEntry(node: SessionV4ConversationNode): SessionEntry {
           ...optionalProperties(provenance === undefined ? undefined : { provenance }),
         };
       }
-      if (node.extensionId === BRANCH_SUMMARY_EXTENSION && value !== undefined) {
+      if (node.extensionId === BRANCH_SUMMARY_PLUGIN && value !== undefined) {
         const fromHook = booleanField(value.fromHook);
         const usage = projectedStoredUsage(value.usage);
         return {
@@ -672,7 +715,7 @@ function projectedEntry(node: SessionV4ConversationNode): SessionEntry {
           ...optionalProperties(usage === undefined ? undefined : { usage }),
         };
       }
-      if (node.extensionId === MESSAGE_CUSTOM_EXTENSION && value !== undefined) {
+      if (node.extensionId === MESSAGE_CUSTOM_PLUGIN && value !== undefined) {
         const message = persistedSessionMessage(value);
         if (message !== undefined) {
           return {
@@ -691,7 +734,7 @@ function projectedEntry(node: SessionV4ConversationNode): SessionEntry {
     }
     case "extension_state": {
       const value = asRecord(node.state);
-      if (node.extensionId === CUSTOM_ENTRY_EXTENSION && value !== undefined) {
+      if (node.extensionId === CUSTOM_ENTRY_PLUGIN && value !== undefined) {
         const provenance = extensionSessionProvenance(value.provenance);
         return {
           ...base,
@@ -779,7 +822,7 @@ function nodeUsage(node: SessionV4ConversationNode): {
       ...optionalProperties(usage === undefined ? undefined : { usage }),
     };
   }
-  if (node.nodeType === "extension_context" && node.extensionId === BRANCH_SUMMARY_EXTENSION) {
+  if (node.nodeType === "extension_context" && node.extensionId === BRANCH_SUMMARY_PLUGIN) {
     const summary = asRecord(node.context);
     const usage = boundedStoredUsage(summary?.usage);
     return {
@@ -975,6 +1018,16 @@ function stateFromFile(
   path: string,
   followSymlinks = true,
 ): LoadedSessionState {
+  if (isSqliteSessionFile(path, followSymlinks)) {
+    const source = followSymlinks ? realpathSync(path) : path;
+    const journal = new SessionStorageJournal(new SqliteSessionStorageBackend(dirname(source)).open(source, { readOnly: true }));
+    try {
+      // This private replay is closed below before its exclusively owned state escapes.
+      const state = journal.detachReadOnlyState();
+      if (state.nodes.size > MAX_SESSION_ENTRY_COUNT) throw new Error(`Session entry count exceeds the limit of ${MAX_SESSION_ENTRY_COUNT}: ${path}`);
+      return { state, committedBytes: journal.bytes };
+    } finally { journal.close(); }
+  }
   const result = readSessionV4FileSync(path, { followSymlinks });
   if (result.state.nodes.size > MAX_SESSION_ENTRY_COUNT) {
     throw new Error(`Session entry count exceeds the limit of ${MAX_SESSION_ENTRY_COUNT}: ${path}`);
@@ -983,6 +1036,16 @@ function stateFromFile(
 }
 
 function headerFromFile(path: string): SessionFileHeader {
+  if (isSqliteSessionFile(path, false)) {
+    const storage = new SqliteSessionStorageBackend(dirname(path)).open(path, { readOnly: true });
+    try {
+      const details = statSync(path);
+      let modified = details.mtimeMs;
+      try { modified = Math.max(modified, statSync(`${path}-wal`).mtimeMs); }
+      catch (error) { if (errorCode(error) !== "ENOENT") throw error; }
+      return { header: storage.read().header, modified };
+    } finally { storage.close(); }
+  }
   const fd = openSync(
     path,
     constants.O_RDONLY | SESSION_READ_NONBLOCK | SESSION_READ_NOFOLLOW,
@@ -1034,7 +1097,9 @@ function parentFromReference(
   if (reference === undefined) return undefined;
   let sessionId = reference;
   const candidate = absolutePath(reference);
-  if (existsSync(candidate)) sessionId = stateFromFile(candidate).state.header.sessionId;
+  if (existsSync(candidate)) {
+    sessionId = stateFromFile(candidate).state.header.sessionId;
+  }
   if (sessionId === childId) throw new Error("A session cannot be its own parent");
   return { sessionId, purpose: "linked" };
 }
@@ -1064,6 +1129,41 @@ function sameCwd(candidate: string | undefined, cwd: string): boolean {
   return candidate !== undefined && candidate !== "" && sameFilesystemPath(candidate, cwd);
 }
 
+class LegacySessionConflictError extends Error {}
+
+function includesJournal(source: SessionV4State, copy: SessionV4State): boolean {
+  return isDeepStrictEqual(copy.header, source.header)
+    && [...source.commits.values()].every((commit) => isDeepStrictEqual(copy.commits.get(commit.commitId), commit));
+}
+
+/** Hide a legacy source only after proving that its complete committed prefix survives. */
+function coalesceLegacyCopies(scanned: SessionScanResult): SessionScanResult {
+  const byId = new Map<string, SessionInfo[]>();
+  for (const session of scanned.sessions) {
+    const group = byId.get(session.id) ?? [];
+    group.push(session);
+    byId.set(session.id, group);
+  }
+  const hidden = new Set<string>();
+  for (const group of byId.values()) {
+    if (group.length < 2) continue;
+    try {
+      const saved = group.filter((session) => isSqliteSessionFile(session.path, false));
+      const legacy = group.filter((session) => !saved.includes(session));
+      for (const source of legacy) {
+        const sourceState = stateFromFile(source.path, false).state;
+        if (saved.some((copy) => includesJournal(sourceState, stateFromFile(copy.path, false).state))) hidden.add(source.path);
+        else if (saved.length > 0) scanned.invalid.push({ path: source.path, error: "Legacy session conflicts with an existing SQLite session; both copies remain visible" });
+      }
+    } catch (error) {
+      // Concurrent file changes cannot authorize hiding any unverified source.
+      for (const session of group) hidden.delete(session.path);
+      scanned.invalid.push({ path: group[0]!.path, error: errorText(error) });
+    }
+  }
+  return { sessions: scanned.sessions.filter((session) => !hidden.has(session.path)), invalid: scanned.invalid };
+}
+
 export function findMostRecentSession(sessionDir: string, cwd?: string): string | null {
   for (const candidate of recentSessionCandidates(sessionDir, cwd)) {
     try {
@@ -1078,7 +1178,7 @@ function recentSessionCandidates(sessionDir: string, cwd?: string): Array<{ path
   const directory = absolutePath(sessionDir);
   try {
     return readdirSync(directory)
-      .filter((name) => name.endsWith(".jsonl"))
+      .filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite"))
       .map((name) => join(directory, name))
       .flatMap((path) => {
         try {
@@ -1098,7 +1198,7 @@ function recentSessionCandidates(sessionDir: string, cwd?: string): Array<{ path
 async function readSessionInfo(path: string, followSymlinks = true): Promise<SessionInfo> {
   const [details, loaded] = await Promise.all([
     stat(path),
-    readSessionV4File(path, { followSymlinks }),
+    isSqliteSessionFile(path, followSymlinks) ? Promise.resolve(stateFromFile(path, followSymlinks)) : readSessionV4File(path, { followSymlinks }),
   ]);
   const state = loaded.state;
   if (state.nodes.size > MAX_SESSION_ENTRY_COUNT) {
@@ -1150,15 +1250,15 @@ async function scanDirectory(directory: string, progress?: SessionListProgress):
   if (!existsSync(directory)) return { sessions: [], invalid: [] };
   try {
     const files = (await readdir(directory))
-      .filter((name) => name.endsWith(".jsonl"))
+      .filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite"))
       .sort()
       .map((name) => join(directory, name));
-    return await loadIndexedSessionInfos(
+    return coalesceLegacyCopies(await loadIndexedSessionInfos(
       directory,
       files,
       async (file) => await readSessionInfo(file, false),
       progress,
-    );
+    ));
   } catch (error) {
     return { sessions: [], invalid: [{ path: directory, error: errorText(error) }] };
   }
@@ -1192,7 +1292,7 @@ async function scanAllSessions(
   for (const directory of directories) {
     try {
       files.push(...(await readdir(directory))
-        .filter((name) => name.endsWith(".jsonl"))
+        .filter((name) => name.endsWith(".jsonl") || name.endsWith(".sqlite"))
         .sort()
         .map((name) => join(directory, name)));
     } catch (error) {
@@ -1206,7 +1306,7 @@ async function scanAllSessions(
     async (file) => await readSessionInfo(file, false),
     progress,
   );
-  return { sessions: scanned.sessions, invalid: [...invalid, ...scanned.invalid] };
+  return coalesceLegacyCopies({ sessions: scanned.sessions, invalid: [...invalid, ...scanned.invalid] });
 }
 
 interface SessionManagerInitialization {
@@ -1214,16 +1314,11 @@ interface SessionManagerInitialization {
   sessionDir: string;
   sessionFile?: string;
   persist: boolean;
+  journal?: SessionStorageJournal;
   newSessionOptions?: NewSessionOptions;
   snapshotState?: SessionV4State;
   snapshotBytes?: number;
-  freshSession?: { header: SessionV4Header; path?: string };
-  openedSession?: {
-    file: string;
-    writer: SessionV4SyncWriter;
-    lease: SessionWriterLease;
-    logicalFileBytes: number;
-  };
+  freshSession?: { header: SessionV4Header };
 }
 
 interface SessionV4RecoverySnapshot {
@@ -1232,13 +1327,24 @@ interface SessionV4RecoverySnapshot {
   toolEffects: Array<SessionV4State["toolEffects"] extends Map<string, infer T> ? T : never>;
 }
 
-function primaryBranch(state: SessionV4State): SessionV4State["branches"] extends Map<string, infer T> ? T : never {
+interface SessionRecentActivity {
+  operations: Array<Pick<SessionV4OperationState, "id" | "status" | "acceptedAt" | "finishedAt"> & {
+    finishReason: FinishReason | null;
+    errorCategory: AdapterError["category"] | null;
+  }>;
+  toolEffects: Array<Pick<SessionV4ToolEffectState,
+    "id" | "operationId" | "toolName" | "status" | "preparedAt" |
+    "lastDispatchedAt" | "recoveryStartedAt" | "finishedAt"
+  >>;
+}
+
+function primaryBranch(state: SessionV4ReducerState): SessionV4State["branches"] extends Map<string, infer T> ? T : never {
   const branch = state.branches.get(state.primaryBranchId);
   if (branch === undefined) throw new Error(`Session branch ${state.primaryBranchId} is missing`);
   return branch;
 }
 
-function labelTimestamps(state: SessionV4State): Map<string, string> {
+function labelTimestamps(state: SessionV4ReducerState): Map<string, string> {
   const timestamps = new Map<string, string>();
   for (const commit of state.commits.values()) {
     for (const change of commit.changes) {
@@ -1250,8 +1356,12 @@ function labelTimestamps(state: SessionV4State): Map<string, string> {
   return timestamps;
 }
 
+function nodeMetadata(state: SessionV4ReducerState, id: string): SessionV4NodeMetadata | undefined {
+  return state.nodes.getMetadata === undefined ? state.nodes.get(id) : state.nodes.getMetadata(id);
+}
+
 function absoluteNodeDepth(
-  state: SessionV4State,
+  state: SessionV4ReducerState,
   id: string,
   known: Map<string, number>,
 ): number {
@@ -1259,7 +1369,7 @@ function absoluteNodeDepth(
   if (cached !== undefined) return cached;
   const path: string[] = [];
   const encountered = new Set<string>();
-  let cursor = state.nodes.get(id);
+  let cursor = nodeMetadata(state, id);
   let depth = 0;
   while (cursor !== undefined && !encountered.has(cursor.id)) {
     const parentDepth = known.get(cursor.id);
@@ -1273,7 +1383,7 @@ function absoluteNodeDepth(
       depth = -1;
       break;
     }
-    cursor = state.nodes.get(cursor.parentId);
+    cursor = nodeMetadata(state, cursor.parentId);
   }
   for (let index = path.length - 1; index >= 0; index -= 1) {
     depth += 1;
@@ -1285,44 +1395,49 @@ function absoluteNodeDepth(
 export class SessionManager {
   private sessionId = "";
   private sessionFile: string | undefined;
+  private createdFile = false;
   private readonly sessionDir: string;
   private readonly cwd: string;
   private readonly persist: boolean;
   private readonly snapshotOnly: boolean;
-  private writer: SessionV4SyncWriter | undefined;
-  private writerLease: SessionWriterLease | undefined;
+  private writer: SessionStorageJournal | undefined;
   private memoryState: SessionV4State | undefined;
   private logicalFileBytes = 0;
   private entryOrderCache: { ids: string[]; sequence: Map<string, number> } | undefined;
+  private historyOrderCache: { nodes: SessionV4ReducerState["nodes"]; tip: string | null; ids: string[] } | undefined;
   private readonly appendListeners = new Set<(entry: Readonly<SessionEntry>) => void>();
 
   private constructor(initialization: SessionManagerInitialization) {
     this.cwd = absolutePath(initialization.cwd);
     this.sessionDir = initialization.sessionDir === "" ? "" : absolutePath(initialization.sessionDir);
     this.persist = initialization.persist;
-    this.snapshotOnly = initialization.snapshotState !== undefined;
+    this.snapshotOnly = initialization.snapshotState !== undefined || initialization.journal?.readOnly === true;
+    if (initialization.journal !== undefined) {
+      const journal = initialization.journal;
+      if (journal.inspectState((state) => state.nodes.size) > MAX_SESSION_ENTRY_COUNT) {
+        journal.close();
+        throw new Error(`Session entry count exceeds the limit of ${MAX_SESSION_ENTRY_COUNT}`);
+      }
+      this.writer = journal;
+      this.sessionId = journal.inspectState((state) => state.header.sessionId);
+      this.sessionFile = journal.path;
+      this.logicalFileBytes = journal.bytes;
+      return;
+    }
     if (this.persist && !existsSync(this.sessionDir)) {
       mkdirSync(this.sessionDir, { recursive: true, mode: PRIVATE_SESSION_DIRECTORY_MODE });
     }
     if (initialization.snapshotState !== undefined) {
       this.sessionFile = initialization.sessionFile;
       this.sessionId = initialization.snapshotState.header.sessionId;
-      this.memoryState = cloneSessionV4State(initialization.snapshotState);
+      // These private replay maps are owned here; a new read-only state identity
+      // lets the reducer's write-only WeakMap indexes be collected without cloning history.
+      this.memoryState = { ...initialization.snapshotState };
       this.logicalFileBytes = initialization.snapshotBytes ?? 0;
       return;
     }
-    if (initialization.openedSession !== undefined) {
-      const opened = initialization.openedSession;
-      this.sessionFile = opened.file;
-      this.writer = opened.writer;
-      this.writerLease = opened.lease;
-      this.sessionId = opened.writer.inspectState((state) => state.header.sessionId);
-      this.logicalFileBytes = opened.logicalFileBytes;
-      activeSessionWriters.add(opened.file);
-      return;
-    }
     if (initialization.freshSession !== undefined) {
-      this.installFresh(initialization.freshSession.header, initialization.freshSession.path);
+      this.installFresh(initialization.freshSession.header);
       return;
     }
     if (initialization.sessionFile === undefined) this.newSession(initialization.newSessionOptions);
@@ -1330,163 +1445,80 @@ export class SessionManager {
   }
 
   /** Runs a synchronous trusted read without exposing the owned state publicly. */
-  private inspectState<T>(inspect: (state: SessionV4State) => T): T {
+  private inspectState<T>(inspect: (state: SessionV4ReducerState) => T): T {
     if (this.writer !== undefined) return this.writer.inspectState(inspect);
     if (this.memoryState !== undefined) return inspect(this.memoryState);
     throw new Error("Session store is not initialized");
   }
 
-  private releaseOwnedWriter(
-    writer: SessionV4SyncWriter | undefined,
-    lease: SessionWriterLease | undefined,
-  ): void {
-    if (writer !== undefined) activeSessionWriters.delete(writer.path);
-    try {
-      writer?.close();
-    } finally {
-      lease?.release();
-    }
-  }
-
   private releaseWriter(): void {
     const writer = this.writer;
-    const lease = this.writerLease;
     this.writer = undefined;
-    this.writerLease = undefined;
     this.entryOrderCache = undefined;
-    this.releaseOwnedWriter(writer, lease);
+    this.historyOrderCache = undefined;
+    writer?.close();
   }
 
   private adoptCandidate(candidate: SessionManager): void {
     const previousWriter = this.writer;
-    const previousLease = this.writerLease;
     this.sessionId = candidate.sessionId;
     this.sessionFile = candidate.sessionFile;
+    this.createdFile = candidate.createdFile;
     this.writer = candidate.writer;
-    this.writerLease = candidate.writerLease;
     this.memoryState = candidate.memoryState;
     this.logicalFileBytes = candidate.logicalFileBytes;
     this.entryOrderCache = candidate.entryOrderCache;
+    this.historyOrderCache = undefined;
     candidate.writer = undefined;
-    candidate.writerLease = undefined;
     candidate.memoryState = undefined;
     candidate.entryOrderCache = undefined;
-    this.releaseOwnedWriter(previousWriter, previousLease);
+    previousWriter?.close();
   }
 
-  private freshCandidate(header: SessionV4Header, path: string | undefined): SessionManager {
+  private freshCandidate(header: SessionV4Header): SessionManager {
     return new SessionManager({
       cwd: this.cwd,
       sessionDir: this.sessionDir,
       persist: this.persist,
-      freshSession: { header, ...optionalProperties(path === undefined ? undefined : { path }) },
+      freshSession: { header },
     });
   }
 
-  private installFresh(header: SessionV4Header, path: string | undefined): void {
+  private installFresh(header: SessionV4Header): void {
     if (this.snapshotOnly) throw new Error("A session snapshot is read-only");
-    if (this.persist) {
-      if (path === undefined) throw new Error("Persistent sessions require a file path");
-      const file = absolutePath(path);
-      if (activeSessionWriters.has(file)) {
-        throw new Error(`Session file already has an active writer: ${file}`);
-      }
-      const lease = acquireSessionWriterLeaseSync(file);
-      let writer: SessionV4SyncWriter;
-      try {
-        writer = SessionV4SyncWriter.create(file, header);
-        try {
-          lease.bindToFile();
-        } catch (error) {
-          writer.close();
-          throw error;
-        }
-      } catch (error) {
-        lease.release();
-        throw error;
-      }
-      const previousWriter = this.writer;
-      const previousLease = this.writerLease;
-      this.sessionId = header.sessionId;
-      this.sessionFile = file;
-      this.writer = writer;
-      this.writerLease = lease;
-      this.memoryState = undefined;
-      this.logicalFileBytes = Buffer.byteLength(`${JSON.stringify(header)}\n`, "utf8");
-      this.entryOrderCache = undefined;
-      activeSessionWriters.add(file);
-      this.releaseOwnedWriter(previousWriter, previousLease);
-      return;
-    }
-    const state = createSessionV4State(header);
     const previousWriter = this.writer;
-    const previousLease = this.writerLease;
+    if (this.persist) {
+      const journal = new SessionStorageJournal(new SqliteSessionStorageBackend(this.sessionDir).create(header));
+      this.writer = journal;
+      this.memoryState = undefined;
+      this.sessionFile = journal.path;
+      this.createdFile = true;
+      this.logicalFileBytes = journal.bytes;
+    } else {
+      this.writer = undefined;
+      this.memoryState = createSessionV4State(header);
+      this.sessionFile = undefined;
+      this.logicalFileBytes = Buffer.byteLength(JSON.stringify(header) + "\n", "utf8");
+    }
     this.sessionId = header.sessionId;
-    this.sessionFile = undefined;
-    this.writer = undefined;
-    this.writerLease = undefined;
-    this.memoryState = state;
-    this.logicalFileBytes = Buffer.byteLength(`${JSON.stringify(header)}\n`, "utf8");
     this.entryOrderCache = undefined;
-    this.releaseOwnedWriter(previousWriter, previousLease);
+    this.historyOrderCache = undefined;
+    previousWriter?.close();
   }
 
   private setFile(path: string, validateCandidate?: (candidate: SessionManager) => void): void {
     const file = absolutePath(path);
-    if (this.writer?.path === file) {
-      validateCandidate?.(this);
-      return;
+    if (this.writer?.path === file) { validateCandidate?.(this); return; }
+    const snapshot = this.persist ? undefined : SessionManager.open(file, undefined, undefined, { readOnly: true });
+    const candidate = snapshot === undefined ? SessionManager.open(file, this.sessionDir) : snapshot.cloneInMemory();
+    snapshot?.closeV4Store();
+    const cleanup = candidate.captureCreatedSessionCleanup();
+    try { validateCandidate?.(candidate); this.adoptCandidate(candidate); }
+    catch (error) {
+      try { candidate.closeV4Store(); cleanup(); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], "Session replacement validation and cleanup failed"); }
+      throw error;
     }
-    if (!existsSync(file)) {
-      if (validateCandidate !== undefined) throw new Error(`Session file does not exist: ${file}`);
-      const id = newSessionId();
-      const timestamp = new Date().toISOString();
-      this.installFresh(createHeader(id, timestamp, this.cwd, undefined), file);
-      return;
-    }
-    const opened = openPersistentSession(file);
-    if (validateCandidate !== undefined) {
-      let candidate: SessionManager;
-      try {
-        candidate = new SessionManager({
-          cwd: opened.writer.inspectState((state) => state.header.cwd),
-          sessionDir: this.sessionDir,
-          persist: this.persist,
-          openedSession: { file, ...opened },
-        });
-      } catch (error) {
-        try {
-          opened.writer.close();
-        } finally {
-          opened.lease.release();
-        }
-        throw error;
-      }
-      try {
-        validateCandidate(candidate);
-        this.adoptCandidate(candidate);
-      } catch (error) {
-        try {
-          candidate.closeV4Store();
-        } catch (cleanupError) {
-          throw new AggregateError([error, cleanupError], "Session replacement validation and cleanup failed");
-        }
-        throw error;
-      }
-      return;
-    }
-    const sessionId = opened.writer.inspectState((state) => state.header.sessionId);
-    const previousWriter = this.writer;
-    const previousLease = this.writerLease;
-    this.sessionFile = file;
-    this.writer = opened.writer;
-    this.writerLease = opened.lease;
-    activeSessionWriters.add(file);
-    this.memoryState = undefined;
-    this.sessionId = sessionId;
-    this.logicalFileBytes = opened.logicalFileBytes;
-    this.entryOrderCache = undefined;
-    this.releaseOwnedWriter(previousWriter, previousLease);
   }
 
   setSessionFile(path: string, validateCandidate?: (candidate: SessionManager) => void): void {
@@ -1505,10 +1537,7 @@ export class SessionManager {
       this.cwd,
       parentFromReference(options?.parentSession, id),
     );
-    const path = this.persist
-      ? join(this.sessionDir, `${timestamp.replace(/[:.]/gu, "-")}_${id}.jsonl`)
-      : undefined;
-    this.installFresh(header, path);
+    this.installFresh(header);
     return this.sessionFile;
   }
 
@@ -1599,6 +1628,128 @@ export class SessionManager {
     return this.inspectState(cloneSessionV4State);
   }
 
+  /** @internal Detached journal records for runtime reads without cloning unrelated history. */
+  getV4Branch(): SessionV4BranchRuntimeState {
+    return this.inspectState((state) => structuredClone(primaryBranch(state)));
+  }
+
+  /** @internal */
+  getV4Operation(id: string): SessionV4OperationState | undefined {
+    return this.inspectState((state) => structuredClone(state.operations.get(id)));
+  }
+
+  /** @internal */
+  getV4Node(id: string): SessionV4ConversationNode | undefined {
+    return this.inspectState((state) => structuredClone(state.nodes.get(id)));
+  }
+
+  /** @internal */
+  hasV4Node(id: string): boolean {
+    return this.inspectState((state) => state.nodes.has(id));
+  }
+
+  /** @internal */
+  getV4OperationNodes(operationId: string): SessionV4ConversationNode[] {
+    return this.inspectState((state) => {
+      const selected: SessionV4ConversationNode[] = [];
+      for (const [id, node] of state.nodes.metadataEntries?.() ?? state.nodes) {
+        if (node.operationId === operationId) selected.push(structuredClone(state.nodes.get(id)!));
+      }
+      return selected;
+    });
+  }
+
+  /** @internal */
+  getV4QueueEntry(id: string): SessionV4QueueEntryState | undefined {
+    return this.inspectState((state) => structuredClone(state.queue.get(id)));
+  }
+
+  /** @internal */
+  getV4QueueEntryForNode(nodeId: string): SessionV4QueueEntryState | undefined {
+    return this.inspectState((state) => {
+      for (const [id, entry] of state.queue.metadataEntries?.() ?? state.queue) {
+        if (entry.targetNodeId === nodeId) return structuredClone(state.queue.get(id));
+      }
+      return undefined;
+    });
+  }
+
+  /** @internal Pending queue entries in acceptance order. */
+  getV4PendingQueue(): SessionV4QueueEntryState[] {
+    return this.inspectState((state) => {
+      const selected: SessionV4QueueEntryState[] = [];
+      for (const [id, entry] of state.queue.metadataEntries?.() ?? state.queue) {
+        if (entry.status === "queued" || entry.status === "claimed") selected.push(structuredClone(state.queue.get(id)!));
+      }
+      return selected;
+    });
+  }
+
+  /** @internal */
+  getV4ToolEffect(id: string): SessionV4ToolEffectState | undefined {
+    return this.inspectState((state) => structuredClone(state.toolEffects.get(id)));
+  }
+
+  /** @internal */
+  getV4ToolEffects(operationId: string): SessionV4ToolEffectState[] {
+    return this.inspectState((state) => {
+      const selected: SessionV4ToolEffectState[] = [];
+      for (const [id, effect] of state.toolEffects.metadataEntries?.() ?? state.toolEffects) {
+        if (effect.operationId === operationId) selected.push(structuredClone(state.toolEffects.get(id)!));
+      }
+      return selected;
+    });
+  }
+
+  /** @internal Recent metadata in reverse acceptance/preparation order; each list is capped independently. */
+  getRecentActivity(limit = 20): SessionRecentActivity {
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100) {
+      throw new RangeError("Recent activity limit must be an integer between 0 and 100");
+    }
+    const activity: SessionRecentActivity = { operations: [], toolEffects: [] };
+    if (limit === 0) return activity;
+    return this.inspectState((state) => {
+      for (const [, operation] of state.operations.metadataEntries?.() ?? state.operations) {
+        activity.operations.push({
+          id: operation.id,
+          status: operation.status,
+          acceptedAt: operation.acceptedAt,
+          finishedAt: operation.finishedAt,
+          finishReason: null,
+          errorCategory: null,
+        });
+        if (activity.operations.length > limit) activity.operations.shift();
+      }
+      for (const [, effect] of state.toolEffects.metadataEntries?.() ?? state.toolEffects) {
+        activity.toolEffects.push({
+          id: effect.id,
+          operationId: effect.operationId,
+          toolName: effect.toolName,
+          status: effect.status,
+          preparedAt: effect.preparedAt,
+          lastDispatchedAt: effect.lastDispatchedAt,
+          recoveryStartedAt: effect.recoveryStartedAt,
+          finishedAt: effect.finishedAt,
+        });
+        if (activity.toolEffects.length > limit) activity.toolEffects.shift();
+      }
+      activity.operations.reverse();
+      for (const operation of activity.operations) {
+        const detail = state.operations.get(operation.id)?.detail;
+        if (!isJsonObject(detail)) continue;
+        if (operation.status === "completed") {
+          operation.finishReason = ACTIVITY_FINISH_REASONS.find((reason) => reason === detail.finishReason) ?? null;
+        }
+        const error = detail.error;
+        if (operation.status === "failed" && isJsonObject(error)) {
+          operation.errorCategory = ACTIVITY_ERROR_CATEGORIES.find((category) => category === error.category) ?? null;
+        }
+      }
+      activity.toolEffects.reverse();
+      return activity;
+    });
+  }
+
   /** @internal Returns only work that may require recovery after reopening. */
   getV4RecoverySnapshot(): SessionV4RecoverySnapshot {
     return this.inspectState((state) => {
@@ -1606,14 +1757,20 @@ export class SessionManager {
       const openOperation = branch.openOperationId === null
         ? null
         : structuredClone(state.operations.get(branch.openOperationId) ?? null);
+      const queue: SessionV4QueueEntryState[] = [];
+      for (const [id, entry] of state.queue.metadataEntries?.() ?? state.queue) {
+        if (entry.status === "queued" || entry.status === "claimed") queue.push(structuredClone(state.queue.get(id)!));
+      }
+      const toolEffects: SessionV4ToolEffectState[] = [];
+      for (const [id, effect] of state.toolEffects.metadataEntries?.() ?? state.toolEffects) {
+        if (openOperation !== null && effect.operationId === openOperation.id) {
+          toolEffects.push(structuredClone(state.toolEffects.get(id)!));
+        }
+      }
       return {
         openOperation,
-        queue: [...state.queue.values()]
-          .filter((entry) => entry.status === "queued" || entry.status === "claimed")
-          .map((entry) => structuredClone(entry)),
-        toolEffects: [...state.toolEffects.values()]
-          .filter((effect) => openOperation !== null && effect.operationId === openOperation.id)
-          .map((effect) => structuredClone(effect)),
+        queue,
+        toolEffects,
       };
     });
   }
@@ -1660,6 +1817,19 @@ export class SessionManager {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** @internal Capture cleanup for a newly created candidate, never an arbitrary file. */
+  captureCreatedSessionCleanup(): () => void {
+    const file = this.createdFile ? this.sessionFile : undefined;
+    const created = file === undefined ? undefined : lstatSync(file, { bigint: true });
+    return () => {
+      try {
+        if (file !== undefined && created !== undefined) {
+          new SqliteSessionStorageBackend(dirname(file)).remove(file, created);
+        }
+      } catch (error) { if (errorCode(error) !== "ENOENT") throw error; }
+    };
   }
 
   getCwd(): string {
@@ -1792,10 +1962,13 @@ export class SessionManager {
   }
 
   getChildren(parentId: string): SessionEntry[] {
-    return this.inspectState((state) =>
-      [...state.nodes.values()]
-        .filter((node) => node.parentId === parentId)
-        .map((node) => structuredClone(projectedEntry(node))));
+    return this.inspectState((state) => {
+      const selected: SessionEntry[] = [];
+      for (const [id, node] of state.nodes.metadataEntries?.() ?? state.nodes) {
+        if (node.parentId === parentId) selected.push(structuredClone(projectedEntry(state.nodes.get(id)!)));
+      }
+      return selected;
+    });
   }
 
   getLabel(id: string): string | undefined {
@@ -1909,13 +2082,54 @@ export class SessionManager {
   }
 
   buildContextEntries(): SessionEntry[] {
-    const entries = this.entries();
-    return structuredClone(buildContextEntries(entries, this.getLeafId(), new Map(entries.map((entry) => [entry.id, entry]))));
+    return buildContextEntries(this.getBranch());
   }
 
   buildSessionContext(): SessionContext {
-    const entries = this.entries();
-    return structuredClone(buildSessionContext(entries, this.getLeafId(), new Map(entries.map((entry) => [entry.id, entry]))));
+    return buildSessionContext(this.getBranch());
+  }
+
+  /** Reads active-lineage model/thinking metadata without projecting message payloads.
+   * hasPersistedThinking includes every branch, matching restoration defaults.
+   */
+  getPersistedSelection(): Pick<SessionContext, "model" | "thinkingLevel"> & { hasPersistedThinking: boolean } {
+    const history = this.writer?.getHistoryIndex(false);
+    return this.inspectState((state) => {
+      const head = primaryBranch(state).headNodeId;
+      if (history !== undefined) {
+        const selected = head === null ? undefined : history.getNode(head);
+        const model = selected?.nearestModelId == null ? undefined : state.nodes.get(selected.nearestModelId);
+        const thinking = selected?.nearestThinkingId == null ? undefined : state.nodes.get(selected.nearestThinkingId);
+        return {
+          model: model?.nodeType === "model_change" ? { provider: model.provider, modelId: model.model } : null,
+          thinkingLevel: thinking?.nodeType === "thinking_change" ? thinking.level : "off",
+          hasPersistedThinking: history.hasThinkingChange(),
+        };
+      }
+      let model: SessionContext["model"] = null;
+      let thinkingLevel: string | undefined;
+      for (let node = head === null ? undefined : nodeMetadata(state, head); node !== undefined;
+        node = node.parentId === null ? undefined : nodeMetadata(state, node.parentId)) {
+        if (model === null && node.nodeType === "model_change") {
+          const selected = state.nodes.get(node.id);
+          if (selected?.nodeType === "model_change") model = { provider: selected.provider, modelId: selected.model };
+        }
+        if (thinkingLevel === undefined && node.nodeType === "thinking_change") {
+          const selected = state.nodes.get(node.id);
+          if (selected?.nodeType === "thinking_change") thinkingLevel = selected.level;
+        }
+        if (model !== null && thinkingLevel !== undefined) break;
+      }
+      let hasPersistedThinking = thinkingLevel !== undefined;
+      if (!hasPersistedThinking) {
+        for (const [, node] of state.nodes.metadataEntries?.() ?? state.nodes) {
+          if (node.nodeType !== "thinking_change") continue;
+          hasPersistedThinking = true;
+          break;
+        }
+      }
+      return { model, thinkingLevel: thinkingLevel ?? "off", hasPersistedThinking };
+    });
   }
 
   getHeader(): SessionHeader {
@@ -1930,7 +2144,7 @@ export class SessionManager {
     return this.inspectState((state) => state.nodes.size);
   }
 
-  private entryOrder(state: SessionV4State): { ids: string[]; sequence: Map<string, number> } {
+  private entryOrder(state: SessionV4ReducerState): { ids: string[]; sequence: Map<string, number> } {
     if (this.entryOrderCache?.ids.length === state.nodes.size) return this.entryOrderCache;
     const ids = [...state.nodes.keys()];
     const sequence = new Map(ids.map((id, index) => [id, index]));
@@ -1939,23 +2153,155 @@ export class SessionManager {
   }
 
   getEntrySequence(id: string): number | undefined {
+    const history = this.writer?.getHistoryIndex();
+    if (history !== undefined) return history.getNode(id)?.ordinal;
     return this.inspectState((state) => this.entryOrder(state).sequence.get(id));
+  }
+
+  private entryIdsPage(state: SessionV4ReducerState, offset: number, limit: number): string[] {
+    const history = this.writer?.getHistoryIndex();
+    if (history === undefined) return this.entryOrder(state).ids.slice(offset, offset + limit);
+    const range = entryPageRange(offset, limit, state.nodes.size);
+    return history.getNodesPage(range.offset, range.limit).map((node) => node.id);
   }
 
   getEntriesPage(offset: number, limit: number): SessionEntry[] {
     if (offset < 0 || limit < 1) return [];
     return this.inspectState((state) => structuredClone(
-      this.entryOrder(state).ids
-        .slice(offset, offset + limit)
+      this.entryIdsPage(state, offset, limit)
         .map((id) => projectedEntry(state.nodes.get(id)!)),
     ));
+  }
+
+  private historyIds(from: string | null, tailLimit?: number): string[] {
+    return this.inspectState((state) => {
+      const cache = this.historyOrderCache;
+      if (cache?.nodes === state.nodes && cache.tip === from) {
+        return tailLimit === undefined ? cache.ids : cache.ids.slice(-tailLimit);
+      }
+      if (from !== null && !state.nodes.has(from)) throw new Error(`Entry ${from} not found`);
+      const ids: string[] = [];
+      for (let id = from; id !== null && (tailLimit === undefined || ids.length < tailLimit);) {
+        ids.push(id);
+        id = nodeMetadata(state, id)!.parentId;
+      }
+      ids.reverse();
+      if (tailLimit === undefined) this.historyOrderCache = { nodes: state.nodes, tip: from, ids };
+      return ids;
+    });
+  }
+
+  /** Pages durable lineage entries without cloning the complete transcript.
+   * One entry larger than maxBytes is returned alone so a cursor can always advance.
+   */
+  getHistoryPage(options: SessionHistoryPageOptions = {}): SessionHistoryPage {
+    if (options.before !== undefined && options.after !== undefined) {
+      throw new TypeError("History before and after cursors are mutually exclusive");
+    }
+    if (options.edge !== undefined && (options.edge !== "oldest" || options.before !== undefined || options.after !== undefined)) {
+      throw new TypeError("History oldest edge cannot be combined with a cursor");
+    }
+    const limit = historyLimit(options.limit, 100, 500);
+    const maxBytes = historyLimit(options.maxBytes, 256 * 1024, 2 * 1024 * 1024);
+    const newest = options.before === undefined && options.after === undefined && options.edge === undefined;
+    const cursor = options.before ?? options.after;
+    const forward = options.after !== undefined || options.edge === "oldest";
+    const from = options.from ?? this.getLeafId();
+    const indexed = this.writer?.getHistoryIndex(!newest)?.getHistoryPage(from, {
+      direction: options.after !== undefined ? "after" : options.before !== undefined ? "before" : newest ? "newest" : "oldest",
+      limit,
+      ...optionalProperties(cursor === undefined ? undefined : { cursor }),
+    });
+    // Memory/detached snapshots keep their existing owned-map path. One extra
+    // newest ancestor supplies the boundary without retaining a full lineage.
+    const ids = indexed?.ids ?? this.historyIds(from, newest ? limit + 1 : undefined);
+    const cursorIndex = indexed !== undefined || cursor === undefined ? -1 : ids.indexOf(cursor);
+    if (indexed === undefined && cursor !== undefined && cursorIndex === -1) throw new Error(`History cursor ${cursor} is not on the selected lineage`);
+    const start = indexed === undefined
+      ? forward ? cursorIndex + 1 : options.before === undefined ? ids.length - 1 : cursorIndex - 1
+      : forward ? 0 : ids.length - 1;
+    const selected: SessionEntry[] = [];
+    let bytes = 0;
+    let index = start;
+    for (; index >= 0 && index < ids.length && selected.length < limit; index += forward ? 1 : -1) {
+      const entry = this.inspectState((state) => projectedEntry(state.nodes.get(ids[index]!)!));
+      const size = Buffer.byteLength(JSON.stringify(entry), "utf8");
+      if (selected.length > 0 && bytes + size > maxBytes) break;
+      selected.push(structuredClone(entry));
+      bytes += size;
+      if (bytes >= maxBytes) { index += forward ? 1 : -1; break; }
+    }
+    if (!forward) selected.reverse();
+    const first = (indexed?.offset ?? 0) + (selected.length === 0 ? (forward ? start : start + 1) : forward ? start : index + 1);
+    const last = selected.length === 0 ? first - 1 : first + selected.length - 1;
+    return { entries: selected, hasMoreBefore: first > 0, hasMoreAfter: last < (indexed?.total ?? ids.length) - 1 };
+  }
+
+  /** Searches visible stored text, not opaque provider data or hidden extension metadata. */
+  async searchHistory(query: string, options: SessionHistorySearchOptions = {}): Promise<SessionHistorySearchResult> {
+    options.signal?.throwIfAborted();
+    if (query.trim() === "" || query.length > 4096) throw new TypeError("History query must contain 1–4096 characters");
+    const limit = historyLimit(options.limit, 50, 200);
+    if (options.before !== undefined && options.after !== undefined) throw new TypeError("History search cursors are mutually exclusive");
+    const needle = query.toLocaleLowerCase();
+    const sessionId = this.sessionId;
+    const owner = this.writer;
+    const memory = this.memoryState;
+    const history = owner?.getHistoryIndex();
+    const from = options.from;
+    const ids = history === undefined
+      ? from === undefined ? this.inspectState((state) => [...this.entryOrder(state).ids]) : this.historyIds(from)
+      : undefined;
+    const head = from === undefined ? undefined : history?.getNode(from);
+    if (history !== undefined && from !== undefined && head === undefined) throw new Error(`Entry ${from} not found`);
+    // Fix the initial range; appends during cooperative yields are not part of
+    // this scan. Completed metadata batches never hold a SQL cursor across await.
+    const total = ids?.length ?? (head === undefined ? this.getEntryCount() : head.depth + 1);
+    const forward = options.after !== undefined;
+    const selectedCursor = options.before ?? options.after;
+    const cursorNode = selectedCursor === undefined ? undefined : history?.getNode(selectedCursor);
+    const boundary = selectedCursor === undefined ? total : ids !== undefined ? ids.indexOf(selectedCursor)
+      : from === undefined ? cursorNode?.ordinal ?? -1 : cursorNode?.depth ?? -1;
+    if (boundary < 0) throw new Error(`History cursor ${selectedCursor} is not in the selected history`);
+    if (history !== undefined && from !== undefined && selectedCursor !== undefined
+      && history.getHistoryRange(from, boundary, 1).ids[0] !== selectedCursor) {
+      throw new Error(`History cursor ${selectedCursor} is not in the selected history`);
+    }
+    const matches: SessionHistorySearchResult["matches"] = [];
+    let batchStart = -1;
+    let batch: string[] = [];
+    let index = boundary + (forward ? 1 : -1);
+    for (; index >= 0 && index < total; index += forward ? 1 : -1) {
+      options.signal?.throwIfAborted();
+      if (Math.abs(boundary - index) % 128 === 0) await new Promise<void>((resolveValue) => setImmediate(resolveValue));
+      options.signal?.throwIfAborted();
+      if (this.sessionId !== sessionId || this.writer !== owner || this.memoryState !== memory) {
+        throw new Error("Session changed while searching history");
+      }
+      if (ids === undefined && (index < batchStart || index >= batchStart + batch.length)) {
+        batchStart = forward ? index : Math.max(0, index - 127);
+        const count = Math.min(128, total - batchStart);
+        const current = owner!.getHistoryIndex()!;
+        batch = from === undefined ? current.getNodesPage(batchStart, count).map((node) => node.id)
+          : current.getHistoryRange(from, batchStart, count).ids;
+      }
+      const id = ids === undefined ? batch[index - batchStart]! : ids[index]!;
+      const text = this.inspectState((state) => historyText(projectedEntry(state.nodes.get(id)!)));
+      const at = text.toLocaleLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      const begin = Math.max(0, at - 80);
+      matches.push({ id, preview: text.slice(begin, begin + 320) });
+      if (matches.length === limit) { index += forward ? 1 : -1; break; }
+    }
+    const cursor = matches.at(-1)?.id;
+    if (forward) matches.reverse();
+    return { matches, hasMore: index >= 0 && index < total, ...optionalProperties(cursor === undefined ? undefined : { cursor }) };
   }
 
   /** @internal Returns page-index metadata without materializing stored entry payloads. */
   getEntryProjectionMetadataPage(offset: number, limit: number): SessionEntryProjectionMetadata[] {
     if (offset < 0 || limit < 1) return [];
-    return this.inspectState((state) => this.entryOrder(state).ids
-      .slice(offset, offset + limit)
+    return this.inspectState((state) => this.entryIdsPage(state, offset, limit)
       .map((id) => {
         const node = state.nodes.get(id)!;
         return {
@@ -1969,6 +2315,17 @@ export class SessionManager {
   getTreeEntryPage(offset: number, limit: number): SessionTreeNode[] {
     if (offset < 0 || limit < 1) return [];
     return this.inspectState((state) => {
+      const history = this.writer?.getHistoryIndex();
+      if (history !== undefined) {
+        const range = entryPageRange(offset, limit, state.nodes.size);
+        return history.getNodesPage(range.offset, range.limit).map((node) => ({
+          entry: structuredClone(projectedEntry(state.nodes.get(node.id)!)),
+          children: [],
+          depth: node.depth,
+          ...optionalProperties(node.label === null ? undefined : { label: node.label }),
+          ...optionalProperties(node.labelTimestamp === null ? undefined : { labelTimestamp: node.labelTimestamp }),
+        }));
+      }
       const timestamps = labelTimestamps(state);
       const depths = new Map<string, number>();
       return structuredClone(this.entryOrder(state).ids
@@ -2008,6 +2365,14 @@ export class SessionManager {
   getActiveBranchEntryIdsInPage(offset: number, limit: number): string[] {
     if (offset < 0 || limit < 1) return [];
     return this.inspectState((state) => {
+      const history = this.writer?.getHistoryIndex();
+      if (history !== undefined) {
+        const range = entryPageRange(offset, limit, state.nodes.size);
+        // Membership historically stops below the raw offset, even when slice
+        // includes its truncated ordinal in a fractional page.
+        const first = Math.max(range.offset, Math.ceil(offset) || 0);
+        return history.getActiveIds(first, Math.max(0, range.offset + range.limit - first), primaryBranch(state).headNodeId);
+      }
       const order = this.entryOrder(state);
       const pageIds = order.ids.slice(offset, offset + limit);
       const page = new Set(pageIds);
@@ -2052,7 +2417,7 @@ export class SessionManager {
           ...optionalProperties(labelTimestamp === undefined ? undefined : { labelTimestamp }),
         });
       }
-      for (const raw of state.nodes.values()) {
+      for (const [, raw] of state.nodes.metadataEntries?.() ?? state.nodes) {
         const node = nodes.get(raw.id);
         if (node === undefined) throw new Error(`Session tree node ${raw.id} is missing`);
         const parent = raw.parentId === null ? undefined : nodes.get(raw.parentId);
@@ -2135,13 +2500,10 @@ export class SessionManager {
     }));
     const timestamp = new Date().toISOString();
     const id = newSessionId();
-    const target = this.persist
-      ? join(this.sessionDir, `${timestamp.replace(/[:.]/gu, "-")}_${id}.jsonl`)
-      : undefined;
     const candidate = this.freshCandidate(
       createHeader(id, timestamp, this.cwd, { sessionId: source.sessionId, purpose: "branch" }),
-      target,
     );
+    const cleanup = candidate.captureCreatedSessionCleanup();
     try {
       let parentId: string | null = null;
       for (const sourceEntry of branch) {
@@ -2160,16 +2522,10 @@ export class SessionManager {
       this.adoptCandidate(candidate);
       return this.sessionFile;
     } catch (error) {
-      candidate.closeV4Store();
-      if (target !== undefined) {
-        try {
-          unlinkSync(target);
-        } catch (cleanupError) {
-          if (errorCode(cleanupError) !== "ENOENT") {
-            throw new AggregateError([error, cleanupError], "Branched session creation failed and cleanup was incomplete");
-          }
-        }
-      }
+      const failures = [error];
+      try { candidate.closeV4Store(); } catch (closeError) { failures.push(closeError); }
+      try { cleanup(); } catch (cleanupError) { failures.push(cleanupError); }
+      if (failures.length > 1) throw new AggregateError(failures, "Branched session creation and cleanup failed");
       throw error;
     }
   }
@@ -2178,38 +2534,115 @@ export class SessionManager {
     const directory = sessionDir === undefined ? getDefaultSessionDir(cwd) : absolutePath(sessionDir);
     if (sessionDir !== undefined) preparePrivateSessionDirectory(directory);
     return new SessionManager({
-      cwd,
-      sessionDir: directory,
-      persist: true,
+      cwd, sessionDir: directory, persist: true,
       ...optionalProperties(options === undefined ? undefined : { newSessionOptions: options }),
     });
   }
 
-  static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
+  static open(path: string, sessionDir?: string, cwdOverride?: string, options?: { readOnly?: boolean }): SessionManager {
+    if (options?.readOnly === true) return SessionManager.openSnapshotManager(path, cwdOverride);
     const file = absolutePath(path);
-    if (sessionDir !== undefined) preparePrivateSessionDirectory(absolutePath(sessionDir));
-    if (!existsSync(file)) {
-      const cwd = cwdOverride ?? process.cwd();
-      const directory = sessionDir === undefined ? dirname(file) : absolutePath(sessionDir);
-      return new SessionManager({ cwd, sessionDir: directory, sessionFile: file, persist: true });
-    }
-    const opened = openPersistentSession(file);
+    if (!existsSync(file)) throw new Error("Session file does not exist: " + file);
+    const directory = sessionDir === undefined ? dirname(file) : absolutePath(sessionDir);
+    if (!isSqliteSessionFile(file)) return SessionManager.resumeJsonl(file, directory, cwdOverride);
+    const journal = new SessionStorageJournal(new SqliteSessionStorageBackend(dirname(file)).open(file));
     try {
-      const cwd = cwdOverride ?? opened.writer.inspectState((state) => state.header.cwd);
-      const directory = sessionDir === undefined ? dirname(file) : absolutePath(sessionDir);
       return new SessionManager({
-        cwd,
-        sessionDir: directory,
-        sessionFile: file,
-        persist: true,
-        openedSession: { file, ...opened },
+        cwd: cwdOverride ?? journal.inspectState((state) => state.header.cwd),
+        sessionDir: directory, persist: true, journal,
       });
-    } catch (error) {
-      try {
-        opened.writer.close();
-      } finally {
-        opened.lease.release();
+    } catch (error) { journal.close(); throw error; }
+  }
+
+  /** Each step stages at most 128 validated records. Callers drain it or inject cancellation with throw(). */
+  private static *importCandidate(source: SessionV4State, directory: string, cwdOverride?: string): Generator<void, SessionManager> {
+    const backend = directory === "" ? undefined : new SqliteSessionStorageBackend(directory);
+    const storage = backend?.create(source.header, join(directory, `.ohm-import-${randomUUID()}.tmp`));
+    let identity: { dev: bigint; ino: bigint } | undefined;
+    try {
+      if (storage !== undefined) identity = statSync(storage.path, { bigint: true });
+      const memory = storage === undefined
+        ? new SessionManager({ cwd: cwdOverride ?? source.header.cwd, sessionDir: "",
+          persist: false, freshSession: { header: structuredClone(source.header) } })
+        : undefined;
+      const batch: SessionV4Commit[] = [];
+      const append = (): void => {
+        if (storage !== undefined) storage.appendBatch(batch);
+        else for (const commit of batch) memory!.commitChanges(commit.changes, commit.commitId, commit.committedAt);
+        batch.length = 0;
+      };
+      for (const commit of source.commits.values()) {
+        batch.push(commit);
+        if (batch.length === 128) { append(); yield; }
       }
+      if (batch.length > 0) append();
+      const manager = memory ?? new SessionManager({ cwd: cwdOverride ?? source.header.cwd, sessionDir: directory,
+        persist: true, journal: new SessionStorageJournal(storage!) });
+      manager.createdFile = storage !== undefined;
+      return manager;
+    } catch (error) {
+      const failures = [error];
+      try { storage?.close(); } catch (cleanup) { failures.push(cleanup); }
+      try { if (storage !== undefined && identity !== undefined) backend!.remove(storage.path, identity); }
+      catch (cleanup) { failures.push(cleanup); }
+      if (failures.length > 1) throw new AggregateError(failures, "Session import and cleanup failed");
+      throw error;
+    }
+  }
+
+  private static publishImport(manager: SessionManager): SessionManager {
+    if (!manager.persist) return manager;
+    const file = manager.getSessionFile();
+    if (file === undefined) throw new Error("Session import has no staged database");
+    const identity = lstatSync(file, { bigint: true });
+    manager.closeV4Store();
+    const store = new SqliteSessionStorageBackend(manager.sessionDir);
+    const storage = store.publish(file, manager.sessionId);
+    try {
+      const journal = new SessionStorageJournal(storage);
+      const opened = new SessionManager({ cwd: manager.cwd, sessionDir: manager.sessionDir, persist: true, journal });
+      opened.createdFile = true;
+      return opened;
+    } catch (error) {
+      const failures = [error];
+      try { storage.close(); } catch (cleanup) { failures.push(cleanup); }
+      try { store.remove(storage.path, identity); }
+      catch (cleanup) { if (errorCode(cleanup) !== "ENOENT") failures.push(cleanup); }
+      if (failures.length > 1) throw new AggregateError(failures, "Published session import and cleanup failed");
+      throw error;
+    }
+  }
+
+  private static resumeJsonl(file: string, directory: string, cwdOverride?: string): SessionManager {
+    const lease = acquireSessionWriterLeaseSync(file);
+    try {
+      lease.bindToFile();
+      return SessionManager.copyLegacySession(file, directory, cwdOverride);
+    } finally { lease.release(); }
+  }
+
+  private static copyLegacySession(file: string, directory: string, cwdOverride?: string): SessionManager {
+    const source = stateFromFile(file).state;
+    const target = new SqliteSessionStorageBackend(directory).pathFor(source.header.sessionId);
+    if (existsSync(target)) {
+      const current = stateFromFile(target).state;
+      if (!includesJournal(source, current)) {
+        throw new LegacySessionConflictError(`Legacy session conflicts with an existing SQLite session: ${file}`);
+      }
+      return SessionManager.open(target, directory, cwdOverride);
+    }
+    const importing = SessionManager.importCandidate(source, directory, cwdOverride);
+    let step = importing.next();
+    while (!step.done) step = importing.next();
+    const manager = step.value;
+    const cleanup = manager.captureCreatedSessionCleanup();
+    try {
+      return SessionManager.publishImport(manager);
+    } catch (error) {
+      const failures = [error];
+      try { manager.closeV4Store(); } catch (closeError) { failures.push(closeError); }
+      try { cleanup(); } catch (cleanupError) { failures.push(cleanupError); }
+      if (failures.length > 1) throw new AggregateError(failures, "Legacy session copy and cleanup failed");
       throw error;
     }
   }
@@ -2219,6 +2652,10 @@ export class SessionManager {
    * The returned reader does not observe commits made after it opens.
    */
   static openSnapshot(path: string, cwdOverride?: string): ReadonlySessionManager {
+    return SessionManager.openSnapshotManager(path, cwdOverride);
+  }
+
+  private static openSnapshotManager(path: string, cwdOverride?: string): SessionManager {
     const file = absolutePath(path);
     const loaded = stateFromFile(file);
     return new SessionManager({
@@ -2248,13 +2685,50 @@ export class SessionManager {
     });
   }
 
+  /** @internal Import a validated JSONL snapshot into the selected session directory without
+   * changing its header, commit identities, recovery records or opaque provider state.
+   */
+  static async importJsonl(
+    path: string,
+    directory: string,
+    options: { cwdOverride?: string; signal?: AbortSignal } = {},
+  ): Promise<SessionManager> {
+    options.signal?.throwIfAborted();
+    const source = readSessionV4FileSync(absolutePath(path)).state;
+    if (source.nodes.size > MAX_SESSION_ENTRY_COUNT) throw new Error(`Session entry count exceeds the limit of ${MAX_SESSION_ENTRY_COUNT}`);
+    const importing = SessionManager.importCandidate(source, directory === "" ? "" : absolutePath(directory), options.cwdOverride);
+    let step = importing.next();
+    while (!step.done) {
+      try {
+        await new Promise<void>((resolveValue) => setImmediate(resolveValue));
+        options.signal?.throwIfAborted();
+      }
+      catch (error) { importing.throw(error); throw error; }
+      step = importing.next();
+    }
+    const manager = step.value;
+    const cleanup = manager.captureCreatedSessionCleanup();
+    try {
+      options.signal?.throwIfAborted();
+      return SessionManager.publishImport(manager);
+    } catch (error) {
+      const failures = [error];
+      try { manager.closeV4Store(); }
+      catch (closeError) { failures.push(closeError); }
+      try { cleanup(); }
+      catch (cleanupError) { failures.push(cleanupError); }
+      if (failures.length > 1) throw new AggregateError(failures, "Session import and cleanup failed");
+      throw error;
+    }
+  }
+
   static continueRecent(cwd: string, sessionDir?: string): SessionManager {
     const directory = sessionDir === undefined ? getDefaultSessionDir(cwd) : absolutePath(sessionDir);
     if (sessionDir !== undefined) preparePrivateSessionDirectory(directory);
     for (const candidate of recentSessionCandidates(directory, cwd)) {
       try {
         return SessionManager.open(candidate.path, directory, cwd);
-      } catch {}
+      } catch (error) { if (error instanceof LegacySessionConflictError) throw error; }
     }
     return SessionManager.create(cwd, directory);
   }
@@ -2269,7 +2743,6 @@ export class SessionManager {
   }
 
   cloneInMemory(): SessionManager {
-    if (this.persist) throw new Error("Only in-memory sessions can be cloned in memory");
     const clone = SessionManager.inMemory(this.cwd);
     clone.sessionId = this.sessionId;
     clone.memoryState = this.inspectState(cloneSessionV4State);
@@ -2289,10 +2762,9 @@ export class SessionManager {
     const directory = sessionDir === undefined ? getDefaultSessionDir(cwd) : absolutePath(sessionDir);
     const target = SessionManager.create(cwd, directory, {
       ...optionalProperties(options?.id === undefined ? undefined : { id: options.id }),
-      parentSession: source,
+      parentSession: sourceState.header.sessionId,
     });
-    const createdFile = target.getSessionFile();
-    const createdDetails = createdFile === undefined ? undefined : statSync(createdFile);
+    const cleanup = target.captureCreatedSessionCleanup();
     try {
       for (const node of sourceState.nodes.values()) {
         const copied = structuredClone(node);
@@ -2322,16 +2794,7 @@ export class SessionManager {
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      if (createdFile !== undefined && createdDetails !== undefined) {
-        try {
-          const currentDetails = statSync(createdFile);
-          if (currentDetails.dev === createdDetails.dev && currentDetails.ino === createdDetails.ino) {
-            unlinkSync(createdFile);
-          }
-        } catch (cleanupError) {
-          if (errorCode(cleanupError) !== "ENOENT") failures.push(cleanupError);
-        }
-      }
+      try { cleanup(); } catch (cleanupError) { failures.push(cleanupError); }
       if (failures.length === 1) throw error;
       throw new AggregateError(failures, "Session fork failed and its candidate could not be removed cleanly");
     }
@@ -2396,6 +2859,8 @@ type SessionHistoryReader =
   | "getLeafEntry"
   | "getEntry"
   | "getBranch"
+  | "getHistoryPage"
+  | "searchHistory"
   | "findEntriesOnBranch"
   | "findEntryOnBranch"
   | "getActiveBranchUsage"
@@ -2404,7 +2869,7 @@ type SessionHistoryReader =
   | "buildContextEntries"
   | "buildSessionContext";
 
-type SessionMetadataReader = "getLabel" | "getHeader" | "getSessionName";
+type SessionMetadataReader = "getLabel" | "getHeader" | "getSessionName" | "getPersistedSelection";
 
 export type ReadonlySessionManager = Pick<
   SessionManager,

@@ -17,7 +17,7 @@ lower-level theme consumers.
 ## Semantic-token format
 
 The recommended schema-v1 contract uses `colors` and exposes the complete token set available to ohm renderers and
-extension-owned UI:
+plugin-owned UI:
 
 - Core and chrome: `accent`, `border`, `borderAccent`, `borderMuted`, `success`, `error`, `warning`, `muted`, `dim`, `text`, and `thinkingText`.
 - Selection and messages: `selectedBg`, `userMessageBg`, `userMessageText`, `customMessageBg`, `customMessageText`, and `customMessageLabel`.

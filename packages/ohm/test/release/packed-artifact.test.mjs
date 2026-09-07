@@ -50,7 +50,7 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/assets/compaction-flow.svg",
   "docs/assets/core-loop.svg",
   "docs/assets/execution-backend.svg",
-  "docs/assets/extension-lifecycle.svg",
+  "docs/assets/plugin-lifecycle.svg",
   "docs/assets/managed-package-lifecycle.svg",
   "docs/assets/modes-runtime.svg",
   "docs/assets/package-layers.svg",
@@ -70,12 +70,12 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/embedding.md",
   "docs/environment-variables.md",
   "docs/execution-backends.md",
-  "docs/extension-api.md",
-  "docs/extension-auth-threat-model.md",
-  "docs/extension-capabilities.json",
-  "docs/extension-capabilities.md",
-  "docs/extension-events.md",
-  "docs/extensions.md",
+  "docs/plugin-api.md",
+  "docs/plugin-auth-threat-model.md",
+  "docs/plugin-capabilities.json",
+  "docs/plugin-capabilities.md",
+  "docs/plugin-events.md",
+  "docs/plugins.md",
   "docs/facets-and-presentations.md",
   "docs/api-aliases.md",
   "docs/getting-started.md",
@@ -109,28 +109,6 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/troubleshooting.md",
   "docs/tui.md",
 ]);
-const PUBLIC_LAYER_DIRECTORIES = [
-  "auth",
-  "config",
-  "context",
-  "core",
-  "embedding",
-  "extensions",
-  "images",
-  "interfaces",
-  "modes",
-  "net",
-  "process",
-  "prompts",
-  "providers",
-  "sdk",
-  "service",
-  "serve",
-  "storage",
-  "testing",
-  "tools",
-  "tui",
-];
 const DIRECT_DEPENDENCY_LICENSE_FILES = [
   ["@anthropic-ai/sdk", "LICENSE"],
   ["@vscode/ripgrep", "LICENSE"],
@@ -321,17 +299,18 @@ function packagePathAllowed(path) {
     || ALLOWED_DOCUMENTS.has(path);
 }
 
-function assertSafePackageFiles(files) {
+function assertSafePackageFiles(files, manifest) {
   const paths = files.map((entry) => String(entry.path).replaceAll("\\", "/"));
   const unexpected = paths.filter((path) => !packagePathAllowed(path));
   assert.deepEqual(unexpected, [], `packed artifact contains unexpected files: ${unexpected.join(", ")}`);
   for (const path of paths) {
     assert.doesNotMatch(path, /\.map$/u, `packed artifact contains an unusable source map: ${path}`);
-    assert.doesNotMatch(path, /(?:^|\/)(?:src|test|\.audit)(?:\/|$)/u);
+    assert.doesNotMatch(path, /(?:^|\/)(?:test|\.audit)(?:\/|$)/u);
+    if (!path.startsWith("examples/")) assert.doesNotMatch(path, /(?:^|\/)src(?:\/|$)/u);
     assert.doesNotMatch(path, /(?:^|\/)\.env(?:\.|\/|$)/iu);
     assert.doesNotMatch(
       path,
-      /^dist\/(?:checkpoints|daemon|hooks|image-generation|lsp|mcp|memory|policy|sandbox|subagents|worktrees)(?:\/|$)/u,
+      /^dist\/(?:checkpoints|daemon|extensions|hooks|image-generation|lsp|mcp|memory|policy|sandbox|subagents|worktrees)(?:\/|$)/u,
     );
     assert.doesNotMatch(
       path,
@@ -344,33 +323,7 @@ function assertSafePackageFiles(files) {
     "LICENSE",
     "README.md",
     "SECURITY.md",
-    "docs/assets/compaction-flow.svg",
-    "docs/assets/core-loop.svg",
-    "docs/assets/execution-backend.svg",
-    "docs/assets/extension-lifecycle.svg",
-    "docs/assets/managed-package-lifecycle.svg",
-    "docs/assets/modes-runtime.svg",
-    "docs/assets/package-layers.svg",
-    "docs/assets/provider-request-boundary.svg",
-    "docs/assets/release-pipeline.svg",
-    "docs/assets/rpc-flow.svg",
-    "docs/assets/sdk-runtime-composition.svg",
-    "docs/assets/session-tree.svg",
-    "docs/assets/tui-streaming.svg",
-    "docs/getting-started.md",
-    "docs/cli-reference.md",
-    "docs/api-aliases.md",
-    "docs/install.md",
-    "docs/keybindings.md",
-    "docs/prompt-templates.md",
-    "docs/public-api.md",
-    "docs/README.md",
-    "docs/releasing.md",
-    "docs/serve.md",
-    "docs/session-jsonl.md",
-    "docs/skills.md",
-    "docs/terminal-setup.md",
-    "docs/themes.md",
+    ...ALLOWED_DOCUMENTS,
     "dist/bin/ohm.js",
     "dist/bin/tool-backend-worker.js",
     "dist/rpc-entry.js",
@@ -387,18 +340,18 @@ function assertSafePackageFiles(files) {
     "examples/README.md",
     "examples/starter/package.json",
     "examples/starter/tsconfig.json",
-    "examples/starter/extensions/index.ts",
+    "examples/starter/src/index.ts",
     "examples/starter/checks/runtime.test.mjs",
     "examples/provider-override/package.json",
-    "examples/provider-override/extensions/index.mjs",
+    "examples/provider-override/src/index.mjs",
     "examples/raw-editor-ui/package.json",
-    "examples/raw-editor-ui/extensions/index.mjs",
+    "examples/raw-editor-ui/src/index.mjs",
     "examples/session-jsonl/package.json",
-    "examples/session-jsonl/extensions/index.mjs",
+    "examples/session-jsonl/src/index.mjs",
     "examples/session-control/package.json",
-    "examples/session-control/extensions/index.mjs",
+    "examples/session-control/src/index.mjs",
     "examples/dynamic-package/package.json",
-    "examples/dynamic-package/extensions/index.mjs",
+    "examples/dynamic-package/src/index.mjs",
     "resources/AGENTS.md",
     "resources/package-gallery.json",
     "resources/config.example.json",
@@ -407,14 +360,14 @@ function assertSafePackageFiles(files) {
     "resources/schemas/theme-v1.json",
     "resources/skills/ohm-dev/SKILL.md",
     "resources/skills/ohm-dev/references/configuration.md",
-    "resources/skills/ohm-dev/references/extensions.md",
+    "resources/skills/ohm-dev/references/plugins.md",
     "resources/skills/ohm-dev/references/core-tui-providers.md",
     "resources/skills/ohm-dev/references/project-development.md",
     "resources/skills/ohm-dev/references/testing-release.md",
-    ...PUBLIC_LAYER_DIRECTORIES.flatMap((directory) => [
-      `dist/${directory}/index.js`,
-      `dist/${directory}/index.d.ts`,
-    ]),
+    ...Object.entries(manifest.exports)
+      .filter(([subpath]) => subpath !== "./package.json")
+      .flatMap(([, conditions]) => Object.values(conditions))
+      .map((path) => path.replace(/^\.\//u, "")),
   ]) assert.ok(paths.includes(required), `packed artifact is missing ${required}`);
 }
 
@@ -571,6 +524,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     "packed-artifact subprocesses must not inherit credential variables",
   );
 
+  const productManifest = JSON.parse(await readFile(join(PROJECT_ROOT, "package.json"), "utf8"));
   const tarballs = [];
   let packed;
   for (const { name, directory } of OHM_PRODUCT_PACKAGE_GRAPH) {
@@ -597,14 +551,13 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     }
     if (name === "ohm") {
       packed = result;
-      assertSafePackageFiles(result[0]?.files ?? []);
+      assertSafePackageFiles(result[0]?.files ?? [], productManifest);
     }
     tarballs.push(join(paths.pack, result[0].filename));
   }
   const tarball = tarballs.at(-1);
   await access(tarball, constants.R_OK);
 
-  const productManifest = JSON.parse(await readFile(join(PROJECT_ROOT, "package.json"), "utf8"));
   await writeFile(join(paths.installDriver, "package.json"), `${JSON.stringify({
     name: "ohm-packed-installer-driver",
     private: true,
@@ -710,7 +663,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     access(join(packageRoot, "resources", "schemas", "config-v1.json")),
     access(join(packageRoot, "resources", "skills", "ohm-dev", "SKILL.md")),
     access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "configuration.md")),
-    access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "extensions.md")),
+    access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "plugins.md")),
     access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "core-tui-providers.md")),
     access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "project-development.md")),
     access(join(packageRoot, "resources", "skills", "ohm-dev", "references", "testing-release.md")),
@@ -823,7 +776,7 @@ export default function activate(api: any) {
   ]);
   const transformedRun = await runCommand(commandShim, [
     "TypeScript transform check",
-    "--extension",
+    "--plugin",
     transformedExtension,
     "--provider",
     "packed-typescript",
@@ -962,6 +915,7 @@ export default function activate(api: any) {
 
   const starterPackage = join(packageRoot, "examples", "starter");
   const installed = await runCommand(commandShim, [
+    "plugins",
     "install",
     starterPackage,
     "--workspace",
@@ -978,7 +932,7 @@ export default function activate(api: any) {
 
   const persistedSettings = JSON.parse(await readFile(globalSettingsPath, "utf8"));
   assert.equal(
-    persistedSettings.packages.some((entry) =>
+    persistedSettings.plugins.some((entry) =>
       Object.prototype.toString.call(entry) === "[object String]"
       && entry.replaceAll("\\", "/").endsWith("/starter")),
     true,
@@ -1061,7 +1015,7 @@ export default function activate(api) {
 `);
   const activeRuntimeInvocation = commandInvocation(commandShim, [
     "keep the runtime active",
-    "--extension",
+    "--plugin",
     blockingExtension,
     "--provider",
     "blocking-provider",

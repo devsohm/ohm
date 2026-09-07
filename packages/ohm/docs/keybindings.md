@@ -22,7 +22,7 @@ Escape is routed in this order:
 
 `Ctrl+C` cancels a picker. Otherwise it clears the draft and attachments. Press it twice within 500 ms while the
 editor is empty to exit. `Ctrl+D` deletes forward in a nonempty editor and exits when the editor is empty. Completed
-built-in tool rows start collapsed. `Ctrl+O` expands bounded retained tool output and bounded startup, skill, extension,
+built-in tool rows start collapsed. `Ctrl+O` expands bounded retained tool output and bounded startup, skill, plugin,
 branch-summary, and compaction detail. Press it again to collapse them back to compact receipts.
 `Ctrl+T` expands or collapses visible reasoning immediately in the rich viewport, including the currently streaming
 block. Its header remains visible while hidden reasoning continues accumulating.
@@ -82,23 +82,27 @@ values. In the session tree, they page by ten rows.
 
 ### Transcript navigation
 
-These actions operate on the retained transcript. They do not replace editor navigation.
+These actions navigate the live transcript and bounded journal pages. They do not replace editor navigation.
 
 | Action ID | Meaning | Default |
 | --- | --- | --- |
 | `tui.transcript.pageUp` | Scroll toward earlier transcript rows | `pageup` |
 | `tui.transcript.pageDown` | Scroll toward later transcript rows | `pagedown` |
-| `tui.transcript.previousPrompt` | Jump to the preceding marked user or final assistant message | `ctrl+shift+up` |
-| `tui.transcript.nextPrompt` | Jump to the following marked user or final assistant message | `ctrl+shift+down` |
-| `tui.transcript.top` | Go to the earliest retained transcript row | `ctrl+home` |
+| `tui.transcript.previousPrompt` | Jump to the preceding user prompt, paging when needed | `ctrl+shift+up` |
+| `tui.transcript.nextPrompt` | Jump to the following user prompt, paging when needed | `ctrl+shift+down` |
+| `tui.transcript.previousTool` | Jump to the preceding tool, paging when needed | `alt+pageup` |
+| `tui.transcript.nextTool` | Jump to the following tool, paging when needed | `alt+pagedown` |
+| `tui.transcript.top` | Open the oldest journal page on the displayed branch | `ctrl+home` |
 | `tui.transcript.bottom` | Return to the newest transcript row and follow new output | `ctrl+end` |
-| `tui.transcript.searchOpen` | Open rendered transcript search near the current viewport | `ctrl+shift+f` |
-| `tui.transcript.searchNext` | Select and reveal the next match | `enter`, `ctrl+g` |
-| `tui.transcript.searchPrevious` | Select and reveal the previous match | `shift+enter`, `ctrl+shift+g` |
+| `tui.transcript.searchOpen` | Search visible text across the session journal, including other branches | `ctrl+shift+f` |
+| `tui.transcript.searchNext` | Reveal the next older matching entry | `enter`, `ctrl+g` |
+| `tui.transcript.searchPrevious` | Reveal the next newer matching entry | `shift+enter`, `ctrl+shift+g` |
 | `tui.transcript.searchClose` | Close search and restore composer input | `escape` |
 
 Search navigation chords are active only while the search bar is open, so its default `Ctrl+G` does not replace the
 external-editor chord in the composer.
+Search results do not change the active branch. `Ctrl+End` closes search and returns to live output. An embedded
+controller without a journal provider searches only its retained rendered rows and cycles through those matches.
 
 ### Application, model, message, and session entry points
 
@@ -183,10 +187,10 @@ array of chords. Use an empty array to unbind the action. `KEYBINDING_ACTIONS` a
 ```
 
 Both interactive entry points load this object. `/refresh` validates and applies changes to host actions, built-in
-editor components, and direct extension UI as one live keymap.
+editor components, and direct plugin UI as one live keymap.
 
-Runtime extensions register standalone shortcuts with `registerShortcut`. Host actions keep precedence. Conflicting
-extension shortcuts are not activated. Document the chord in the package README and choose one the target terminal is
+Runtime plugins register standalone shortcuts with `registerShortcut`. Host actions keep precedence. Conflicting
+plugin shortcuts are not activated. Document the chord in the package README and choose one the target terminal is
 unlikely to intercept.
 
 ## Terminal diagnosis

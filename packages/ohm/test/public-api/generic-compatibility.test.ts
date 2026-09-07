@@ -9,7 +9,7 @@ import { parseArgs } from "../../src/cli/args.js";
 import { hasTrustRequiringProjectResources } from "../../src/config/index.js";
 import { shouldCompact } from "../../src/context/public-compaction.js";
 import { parseFrontmatter, stripFrontmatter } from "../../src/core/frontmatter.js";
-import { createExtensionRuntime } from "../../src/extensions/compat.js";
+import { createPluginRuntime } from "../../src/plugins/compat.js";
 import { formatDimensionNote } from "../../src/images/helpers.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
 import { createModels } from "../../src/providers/models.js";
@@ -75,7 +75,7 @@ test("generic visual, image-note, and extension adapters are operational", async
 
   const directory = await mkdtemp(join(tmpdir(), "ohm-generic-api-"));
   t.after(async () => await rm(directory, { recursive: true, force: true }));
-  const extensions = createExtensionRuntime();
+  const extensions = createPluginRuntime();
   assert.deepEqual(extensions.flagValues, new Map());
   assert.throws(() => extensions.getActiveTools(), /before the session host is bound/u);
 

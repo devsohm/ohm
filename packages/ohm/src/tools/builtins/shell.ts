@@ -1,5 +1,5 @@
 import { optionalProperties } from "../../core/optional-properties.js";
-import { isJsonObject, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { STRING_VALUE } from "../../core/value-schemas.js";
 import { commandShellInvocation } from "../../process/command-shell.js";
 import { DirectProcessRunner } from "../../process/runner.js";
@@ -11,6 +11,7 @@ import { inputObject, numberInput, stringInput } from "../input.js";
 import { ToolOutputAccumulator } from "../output-accumulator.js";
 import { CoalescedOutputProgress } from "../progress.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import { formatBytes, isToolTruncation, TOOL_MAX_BYTES, TOOL_MAX_LINES, type ToolTruncation } from "../truncate.js";
 import type { HarnessTool, ResourceClaim, ToolContext, ToolResult } from "../types.js";
 
@@ -21,7 +22,7 @@ const commandParameter = Type.String({ description: "Shell command to run." });
 const bashParameters = Type.Object({
   command: commandParameter,
   timeout: Type.Optional(Type.Number({
-    description: "Optional time limit in seconds. Omit it to allow an unbounded run.",
+    description: `Positive time limit in seconds, at most ${MAX_TIMEOUT_SECONDS}. Omit for no tool-specific timeout; cancellation still applies.`,
   })),
 });
 
@@ -72,17 +73,7 @@ export interface BashToolOptions {
   sessionEnvironment?: boolean;
 }
 
-const schema = {
-  type: "object",
-  required: ["command"],
-  properties: {
-    command: { type: "string", description: "Shell command to run." },
-    timeout: {
-      type: "number",
-      description: "Optional time limit in seconds. Omit it to allow an unbounded run.",
-    },
-  },
-} satisfies JsonObject;
+const schema = providerInputSchema(bashParameters);
 
 const SESSION_ENVIRONMENT_NAMES = [
   "OHM_SESSION_ID",
@@ -157,7 +148,7 @@ export class ShellTool implements HarnessTool {
       ?? true;
     this.definition = {
       name,
-      description: `Run a shell command from the active workspace. Standard output and errors are returned together. The visible tail is limited to ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024} KiB. When that limit is reached, ohm attempts to retain up to 64 MiB in a private temporary artifact; if storage is unavailable, only the bounded tail is returned. Set timeout to limit the run time.`,
+      description: `Run a shell command from the active workspace. Returns combined stdout and stderr, keeping the last ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024} KiB. Truncated output may have a private temporary artifact retaining up to 64 MiB; check the result for its path and any truncation. Optional timeout is in seconds; omission adds no tool-specific timeout.`,
       promptSnippet: "Run shell commands in the workspace",
       ...optionalProperties(this.#sessionEnvironment ? {
             promptGuidelines: [

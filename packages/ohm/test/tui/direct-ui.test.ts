@@ -26,7 +26,7 @@ import {
 
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import type { ExtensionUICapabilities } from "../../src/extensions/direct.js";
+import type { PluginUICapabilities } from "../../src/plugins/direct.js";
 import { Theme } from "../../src/index.js";
 import {
   createInteractiveDirectUiContext,
@@ -88,9 +88,9 @@ const UI_CAPABILITY_NAMES = [
   "toolExpansion",
   "slots",
   "routes",
-] as const satisfies readonly (keyof ExtensionUICapabilities)[];
+] as const satisfies readonly (keyof PluginUICapabilities)[];
 
-function uiCapabilityProfile(enabled: readonly (keyof ExtensionUICapabilities)[]): ExtensionUICapabilities {
+function uiCapabilityProfile(enabled: readonly (keyof PluginUICapabilities)[]): PluginUICapabilities {
   const selected = new Set(enabled);
   return {
     dialogs: selected.has("dialogs"),
@@ -251,7 +251,7 @@ test("direct UI components share the host renderer, retain extension ownership, 
   first.setWidget("shared", () => component("FIRST WIDGET", () => { firstDisposed += 1; }));
   first.setFooter((_tui, _theme, data) => {
     footerDataProvider = data;
-    footerStatuses = data.getExtensionStatuses();
+    footerStatuses = data.getPluginStatuses();
     footerSnapshot = data.getSnapshot();
     assert.equal(data.getAvailableProviderCount(), 3);
     return component("FIRST FOOTER", () => { firstDisposed += 1; });
@@ -1132,7 +1132,7 @@ test("raw editors retain host actions, shortcuts, autocomplete, focus, and appea
     },
     { triggerCharacters: ["#"] as const },
   ), generation.signal);
-  controller.setExtensionShortcuts([{ shortcut: "ctrl+k", description: "custom action" }], generation.signal);
+  controller.setPluginShortcuts([{ shortcut: "ctrl+k", description: "custom action" }], generation.signal);
   const ui = createInteractiveDirectUiContext(controller, "host-editor", process.cwd(), generation.signal);
   let editor: Editor | undefined;
   ui.setEditorComponent((tui, theme) => {
@@ -1205,6 +1205,59 @@ test("direct UI contexts report the globally active editor factory across extens
   assert.throws(() => second.getEditorComponent(), /second generation replaced/u);
   firstGeneration.abort(new Error("first generation replaced"));
   assert.throws(() => first.getEditorComponent(), /first generation replaced/u);
+  controller.close();
+});
+
+test("raw editors retain journal search controls without consuming or changing the draft", async () => {
+  const { input, controller } = fixture();
+  const generation = new AbortController();
+  const ui = createInteractiveDirectUiContext(controller, "search-editor", process.cwd(), generation.signal);
+  ui.setEditorComponent((tui, theme) => new Editor(tui, theme));
+  controller.setEditorText("untouched draft");
+  const queries: string[] = [];
+  controller.setTranscriptHistory({
+    async page() { return { items: [], hasMoreBefore: false, hasMoreAfter: false }; },
+    async search(query) { queries.push(query); return { matches: [], hasMore: false }; },
+  });
+  input.write("\u001b[102;6u");
+  input.write("whole phrase");
+  input.write("\r");
+  await tick();
+  assert.deepEqual(queries, ["whole phrase"]);
+  assert.equal(controller.getEditorText(), "untouched draft");
+  input.write("\u001b[1;5F");
+  input.write("!");
+  assert.equal(controller.getEditorText(), "untouched draft!");
+  generation.abort();
+  controller.close();
+});
+
+test("raw editor reads, handoffs, unload and submission preserve expanded paste text", () => {
+  const { input, controller } = fixture();
+  const actions: import("../../src/tui/types.js").TuiAction[] = [];
+  controller.setActionHandler((action) => actions.push(action));
+  const firstGeneration = new AbortController();
+  const secondGeneration = new AbortController();
+  const first = createInteractiveDirectUiContext(controller, "expanded-first", process.cwd(), firstGeneration.signal);
+  const second = createInteractiveDirectUiContext(controller, "expanded-second", process.cwd(), secondGeneration.signal);
+  let editor: Editor | undefined;
+  first.setEditorComponent((tui, theme) => { editor = new Editor(tui, theme); return editor; });
+  const paste = "full pasted text ".repeat(100);
+  input.write(`\u001b[200~${paste}\u001b[201~`);
+  assert.match(editor!.getText(), /^\[paste/u);
+  assert.equal(first.getEditorText(), paste);
+  second.setEditorComponent((tui, theme) => new Editor(tui, theme));
+  assert.equal(second.getEditorText(), paste);
+  secondGeneration.abort();
+  assert.equal(first.getEditorText(), paste);
+  input.write("\r");
+  assert.equal(actions.at(-1)?.type, "submit");
+  const submitted = actions.at(-1);
+  assert.ok(submitted?.type === "submit");
+  assert.equal(submitted.text, paste);
+  input.write(`\u001b[200~${paste}\u001b[201~`);
+  firstGeneration.abort();
+  assert.equal(controller.getEditorText(), paste);
   controller.close();
 });
 
@@ -1572,6 +1625,45 @@ test("trusted TUI start and stop pause only generation-owned rendering and input
   generation.abort(new Error("extension generation ended"));
   assert.equal(childDisposed, 1);
   controller.close();
+});
+
+test("overlay bounds reflect painted geometry through trusted and custom handles", async () => {
+  const { controller, output } = fixture();
+  const generation = new AbortController();
+  const ui = createInteractiveDirectUiContext(controller, "overlay-bounds", process.cwd(), generation.signal);
+  let tui: TUI | undefined;
+  ui.setWidget("capture", (value) => { tui = value; return component("capture", () => undefined); });
+  assert.ok(tui);
+  const handle = tui.showOverlay({ render: () => ["first", "second"], invalidate() {} }, {
+    anchor: "bottom-right", width: 20, margin: 2,
+  });
+  assert.equal(handle.getBounds(), undefined);
+  controller.renderNow();
+  assert.deepEqual(handle.getBounds(), { row: output.rows - 4, column: output.columns - 22, width: 20, height: 2 });
+  handle.setHidden(true);
+  assert.equal(handle.getBounds(), undefined);
+  handle.setHidden(false);
+  assert.equal(handle.getBounds(), undefined);
+  controller.renderNow();
+  assert.ok(handle.getBounds());
+  output.resize(60, 18);
+  assert.equal(handle.getBounds(), undefined);
+  controller.renderNow();
+  assert.deepEqual(handle.getBounds(), { row: 14, column: 38, width: 20, height: 2 });
+  handle.hide();
+  assert.equal(handle.getBounds(), undefined);
+
+  let customHandle: import("@ohm/terminal").OverlayHandle | undefined;
+  const custom = ui.custom<void>(() => ({ render: () => ["custom"], invalidate() {} }), {
+    overlay: true, overlayOptions: { row: 3, col: 4, width: 12 },
+    onHandle(value) { customHandle = value; },
+  });
+  await tick(); controller.renderNow();
+  assert.deepEqual(customHandle?.getBounds(), { row: 3, column: 4, width: 12, height: 1 });
+  customHandle?.hide();
+  await custom;
+  assert.equal(customHandle?.getBounds(), undefined);
+  generation.abort(); controller.close();
 });
 
 test("trusted overlay handles remove their stack record when permanently hidden", async () => {

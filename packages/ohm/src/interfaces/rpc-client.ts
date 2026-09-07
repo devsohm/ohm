@@ -1,4 +1,5 @@
 import { optionalProperties } from "../core/optional-properties.js";
+import type { AgentSessionInspection } from "../service/session-inspection.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -7,12 +8,12 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 
 import { isJsonObject, type JsonValue } from "../core/json.js";
-import type { CompactionResult } from "../extensions/direct.js";
+import type { CompactionResult } from "../plugins/direct.js";
 import type {
-  ExtensionWireServiceDescriptor,
-  ExtensionWireServiceRequest,
-  ExtensionWireServiceResponse,
-} from "../extensions/wire-services.js";
+  PluginWireServiceDescriptor,
+  PluginWireServiceRequest,
+  PluginWireServiceResponse,
+} from "../plugins/wire-services.js";
 import type {
   PortablePresentationActionRequest,
   PortablePresentationActionResult,
@@ -22,19 +23,21 @@ import { terminateProcessTreeAsync } from "../process/process-tree.js";
 import type { ProviderModelThinkingLevel } from "../providers/models.js";
 import type {
   AgentSessionBashResult,
-  AgentSessionEvent,
+  AgentSessionModelCycleOptions,
+  AgentSessionModelMutationOptions,
   AgentSessionStats,
 } from "../service/agent-session.js";
 import { boundedRpcErrorMessage } from "./rpc-error.js";
+import type { SessionWireEvent } from "./session-wire.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./rpc.js";
 import type {
   RpcBashExecutionUpdate,
   RpcAgentMessage,
   RpcCommand,
   RpcEntryPage,
-  RpcExtensionErrorEvent,
-  RpcExtensionUiRequest,
-  RpcExtensionUiResponse,
+  RpcPluginErrorEvent,
+  RpcPluginUiRequest,
+  RpcPluginUiResponse,
   RpcMessagePage,
   RpcRecoveryResolution,
   RpcRecoveryResult,
@@ -72,10 +75,10 @@ export interface RpcClientOptions {
 }
 
 export type RpcStreamEvent =
-  | AgentSessionEvent
+  | SessionWireEvent
   | RpcBashExecutionUpdate
-  | RpcExtensionUiRequest
-  | RpcExtensionErrorEvent
+  | RpcPluginUiRequest
+  | RpcPluginErrorEvent
   | PortablePresentationEvent;
 export type RpcEventListener = (event: RpcStreamEvent) => void;
 
@@ -140,6 +143,7 @@ const RPC_DATA_COMMANDS = new Set<RpcCommandType>([
   "compact",
   "bash",
   "get_session_stats",
+  "get_inspection",
   "export_html",
   "switch_session",
   "fork",
@@ -598,7 +602,7 @@ export class RpcClient {
   async invokePortablePresentationAction(
     request: PortablePresentationActionRequest,
   ): Promise<PortablePresentationActionResult> {
-    return this.#data(await this.#send({ type: "presentation_action", ...request }));
+    return this.#data(await this.#send({ ...request, type: "presentation_action" }));
   }
 
   async listPortablePresentations(): Promise<readonly PortablePresentationEvent[]> {
@@ -607,15 +611,15 @@ export class RpcClient {
     ).presentations;
   }
 
-  async listExtensionWireServices(): Promise<readonly ExtensionWireServiceDescriptor[]> {
-    return this.#data<{ services: readonly ExtensionWireServiceDescriptor[] }>(
+  async listPluginWireServices(): Promise<readonly PluginWireServiceDescriptor[]> {
+    return this.#data<{ services: readonly PluginWireServiceDescriptor[] }>(
       await this.#send({ type: "get_extension_wire_services" }),
     ).services;
   }
 
-  async invokeExtensionWireService(
-    request: ExtensionWireServiceRequest,
-  ): Promise<ExtensionWireServiceResponse> {
+  async invokePluginWireService(
+    request: PluginWireServiceRequest,
+  ): Promise<PluginWireServiceResponse> {
     return this.#data(await this.#send({ type: "extension_wire_request", request }));
   }
 
@@ -636,12 +640,12 @@ export class RpcClient {
     return this.#data(await this.#send({ type: "set_model", provider, modelId }));
   }
 
-  async cycleModel(): Promise<{
+  async cycleModel(options: AgentSessionModelCycleOptions & { direction?: "forward" | "backward" } = {}): Promise<{
     model: Model<Api>;
     thinkingLevel: ProviderModelThinkingLevel;
     isScoped: boolean;
   } | null> {
-    return this.#data(await this.#send({ type: "cycle_model" }));
+    return this.#data(await this.#send({ ...options, type: "cycle_model" }));
   }
 
   async getAvailableModels(): Promise<Model<Api>[]> {
@@ -654,8 +658,8 @@ export class RpcClient {
     await this.#send({ type: "set_thinking_level", level });
   }
 
-  async cycleThinkingLevel(): Promise<{ level: ProviderModelThinkingLevel } | null> {
-    return this.#data(await this.#send({ type: "cycle_thinking_level" }));
+  async cycleThinkingLevel(options: AgentSessionModelMutationOptions = {}): Promise<{ level: ProviderModelThinkingLevel } | null> {
+    return this.#data(await this.#send({ ...options, type: "cycle_thinking_level" }));
   }
 
   async getAvailableThinkingLevels(): Promise<ProviderModelThinkingLevel[]> {
@@ -689,6 +693,7 @@ export class RpcClient {
 
   async abortBash(): Promise<void> { await this.#send({ type: "abort_bash" }); }
   async getSessionStats(): Promise<AgentSessionStats> { return this.#data(await this.#send({ type: "get_session_stats" })); }
+  async getInspection(): Promise<AgentSessionInspection> { return this.#data(await this.#send({ type: "get_inspection" })); }
 
   async exportHtml(outputPath?: string): Promise<{ path: string }> {
     return this.#data(await this.#send({ type: "export_html", ...optionalProperties(outputPath === undefined ? undefined : { outputPath }) }));
@@ -714,7 +719,7 @@ export class RpcClient {
     cursor?: string | { since?: string; afterSequence?: number; limit?: number },
   ): Promise<RpcEntryPage> {
     const options = Value.Check(STRING_VALUE, cursor) ? { since: cursor } : cursor;
-    return this.#data(await this.#send({ type: "get_entries", ...options }));
+    return this.#data(await this.#send({ ...options, type: "get_entries" }));
   }
 
   async getEntries(since?: string): Promise<{ entries: RpcEntryPage["entries"]; leafId: string | null }> {
@@ -782,7 +787,7 @@ export class RpcClient {
   }
 
   async getTreePage(options: { cursor?: string; limit?: number } = {}): Promise<RpcTreePage> {
-    return this.#data(await this.#send({ type: "get_tree", ...options }));
+    return this.#data(await this.#send({ ...options, type: "get_tree" }));
   }
 
   async getTree(): Promise<{ tree: RpcSessionTreeNode[]; leafId: string | null }> {
@@ -827,7 +832,7 @@ export class RpcClient {
   async setSessionName(name: string): Promise<void> { await this.#send({ type: "set_session_name", name }); }
 
   async getMessagesPage(options: { cursor?: string; limit?: number } = {}): Promise<RpcMessagePage> {
-    return this.#data(await this.#send({ type: "get_messages", ...options }));
+    return this.#data(await this.#send({ ...options, type: "get_messages" }));
   }
 
   async getMessages(): Promise<RpcAgentMessage[]> {
@@ -863,7 +868,7 @@ export class RpcClient {
     return this.#data<{ commands: RpcSlashCommand[] }>(await this.#send({ type: "get_commands" })).commands;
   }
 
-  async respondToExtensionUi(response: RpcExtensionUiResponse): Promise<void> {
+  async respondToPluginUi(response: RpcPluginUiResponse): Promise<void> {
     const input = this.#writableInput();
     let line: string;
     try {

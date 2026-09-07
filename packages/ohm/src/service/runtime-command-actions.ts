@@ -1,6 +1,6 @@
 import { optionalProperties } from "../core/optional-properties.js";
-import type { ExtensionCommandContextActions } from "../extensions/direct.js";
-import { extensionSessionManager } from "../extensions/session-contract.js";
+import type { PluginCommandContextActions } from "../plugins/direct.js";
+import { pluginSessionManager } from "../plugins/session-contract.js";
 import type { AgentSession } from "./agent-session.js";
 import type { AgentSessionRuntime } from "./agent-session-runtime.js";
 
@@ -12,11 +12,11 @@ export function createAgentSessionRuntimeCommandActions(
     refresh?: (signal: AbortSignal) => Promise<AgentSession | void>;
     afterRefresh?: (session: AgentSession) => Promise<void>;
   } = {},
-): ExtensionCommandContextActions {
+): PluginCommandContextActions {
   const assertOrigin = (signal?: AbortSignal): void => {
     signal?.throwIfAborted();
     if (runtime.session !== session) {
-      throw new Error("Extension command context is stale after session replacement");
+      throw new Error("Plugin command context is stale after session replacement");
     }
   };
   return {
@@ -30,7 +30,7 @@ export function createAgentSessionRuntimeCommandActions(
       return await runtime.newSession({
         ...optionalProperties(commandOptions.parentSession === undefined ? undefined : { parentSession: commandOptions.parentSession }),
         ...optionalProperties(commandOptions.setup === undefined ? undefined : {
-          setup: async (manager) => await commandOptions.setup?.(extensionSessionManager(manager)),
+          setup: async (manager) => await commandOptions.setup?.(pluginSessionManager(manager)),
         }),
         ...optionalProperties(commandOptions.withSession === undefined ? undefined : {
           withSession: async (context) => await commandOptions.withSession?.(context),

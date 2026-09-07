@@ -52,7 +52,7 @@ export interface HarnessTranscriptToolEntry extends HarnessTranscriptEntryBase {
   status: "requested" | "running" | "completed" | "error" | "in_doubt";
 }
 
-export interface HarnessTranscriptExtensionEntry extends HarnessTranscriptEntryBase {
+export interface HarnessTranscriptPluginEntry extends HarnessTranscriptEntryBase {
   kind: "extension";
   extensionId: string;
   schemaVersion: number;
@@ -77,7 +77,7 @@ export type HarnessTranscriptEntry =
   | HarnessTranscriptMessageEntry
   | HarnessTranscriptReasoningEntry
   | HarnessTranscriptToolEntry
-  | HarnessTranscriptExtensionEntry
+  | HarnessTranscriptPluginEntry
   | HarnessTranscriptSummaryEntry
   | HarnessTranscriptStatusEntry;
 

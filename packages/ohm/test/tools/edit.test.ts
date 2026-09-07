@@ -40,7 +40,8 @@ async function fixture(): Promise<{ root: string; context: ToolContext }> {
   };
 }
 
-test("edit applies multiple replacements and reports display and applicable patch forms", async () => {
+test("exact edits avoid normalized indexing and report display and applicable patch forms", async (t) => {
+  const segment = t.mock.method(Intl.Segmenter.prototype, "segment");
   const { root, context } = await fixture();
   await writeFile(join(root, "multi.ts"), "const first = 1;\nconst second = 2;\n");
 
@@ -59,6 +60,7 @@ test("edit applies multiple replacements and reports display and applicable patc
   assert.match(metadata.diff, /-1 const first = 1;/u);
   assert.match(metadata.diff, /\+1 const first = 10;/u);
   assert.equal(applyPatch("const first = 1;\nconst second = 2;\n", metadata.patch), "const first = 10;\nconst second = 20;\n");
+  assert.equal(segment.mock.callCount(), 0);
 });
 
 test("multi-edit validation is atomic when a later replacement is missing", async () => {
@@ -167,15 +169,22 @@ test("multi-edit resolves every target against the original file", async () => {
   assert.equal(await readFile(join(root, "original.txt"), "utf8"), "second block copied\nfinal block\n");
 });
 
-test("normalized edits preserve untouched original bytes", async () => {
+test("mixed edits share normalized indexing and preserve untouched original bytes", async (t) => {
+  const segment = t.mock.method(Intl.Segmenter.prototype, "segment");
   const { root, context } = await fixture();
-  const original = "before  \r\ncafe\u0301\r\nafter\t \r\n";
+  const original = "before  \r\ncafe\u0301\r\n“quoted”\r\nafter\t \r\n";
   await writeFile(join(root, "preserve.txt"), original);
 
-  await new EditTool().execute({
+  const result = await new EditTool().execute({
     path: "preserve.txt",
-    edits: [{ oldText: "café\n", newText: "coffee\n" }],
+    edits: [
+      { oldText: "café\n", newText: "coffee\n" },
+      { oldText: '"quoted"', newText: "cited" },
+      { oldText: "before", newText: "BEFORE" },
+    ],
   }, context);
 
-  assert.equal(await readFile(join(root, "preserve.txt"), "utf8"), "before  \r\ncoffee\r\nafter\t \r\n");
+  assert.equal(await readFile(join(root, "preserve.txt"), "utf8"), "BEFORE  \r\ncoffee\r\ncited\r\nafter\t \r\n");
+  assert.deepEqual(editMetadata(result.metadata).modes, ["exact", "normalized", "normalized"]);
+  assert.equal(segment.mock.callCount(), 1);
 });

@@ -52,7 +52,7 @@ test("profile-backed login immediately exposes subscription models to the intera
     credentialStore: new MemoryProfileStore(),
     deferModelNetworkRefresh: true,
     projectTrusted: false,
-    extensions: false,
+    pluginCode: false,
     skills: false,
     promptTemplates: false,
     themes: false,

@@ -18,15 +18,15 @@ import {
 } from "@ohm/terminal";
 
 import {
-  FULL_TUI_EXTENSION_UI_CAPABILITIES,
-  LINE_TUI_EXTENSION_UI_CAPABILITIES,
+  FULL_TUI_PLUGIN_UI_CAPABILITIES,
+  LINE_TUI_PLUGIN_UI_CAPABILITIES,
   type RuntimeDirectEditorFactory,
   type RuntimeDirectPersistentComponentFactory,
   type RuntimeDirectUiContext,
   type RuntimeDirectUiDialogOptions,
-} from "../extensions/runtime.js";
-import { RuntimeUISlotRegistrations } from "../extensions/runtime-internal/ui-slot-registrations.js";
-import { RuntimeUIRouteRegistrations } from "../extensions/runtime-internal/ui-route-registrations.js";
+} from "../plugins/runtime.js";
+import { RuntimeUISlotRegistrations } from "../plugins/runtime-internal/ui-slot-registrations.js";
+import { RuntimeUIRouteRegistrations } from "../plugins/runtime-internal/ui-route-registrations.js";
 import type { Theme } from "./theme.js";
 import type { TuiAutocompleteCompletion, TuiAutocompleteProvider, TuiPersistentComponentSlot } from "./types.js";
 import type { ReadonlyFooterDataProvider } from "./footer-data.js";
@@ -267,7 +267,7 @@ function interactionSignal(base: AbortSignal, options?: RuntimeDirectUiDialogOpt
   const signals = [base, ...(options?.signal === undefined ? [] : [options.signal])];
   if (options?.timeout !== undefined) {
     if (!Number.isSafeInteger(options.timeout) || options.timeout < 1 || options.timeout > 3_600_000) {
-      throw new RangeError("Extension UI timeout must be from 1 through 3600000 milliseconds");
+      throw new RangeError("Plugin UI timeout must be from 1 through 3600000 milliseconds");
     }
     signals.push(AbortSignal.timeout(options.timeout));
   }
@@ -462,7 +462,7 @@ function footerData(controller: TuiController, cwd: string, signal: AbortSignal)
   return Object.freeze({
     getSnapshot: () => controller.footerDataSnapshot(),
     getGitBranch: () => { if (!signal.aborted) void probe.refresh(); return probe.value; },
-    getExtensionStatuses: () => controller.extensionStatusSnapshot(),
+    getPluginStatuses: () => controller.extensionStatusSnapshot(),
     getAvailableProviderCount: () => controller.availableProviderCount(),
     onBranchChange(callback: () => void): () => void {
       signal.throwIfAborted();
@@ -676,6 +676,7 @@ function rawTui(
         focus() { if (!closed) mounted.handle.focus(); },
         unfocus(unfocus) { if (!closed) mounted.handle.unfocus(unfocus); },
         isFocused: () => !closed && mounted.handle.isFocused(),
+        getBounds: () => closed ? undefined : mounted.handle.getBounds(),
       };
       entry = { handle, close, paused: false };
       overlays.push(entry);
@@ -912,10 +913,10 @@ export function createOwnedInteractiveDirectUiContext(
   signal.throwIfAborted();
   const slotRegistrations = new RuntimeUISlotRegistrations(signal, {
     set(path, key, contribution, token) {
-      controller.setExtensionUiSlot(ownerKey, path, key, contribution, token, signal);
+      controller.setPluginUiSlot(ownerKey, path, key, contribution, token, signal);
     },
     remove(path, key, token) {
-      controller.setExtensionUiSlot(ownerKey, path, key, undefined, token);
+      controller.setPluginUiSlot(ownerKey, path, key, undefined, token);
     },
   });
   const routeMounts = new Map<object, RuntimeUiComponentHandle>();
@@ -923,7 +924,7 @@ export function createOwnedInteractiveDirectUiContext(
     open(name, title, factory, _data, token, onClosed) {
       let handle: RuntimeUiComponentHandle | undefined;
       let closed = false;
-      handle = controller.openExtensionUiRoute(ownerKey, name, title, factory, signal, () => {
+      handle = controller.openPluginUiRoute(ownerKey, name, title, factory, signal, () => {
         closed = true;
         if (handle !== undefined && routeMounts.get(token) === handle) routeMounts.delete(token);
         onClosed();
@@ -1034,6 +1035,7 @@ export function createOwnedInteractiveDirectUiContext(
       }
     },
     isFocused: handle.isFocused,
+    getBounds: () => handle.getBounds?.(),
   });
   const custom = async <T>(
     presentationSignal: AbortSignal,
@@ -1080,8 +1082,8 @@ export function createOwnedInteractiveDirectUiContext(
     const active = (): void => { presentationSignal.throwIfAborted(); };
     const context = Object.freeze<RuntimeDirectUiContext>({
     capabilities: controller.mode === "full"
-      ? FULL_TUI_EXTENSION_UI_CAPABILITIES
-      : LINE_TUI_EXTENSION_UI_CAPABILITIES,
+      ? FULL_TUI_PLUGIN_UI_CAPABILITIES
+      : LINE_TUI_PLUGIN_UI_CAPABILITIES,
     slots: slotRegistrations.service(controller.mode === "full"),
     routes: routeRegistrations.service(controller.mode === "full"),
     async select(title, options, opts) {
@@ -1106,15 +1108,15 @@ export function createOwnedInteractiveDirectUiContext(
     },
     setStatus(name, text) {
       active();
-      controller.setExtensionStatus(key(name), text, text === undefined ? undefined : presentationSignal);
+      controller.setPluginStatus(key(name), text, text === undefined ? undefined : presentationSignal);
     },
     setWorkingMessage(message) {
       active();
-      controller.setExtensionWorkingMessage(ownerKey, message, message === undefined ? undefined : presentationSignal);
+      controller.setPluginWorkingMessage(ownerKey, message, message === undefined ? undefined : presentationSignal);
     },
     setWorkingVisible(visible) {
       active();
-      controller.setExtensionWorkingVisible(ownerKey, visible, visible === undefined ? undefined : presentationSignal);
+      controller.setPluginWorkingVisible(ownerKey, visible, visible === undefined ? undefined : presentationSignal);
     },
     setWorkingIndicator(options) {
       active();

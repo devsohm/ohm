@@ -11,7 +11,7 @@ import {
   getAuthPath,
   getCrashDir,
   getDiagnosticsDir,
-  getExtensionsDir,
+  getPluginsDir,
   getLogsDir,
   getModelsPath,
   getProjectSettingsPath,
@@ -29,6 +29,7 @@ import {
   sameFilesystemPath,
 } from "../../src/utils/paths.js";
 import { projectConfigRootMatchesAgentDir } from "../../src/utils/project-scope.js";
+import { agentPaths } from "../../src/cli/paths.js";
 
 test("agent paths use one direct home and honor explicit overrides", () => {
   const defaults = getAgentDir({});
@@ -37,7 +38,9 @@ test("agent paths use one direct home and honor explicit overrides", () => {
   assert.equal(getAuthPath({}), join(defaults, "auth.json"));
   assert.equal(getModelsPath({}), join(defaults, "models.json"));
   assert.equal(getSessionsDir({}), join(defaults, "sessions"));
-  assert.equal(getExtensionsDir({}), join(defaults, "extensions"));
+  assert.equal(getPluginsDir({}), join(defaults, "plugins"));
+  assert.equal(agentPaths({}).userPlugins, join(defaults, "plugins"));
+  assert.equal(agentPaths({}, "/explicit-agent").userPlugins, join(resolve("/explicit-agent"), "plugins"));
   assert.equal(getSkillsDir({}), join(defaults, "skills"));
   assert.equal(getLogsDir({}), join(defaults, "logs"));
   assert.equal(getDiagnosticsDir({}), join(defaults, "diagnostics"));
@@ -49,6 +52,8 @@ test("agent paths use one direct home and honor explicit overrides", () => {
     OHM_SESSION_DIR: "~/sessions-test",
   };
   assert.equal(getAgentDir(environment), join(homedir(), "ohm-test"));
+  assert.equal(getPluginsDir(environment), join(homedir(), "ohm-test", "plugins"));
+  assert.equal(agentPaths(environment).userPlugins, join(homedir(), "ohm-test", "plugins"));
   assert.equal(getSessionsDir(environment), join(homedir(), "sessions-test"));
 });
 

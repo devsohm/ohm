@@ -51,7 +51,7 @@ test("extension UI routes replace only their exact predecessor and preserve the 
   let captureEscape = true;
   let capturedEscapes = 0;
 
-  const first = controller.openExtensionUiRoute("extension-a", "first", "First route", () => ({
+  const first = controller.openPluginUiRoute("extension-a", "first", "First route", () => ({
     render: () => ({ lines: [{ spans: [{ text: "FIRST_BODY" }] }] }),
     dispose: () => { firstDisposed += 1; },
   }), firstGeneration.signal, () => { firstClosed += 1; });
@@ -62,7 +62,7 @@ test("extension UI routes replace only their exact predecessor and preserve the 
   assert.match(frame, /draft remains editable/u);
   assert.doesNotMatch(frame, /ordinary transcript/u);
 
-  controller.openExtensionUiRoute("extension-b", "second", "Second\u001b[2J\nroute", () => ({
+  controller.openPluginUiRoute("extension-b", "second", "Second\u001b[2J\nroute", () => ({
     render: () => ({ lines: [{ spans: [{ text: "SECOND_BODY" }] }] }),
     handleKey: (event) => {
       if (event.key !== "escape") return false;
@@ -104,7 +104,7 @@ test("extension UI route factory and render failures warn and restore the normal
   const { controller, output } = fullController();
   controller.notify("normal transcript restored");
 
-  assert.throws(() => controller.openExtensionUiRoute(
+  assert.throws(() => controller.openPluginUiRoute(
     "broken-extension",
     "factory-failure",
     "Broken factory",
@@ -114,11 +114,11 @@ test("extension UI route factory and render failures warn and restore the normal
   controller.renderNow();
   let frame = viewport(output);
   assert.match(frame, /normal transcript restored/u);
-  assert.match(frame, /Extension UI route factory-failure failed: factory exploded/u);
+  assert.match(frame, /Plugin UI route factory-failure failed: factory exploded/u);
 
   let closed = 0;
   const generation = new AbortController();
-  controller.openExtensionUiRoute(
+  controller.openPluginUiRoute(
     "broken-extension",
     "render-failure",
     "Broken render",
@@ -132,7 +132,7 @@ test("extension UI route factory and render failures warn and restore the normal
   frame = viewport(output);
   assert.equal(closed, 1);
   assert.match(frame, /normal transcript restored/u);
-  assert.match(frame, /Extension UI route render-failure failed: render exploded/u);
+  assert.match(frame, /Plugin UI route render-failure failed: render exploded/u);
   assert.doesNotMatch(frame, /Broken render · Esc back/u);
 
   generation.abort(new Error("test complete"));
@@ -145,7 +145,7 @@ test("extension UI routes close when their generation ends", async () => {
   const generation = new AbortController();
   let disposed = 0;
   let closed = 0;
-  controller.openExtensionUiRoute("extension", "temporary", "Temporary", () => ({
+  controller.openPluginUiRoute("extension", "temporary", "Temporary", () => ({
     render: () => ({ lines: [{ spans: [{ text: "TEMPORARY_ROUTE" }] }] }),
     dispose: () => { disposed += 1; },
   }), generation.signal, () => { closed += 1; });
@@ -169,9 +169,9 @@ test("extension UI route construction rejects reentrant navigation without orpha
   const generation = new AbortController();
   let reentrantFactoryCalls = 0;
 
-  const first = controller.openExtensionUiRoute("extension", "first", "First", () => {
+  const first = controller.openPluginUiRoute("extension", "first", "First", () => {
     assert.throws(
-      () => controller.openExtensionUiRoute("extension", "second", "Second", () => {
+      () => controller.openPluginUiRoute("extension", "second", "Second", () => {
         reentrantFactoryCalls += 1;
         return { render: () => ({ lines: [{ spans: [{ text: "SECOND_BODY" }] }] }) };
       }, generation.signal),
@@ -200,7 +200,7 @@ test("extension UI route construction blocks raw and structured full-screen moun
   let rawAttempt: Promise<void | undefined> | undefined;
   let structuredAttempt: Promise<void | undefined> | undefined;
 
-  controller.openExtensionUiRoute("extension", "route", "Route", () => {
+  controller.openPluginUiRoute("extension", "route", "Route", () => {
     rawAttempt = controller.customRaw<void>(() => {
       rawFactoryCalls += 1;
       return new Text("RAW_SURFACE", 1, 0);
@@ -234,7 +234,7 @@ test("extension UI route construction rolls back when a modal interaction opens"
   let overlayHandle: ReturnType<TuiController["showOverlay"]> | undefined;
 
   assert.throws(
-    () => controller.openExtensionUiRoute("extension", "route", "Route", () => {
+    () => controller.openPluginUiRoute("extension", "route", "Route", () => {
       overlayHandle = controller.showOverlay<void>(() => ({
         render: () => ({ lines: [{ spans: [{ text: "MODAL_BODY" }] }] }),
       }), undefined, generation.signal);
@@ -257,15 +257,15 @@ test("extension UI route construction rolls back when a modal interaction opens"
 test("active extension UI routes reject host pickers and questions", async () => {
   const { controller, output } = fullController();
   const generation = new AbortController();
-  controller.openExtensionUiRoute("extension", "route", "Route", () => ({
+  controller.openPluginUiRoute("extension", "route", "Route", () => ({
     render: () => ({ lines: [{ spans: [{ text: "ROUTE_BODY" }] }] }),
   }), generation.signal);
 
   await assert.rejects(
     controller.choose("Choose", [{ label: "One", value: 1 }]),
-    /active extension UI route/u,
+    /active plugin UI route/u,
   );
-  await assert.rejects(controller.question("Question"), /active extension UI route/u);
+  await assert.rejects(controller.question("Question"), /active plugin UI route/u);
   controller.renderNow();
   assert.match(viewport(output), /ROUTE_BODY/u);
 
@@ -285,7 +285,7 @@ test("extension UI routes reject an active raw full-screen surface", async () =>
   assert.match(viewport(output), /RAW_SURFACE/u);
 
   assert.throws(
-    () => controller.openExtensionUiRoute(
+    () => controller.openPluginUiRoute(
       "extension",
       "hidden-route",
       "Hidden route",

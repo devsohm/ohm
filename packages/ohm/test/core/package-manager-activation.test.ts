@@ -12,18 +12,18 @@ import {
   type PackageActivationCandidate,
 } from "../../src/core/package-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import type { ExtensionAPI } from "../../src/extensions/direct.js";
+import type { PluginAPI } from "../../src/plugins/direct.js";
 import { defaultNpmCommand } from "../../src/process/npm-command.js";
 import { withFileLock } from "../../src/storage/file-lock.js";
 import {
-  loadDirectExtensions,
+  loadDirectPlugins,
   type RuntimeDirectPathMetadata,
-  type RuntimeExtensionHost,
-  type RuntimeExtensionLoadOptions,
-} from "../../src/extensions/runtime.js";
+  type RuntimePluginHost,
+  type RuntimePluginLoadOptions,
+} from "../../src/plugins/runtime.js";
 
 interface CandidateState {
-  api?: ExtensionAPI;
+  api?: PluginAPI;
   committedDuringActivation?: boolean;
 }
 
@@ -41,7 +41,7 @@ function candidateState(): CandidateState {
   return state;
 }
 
-function candidateApi(): ExtensionAPI {
+function candidateApi(): PluginAPI {
   const api = candidateState().api;
   if (api === undefined) throw new Error("Candidate extension did not publish its API");
   return api;
@@ -196,9 +196,9 @@ function candidateActivator(activationTimeoutMs = 30_000, loadTimeoutMs = 30_000
       if (entry.metadata.baseDir !== undefined) value.resourceRoot = entry.metadata.baseDir;
       return [entry.path, value] as const;
     }));
-    let host: RuntimeExtensionHost | undefined;
+    let host: RuntimePluginHost | undefined;
     try {
-      const loadOptions: RuntimeExtensionLoadOptions = {
+      const loadOptions: RuntimePluginLoadOptions = {
         workspace: candidate.workspace,
         dataRoot: candidate.dataRoot,
         projectTrusted: candidate.projectTrusted,
@@ -208,7 +208,7 @@ function candidateActivator(activationTimeoutMs = 30_000, loadTimeoutMs = 30_000
         loadTimeoutMs,
       };
       if (candidate.signal !== undefined) loadOptions.signal = candidate.signal;
-      host = await loadDirectExtensions(selected.map((entry) => entry.path), loadOptions);
+      host = await loadDirectPlugins(selected.map((entry) => entry.path), loadOptions);
     } finally {
       await host?.close();
     }
@@ -310,7 +310,7 @@ test("install activates a staged package.json direct factory before committing p
   assert.equal(state.committedDuringActivation, false);
   assert.throws(() => candidateApi().getCommands(), /no longer active|stale|closed/iu);
   assert.equal(JSON.parse(await readFile(join(finalPath, "package.json"), "utf8")).version, "1.0.0");
-  assert.deepEqual(value.settings.getGlobalSettings().packages, ["npm:candidate-package"]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, ["npm:candidate-package"]);
   await assertNoResidue(value);
 });
 
@@ -690,7 +690,7 @@ test("lazy required and bundled runtime dependencies must exist before package c
     );
 
     assert.equal(existsSync(join(value.agentDir, "npm", "node_modules", "candidate-package")), false);
-    assert.equal(value.settings.getGlobalSettings().packages, undefined);
+    assert.equal(value.settings.getGlobalSettings().plugins, undefined);
     await assertNoResidue(value);
   }
 });
@@ -772,7 +772,7 @@ test("project archive installs activate and resolve by the package name inside t
 
   assert.equal(candidateState().committedDuringActivation, false);
   assert.equal(packageManager(value).getInstalledPath(source, "project"), finalPath);
-  assert.deepEqual(value.settings.getProjectSettings().packages, [source]);
+  assert.deepEqual(value.settings.getProjectSettings().plugins, [source]);
   await rm(join(value.cwd, ".ohm", "npm", ".ohm-sources"), { recursive: true, force: true });
   assert.equal(packageManager(value).getInstalledPath(source, "project"), finalPath);
   await assertNoResidue(value);
@@ -816,7 +816,7 @@ test("multiple bare archive sources retain their installed package identities", 
   assert.equal(restarted.getInstalledPath(secondSource, "user"), secondPath);
   await restarted.removeAndPersist(firstSource);
   await value.settings.flush();
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [secondSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [secondSource]);
   assert.equal((await readdir(join(value.agentDir, "npm", ".ohm-sources"))).length, 1);
   await assertNoResidue(value);
 });
@@ -868,7 +868,7 @@ test("legacy multiple bare archive installs recover their receipts deterministic
   await value.settings.flush();
   assert.equal(existsSync(firstPath), false);
   assert.equal(removalRestart.getInstalledPath(secondSource, "user"), secondPath);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [secondSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [secondSource]);
   assert.deepEqual(
     await Promise.all((await readdir(receiptRoot)).map(async (entry) => JSON.parse(await readFile(join(receiptRoot, entry), "utf8")).name)),
     [secondName],
@@ -914,7 +914,7 @@ test("offline legacy receipt reconciliation does not run the package manager or 
 
   assert.deepEqual(await tree(join(value.agentDir, "npm")), npmBefore);
   assert.deepEqual(await readFile(value.settingsPath), settingsBefore);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [firstSource, secondSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [firstSource, secondSource]);
   await assertNoResidue(value);
 });
 
@@ -940,7 +940,7 @@ test("a bare archive cannot overwrite a destination owned by another source", as
     join(value.agentDir, "npm", "node_modules", "shared-archive-package"),
   );
   assert.equal(manager.getInstalledPath(secondSource, "user"), undefined);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [firstSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [firstSource]);
   assert.equal((await readdir(join(value.agentDir, "npm", ".ohm-sources"))).length, 1);
   await assertNoResidue(value);
 });
@@ -965,7 +965,7 @@ test("a bare archive cannot overwrite a configured named npm package", async (co
     join(value.agentDir, "npm", "node_modules", "cross-kind-package"),
   );
   assert.equal(manager.getInstalledPath(archiveSource, "user"), undefined);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [namedSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [namedSource]);
   await assertNoResidue(value);
 });
 
@@ -988,7 +988,7 @@ test("a named npm package cannot overwrite a destination owned by a bare archive
     manager.getInstalledPath(archiveSource, "user"),
     join(value.agentDir, "npm", "node_modules", "cross-kind-package"),
   );
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [archiveSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [archiveSource]);
   await assertNoResidue(value);
 });
 
@@ -1038,7 +1038,7 @@ test("removeAndPersist validates the exact configured npm source before uninstal
 
     assert.equal(existsSync(installed), true);
     assert.equal(manager.getInstalledPath(archiveSource, "user"), installed);
-    assert.deepEqual(value.settings.getGlobalSettings().packages, [archiveSource]);
+    assert.deepEqual(value.settings.getGlobalSettings().plugins, [archiveSource]);
     await assertNoResidue(value);
   }
 
@@ -1056,7 +1056,7 @@ test("removeAndPersist validates the exact configured npm source before uninstal
     await assert.rejects(manager.removeAndPersist("npm:remove-versioned-package@2.0.0"), /package source is not configured/iu);
 
     assert.equal(existsSync(installed), true);
-    assert.deepEqual(value.settings.getGlobalSettings().packages, [configuredSource]);
+    assert.deepEqual(value.settings.getGlobalSettings().plugins, [configuredSource]);
     await assertNoResidue(value);
   }
 });
@@ -1085,7 +1085,7 @@ test("configured bare archives reject ambiguous receipt-loss renames and recover
     const originalPath = join(value.agentDir, "npm", "node_modules", originalName);
     assert.equal(existsSync(originalPath), true);
     assert.equal(existsSync(join(value.agentDir, "npm", "node_modules", renamedName)), false);
-    assert.deepEqual(value.settings.getGlobalSettings().packages, [source]);
+    assert.deepEqual(value.settings.getGlobalSettings().plugins, [source]);
 
     process.env.OHM_TEST_PACKAGE_NAME = originalName;
     await manager.update(source);
@@ -1120,7 +1120,7 @@ test("a bare source cannot claim a configured bare package whose receipt is miss
     await assert.rejects(manager.installAndPersist(secondSource), /already owned by another package source|package ownership is ambiguous/iu);
 
     assert.equal(existsSync(join(value.agentDir, "npm", "node_modules", name)), true);
-    assert.deepEqual(value.settings.getGlobalSettings().packages, [firstSource]);
+    assert.deepEqual(value.settings.getGlobalSettings().plugins, [firstSource]);
     if (receiptState === "missing") assert.equal(existsSync(receipt), false);
     else assert.equal(await readFile(receipt, "utf8"), "{");
     await assertNoResidue(value);
@@ -1195,7 +1195,7 @@ test("bare archive receipts roll back with updates and are removed on uninstall"
   await value.settings.flush();
   assert.equal(manager.getInstalledPath(firstSource, "user"), undefined);
   assert.equal(manager.getInstalledPath(secondSource, "user"), secondPath);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [secondSource]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [secondSource]);
   assert.equal((await readdir(join(value.agentDir, "npm", ".ohm-sources"))).length, 1);
   await assertNoResidue(value);
 });
@@ -1241,7 +1241,7 @@ test("an incompatible ohm peer is rejected before package code or settings commi
   await assert.rejects(manager.installAndPersist("npm:candidate-package"), /requires ohm >=999\.0\.0/u);
 
   assert.equal(existsSync(join(value.agentDir, "npm")), false);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, undefined);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, undefined);
   await assertNoResidue(value);
 });
 
@@ -1354,6 +1354,6 @@ test("candidate activation cannot use live session authority", async (context) =
   );
 
   assert.deepEqual(await readFile(value.settingsPath), settingsBefore);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, undefined);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, undefined);
   await assertNoResidue(value);
 });

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ohm:schema:package-gallery:v1",
-  "title": "ohm extension package gallery structural preflight",
+  "title": "ohm plugin package gallery structural preflight",
   "$comment": "This schema checks portable JSON structure. The ohm gallery parser is authoritative for UTF-8 byte limits, semantic-version ranges, cross-field equality, canonical URLs and timestamps, and duplicate package IDs.",
   "type": "object",
   "additionalProperties": false,

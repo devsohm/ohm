@@ -12,8 +12,8 @@ import {
 } from "../core/value-schemas.js";
 import type { SkillMetadata } from "../context/skills.js";
 import type {
-  ExtensionCatalog,
-} from "../extensions/catalog.js";
+  PluginCatalog,
+} from "../plugins/catalog.js";
 import type { HarnessTool, ToolExecutionMode } from "../tools/types.js";
 import { INTERACTIVE_COMMANDS, type InteractiveActivePolicy } from "../interactive/commands.js";
 
@@ -29,7 +29,7 @@ export const HARNESS_RESOURCE_CATALOG_LIMITS = Object.freeze({
   maxProviders: 128,
   maxModels: 2_048,
   maxPackages: 256,
-  maxExtensions: 256,
+  maxPlugins: 256,
   maxDiagnostics: 512,
   maxToolSchemaBytes: 16 * 1024,
   maxTextBytes: 4 * 1024,
@@ -173,7 +173,7 @@ interface ProjectPackageCatalogEntry {
   resolved: ProjectPackageResolvedSource;
 }
 
-type ExtensionPackageProvenance = {
+type PluginPackageProvenance = {
   schemaVersion: 1;
   id: string;
   scope: "user" | "project";
@@ -186,7 +186,7 @@ type ExtensionPackageProvenance = {
   | { kind: "git"; source: string; revision: string }
 );
 
-interface InstalledExtensionPackage {
+interface InstalledPluginPackage {
   id: string;
   name: string;
   version?: string;
@@ -195,10 +195,10 @@ interface InstalledExtensionPackage {
   packageRoot: string;
   manifestPath: string;
   manifestModified: boolean;
-  provenance: ExtensionPackageProvenance;
+  provenance: PluginPackageProvenance;
 }
 
-export interface HarnessResourceExtension {
+export interface HarnessResourcePlugin {
   id: string;
   name: string;
   version?: string;
@@ -240,7 +240,7 @@ export interface HarnessResourceCatalog {
   themes: HarnessResourceTheme[];
   providers: HarnessResourceProvider[];
   packages: HarnessResourcePackage[];
-  extensions: HarnessResourceExtension[];
+  extensions: HarnessResourcePlugin[];
   diagnostics: HarnessResourceDiagnostic[];
   bounds: {
     truncated: boolean;
@@ -274,9 +274,9 @@ export interface HarnessResourceCatalogSources {
     argumentHint?: string;
   }[];
   runtimeDiagnostics?: readonly { extensionId: string; message: string }[];
-  extensions?: Pick<ExtensionCatalog, "list" | "bundle" | "doctor">;
-  packages?: readonly (Omit<InstalledExtensionPackage, "scope"> & {
-    scope: InstalledExtensionPackage["scope"] | "invocation";
+  extensions?: Pick<PluginCatalog, "list" | "bundle" | "doctor">;
+  packages?: readonly (Omit<InstalledPluginPackage, "scope"> & {
+    scope: InstalledPluginPackage["scope"] | "invocation";
   })[];
   projectPackages?: readonly ProjectPackageCatalogEntry[];
   packageDiagnostics?: readonly string[];
@@ -335,7 +335,7 @@ function toolSchema(tool: HarnessTool): Pick<HarnessResourceTool, "inputSchema" 
   }
 }
 
-function packageProvenance(value: Pick<InstalledExtensionPackage, "provenance">): HarnessResourcePackageProvenance {
+function packageProvenance(value: Pick<InstalledPluginPackage, "provenance">): HarnessResourcePackageProvenance {
   const common = {
     kind: value.provenance.kind,
     installedAt: value.provenance.installedAt,
@@ -368,11 +368,11 @@ export function buildHarnessResourceCatalog(sources: HarnessResourceCatalogSourc
   const extensionCatalog = sources.extensions;
   const bundle = extensionCatalog?.bundle();
   const extensions = extensionCatalog?.list() ?? [];
-  const knownExtensionIds = new Set(extensions.map((entry) => entry.id));
-  const activeTrustedExtensionIds = new Set(extensions.flatMap((entry) =>
+  const knownPluginIds = new Set(extensions.map((entry) => entry.id));
+  const activeTrustedPluginIds = new Set(extensions.flatMap((entry) =>
     entry.status === "active" && entry.trusted ? [entry.id] : []));
   const contributionAllowed = (extensionId: string): boolean =>
-    !knownExtensionIds.has(extensionId) || activeTrustedExtensionIds.has(extensionId);
+    !knownPluginIds.has(extensionId) || activeTrustedPluginIds.has(extensionId);
   const statusByPackage = new Map<string, (typeof extensions)[number]>();
   for (const entry of extensions) {
     const key = `${entry.scope}\0${entry.id}`;
@@ -559,12 +559,12 @@ export function buildHarnessResourceCatalog(sources: HarnessResourceCatalogSourc
     ...optionalProperties(entry.manifestSha256 === undefined ? undefined : { manifestSha256: entry.manifestSha256 }),
     contributions: { ...entry.contributions },
   }));
-  const selectedExtensions = takeBounded(
+  const selectedPlugins = takeBounded(
     extensionCandidates,
-    HARNESS_RESOURCE_CATALOG_LIMITS.maxExtensions,
+    HARNESS_RESOURCE_CATALOG_LIMITS.maxPlugins,
     HARNESS_RESOURCE_CATALOG_LIMITS.sectionBytes.extensions,
   );
-  omitted.extensions = selectedExtensions.omitted;
+  omitted.extensions = selectedPlugins.omitted;
 
   const diagnosticCandidates: HarnessResourceDiagnostic[] = [
     ...(extensionCatalog?.doctor().diagnostics ?? []).map((entry) => ({
@@ -613,7 +613,7 @@ export function buildHarnessResourceCatalog(sources: HarnessResourceCatalogSourc
     themes: themes.values,
     providers: providerCandidates,
     packages: packages.values,
-    extensions: selectedExtensions.values,
+    extensions: selectedPlugins.values,
     diagnostics: diagnostics.values,
     bounds: { truncated: Object.values(omitted).some((value) => value > 0), omitted },
   };
@@ -886,7 +886,7 @@ function assertHarnessResourceCatalog<Input>(value: Input): asserts value is Inp
       optionalStringValue(resolved.dependencyContentSha256, "Resource catalog resolved project package dependencyContentSha256");
     }
   }
-  const extensions = array(input.extensions, "Resource catalog extensions", HARNESS_RESOURCE_CATALOG_LIMITS.maxExtensions);
+  const extensions = array(input.extensions, "Resource catalog extensions", HARNESS_RESOURCE_CATALOG_LIMITS.maxPlugins);
   for (const value of extensions) {
     const entry = record(value, "Resource catalog extension");
     exactKeys(entry, ["id", "name", "version", "description", "hostVersionRange", "scope", "trusted", "enabled", "status", "precedence", "manifestSha256", "contributions"], "Resource catalog extension");

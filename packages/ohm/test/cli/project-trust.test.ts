@@ -13,16 +13,16 @@ import {
   discoverProjectTrustResources,
   ProjectTrustResolver,
 } from "../../src/cli/project-trust.js";
-import { loadRuntime, preactivateProjectTrustExtensions } from "../../src/cli/runtime.js";
+import { loadRuntime, preactivateProjectTrustPlugins } from "../../src/cli/runtime.js";
 import { hasTrustRequiringProjectResources } from "../../src/config/project-trust.js";
 import { TrustStore } from "../../src/config/trust.js";
 import { sharedWorkspaceSkillRoots } from "../../src/context/skill-roots.js";
 import type { JsonValue } from "../../src/core/json.js";
-import type { InlineExtension } from "../../src/extensions/direct.js";
+import type { InlinePlugin } from "../../src/plugins/direct.js";
 import type { TerminalChoice, TerminalPrompter } from "../../src/interfaces/terminal.js";
 import { sha256 } from "../../src/tools/hash.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
-import { loadTestDirectExtensions } from "../helpers/direct-extension-loader.js";
+import { loadTestDirectExtensions } from "../helpers/direct-plugin-loader.js";
 
 interface OhmTrustSwitchEvent {
   workspace: string;
@@ -102,6 +102,15 @@ test("clean projects and empty resource directories never prompt", async (contex
   assert.deepEqual(await discoverProjectTrustResources(value.workspace), []);
   assert.equal(await resolver.isTrusted(value.workspace), false);
   assert.deepEqual(terminal.prompts, []);
+});
+
+test("plugin roots require trust only when they contain a resource", async (context) => {
+  const value = await fixture(context, "ohm-project-trust-plugins-");
+  const plugins = join(value.workspace, ".ohm", "plugins");
+  await mkdir(plugins, { recursive: true });
+  assert.equal(hasTrustRequiringProjectResources(value.workspace), false);
+  await mkdir(join(plugins, "review"));
+  assert.equal(hasTrustRequiringProjectResources(value.workspace), true);
 });
 
 test("other-harness skill roots never trigger a project prompt", async (context) => {
@@ -247,6 +256,7 @@ test("foreign ancestor skill links and unreadable directories are ignored", {
 
 test("resource discovery is metadata-only and covers only ohm project resources", async (context) => {
   const value = await fixture(context, "harness-project-trust-discovery-");
+  await mkdir(join(value.workspace, ".ohm", "plugins", "canonical"), { recursive: true });
   await mkdir(join(value.workspace, ".ohm", "extensions", "demo"), { recursive: true });
   await mkdir(join(value.workspace, ".ohm", "packages", "managed"), { recursive: true });
   await mkdir(join(value.workspace, ".ohm", "skills", "local"), { recursive: true });
@@ -272,6 +282,7 @@ test("resource discovery is metadata-only and covers only ohm project resources"
     ".ohm/packages.json",
     ".ohm/packages.lock.json",
     ".ohm/SYSTEM.md",
+    ".ohm/plugins",
     ".ohm/extensions",
     ".ohm/packages",
     ".ohm/skills",
@@ -419,7 +430,7 @@ test("extension decisions precede saved policy and persist only exact workspaces
   assert.equal(await launch.isTrusted(value.workspace), true);
   assert.equal(activations, 1);
   assert.equal(await value.store.decision(value.workspace), false);
-  await (await launch.takePreactivatedExtensions(value.workspace))?.close();
+  await (await launch.takePreactivatedPlugins(value.workspace))?.close();
 
   const remembered = new ProjectTrustResolver(value.store, {
     preactivate: async (workspace) => await trustExtensionHost(
@@ -434,7 +445,7 @@ test("extension decisions precede saved policy and persist only exact workspaces
     descendants: false,
     decision: true,
   }]);
-  await (await remembered.takePreactivatedExtensions(value.workspace))?.close();
+  await (await remembered.takePreactivatedPlugins(value.workspace))?.close();
 });
 
 test("overrides and workspaces without protected resources suppress extension trust activation", async (context) => {
@@ -469,7 +480,7 @@ test("project trust events run once per target workspace and retain the launch c
   });
   for (const workspace of [value.workspace, second]) {
     assert.equal(await resolver.isTrusted(workspace), true);
-    const host = await resolver.takePreactivatedExtensions(workspace);
+    const host = await resolver.takePreactivatedPlugins(workspace);
     assert.notEqual(host, undefined);
     seen.push(...(globalThis.__ohmTrustSwitchEvents ?? []));
     globalThis.__ohmTrustSwitchEvents = [];
@@ -506,29 +517,29 @@ test("pre-trust user extensions are handed off once and project extensions appen
     const resolver = new ProjectTrustResolver(
       new TrustStore(join(agentDirectory, "trusted-workspaces.json")),
       {
-        preactivate: async (workspace) => await preactivateProjectTrustExtensions({
-          userExtensions: join(agentDirectory, "extensions"),
+        preactivate: async (workspace) => await preactivateProjectTrustPlugins({
+          userPlugins: join(agentDirectory, "plugins"),
           agentDirectory,
-        }, workspace, { extensions: true, extensionRuntime: true }),
+        }, workspace, { pluginCode: true, pluginRuntime: true }),
       },
     );
     const trusted = await resolver.isTrusted(value.workspace);
-    const preactivatedRuntimeExtensions = await resolver.takePreactivatedExtensions(value.workspace);
+    const preactivatedRuntimePlugins = await resolver.takePreactivatedPlugins(value.workspace);
     assert.equal(trusted, true);
-    assert.notEqual(preactivatedRuntimeExtensions, undefined);
-    if (preactivatedRuntimeExtensions === undefined) throw new Error("Pre-trust extension host was not retained");
+    assert.notEqual(preactivatedRuntimePlugins, undefined);
+    if (preactivatedRuntimePlugins === undefined) throw new Error("Pre-trust extension host was not retained");
     const runtime = await loadRuntime({
       workspace: value.workspace,
       credentialStore: new InMemoryCredentialStore(),
       projectTrusted: trusted,
-      extensions: true,
-      extensionRuntime: true,
+      pluginCode: true,
+      pluginRuntime: true,
       ephemeral: true,
-      preactivatedRuntimeExtensions,
+      preactivatedRuntimePlugins,
     });
     try {
       assert.equal(globalThis.__ohmTrustOwnerActivations, 1);
-      assert.deepEqual(runtime.runtimeExtensions.commands().map((entry) => entry.name), [
+      assert.deepEqual(runtime.runtimePlugins.commands().map((entry) => entry.name), [
         "project-trust-command",
         "user-trust-command",
       ]);
@@ -551,7 +562,7 @@ test("one resolver carries factory trust and preactivated hosts across runtime w
   await writeFile(join(value.workspace, ".ohm", "config.json"), "{}\n");
   await writeFile(join(second, ".ohm", "config.json"), "{}\n");
   const seen: string[] = [];
-  const extension: InlineExtension = {
+  const extension: InlinePlugin = {
     name: "runtime-switch-trust",
     factory(api) {
       api.on("project_trust", (event) => {
@@ -564,13 +575,13 @@ test("one resolver carries factory trust and preactivated hosts across runtime w
   const priorAgentDirectory = process.env.OHM_HOME;
   process.env.OHM_HOME = agentDirectory;
   const resolver = new ProjectTrustResolver(new TrustStore(join(agentDirectory, "trusted-workspaces.json")), {
-    preactivate: async (workspace) => await preactivateProjectTrustExtensions({
-      userExtensions: join(agentDirectory, "extensions"),
+    preactivate: async (workspace) => await preactivateProjectTrustPlugins({
+      userPlugins: join(agentDirectory, "plugins"),
       agentDirectory,
     }, workspace, {
-      extensions: false,
-      extensionFactories: [extension],
-      extensionRuntime: true,
+      pluginCode: false,
+      pluginFactories: [extension],
+      pluginRuntime: true,
     }),
   });
   try {
@@ -579,14 +590,14 @@ test("one resolver carries factory trust and preactivated hosts across runtime w
         workspace,
         credentialStore: new InMemoryCredentialStore(),
         ephemeral: true,
-        extensions: false,
-        extensionFactories: [extension],
-        extensionRuntime: true,
+        pluginCode: false,
+        pluginFactories: [extension],
+        pluginRuntime: true,
         projectTrustResolver: resolver,
       });
       try {
         assert.equal(runtime.trusted, true);
-        assert.deepEqual(runtime.runtimeExtensions.commands().map((entry) => entry.name), ["runtime-switch-ready"]);
+        assert.deepEqual(runtime.runtimePlugins.commands().map((entry) => entry.name), ["runtime-switch-ready"]);
       } finally {
         await runtime.close();
       }

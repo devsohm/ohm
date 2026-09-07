@@ -36,7 +36,7 @@ behind the boundary command and map the virtual workspace deliberately.
 
 Do not forward API keys, OAuth files, SSH agents, cloud metadata access, or the parent environment unless the deployment explicitly requires and protects them.
 
-The backend governs only model tool calls on an `AgentSession` configured with it. Trusted runtime extensions are JavaScript loaded into the host process. `ohm.exec` is explicit extension process authority. Neither path is routed through the tool backend automatically.
+The backend governs only model tool calls on an `AgentSession` configured with it. Trusted runtime plugins are JavaScript loaded into the host process. `ohm.exec` is explicit plugin process authority. Neither path is routed through the tool backend automatically.
 
 ## Linux container adapter
 

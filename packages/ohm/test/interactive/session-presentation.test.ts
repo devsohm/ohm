@@ -6,7 +6,7 @@ import test from "node:test";
 
 import type { EventEnvelope } from "../../src/core/events.js";
 import type { NormalizedUsage } from "../../src/core/types.js";
-import { extensionSessionManager } from "../../src/extensions/session-contract.js";
+import { pluginSessionManager } from "../../src/plugins/session-contract.js";
 import {
   bindInteractiveSessionPresentation,
   INTERACTIVE_TRANSCRIPT_SCAN_MS,
@@ -47,7 +47,7 @@ function fakeSession(
   const session = {
     sessionId: sessionManager.getSessionId(),
     nativeSessionManager: sessionManager,
-    sessionManager: extensionSessionManager(sessionManager),
+    sessionManager: pluginSessionManager(sessionManager),
     onEvent(listener: (event: EventEnvelope) => void) {
       envelopeListeners.add(listener);
       return () => envelopeListeners.delete(listener);
@@ -72,7 +72,7 @@ function fakeSession(
 }
 
 function legacyPresentationSession(storage: SessionManager) {
-  const projected = extensionSessionManager(storage);
+  const projected = pluginSessionManager(storage);
   return {
     sessionManager: {
       getEntry: (id: string) => projected.getEntry(id),
@@ -658,7 +658,7 @@ test("public session facades preserve canonical tool usage and missing cache tel
   });
   const session = {
     sessionId: storage.getSessionId(),
-    sessionManager: extensionSessionManager(storage),
+    sessionManager: pluginSessionManager(storage),
   };
   Object.defineProperty(storage, "getBranch", {
     value: () => { throw new Error("facade usage must not project the branch"); },

@@ -22,13 +22,13 @@ The repository has four runtime packages:
 - `@ohm/terminal` owns raw-terminal input, cell-aware rendering, editing, overlays, and terminal capabilities. It has no agent-runtime dependency.
 - `ohm` combines the lower packages with product policy: CLI startup,
   `AgentSession`, the product provider registry and catalog, credential
-  selection, extensions, tools, sessions, RPC, and TUI presentation.
+  selection, plugins, tools, sessions, RPC, and TUI presentation.
 
 `@ohm/models` and `@ohm/terminal` remain usable on their own. The `ohm` package is the product integration layer.
 
 The standalone model package and the product integration expose the same model
 and streaming contracts, but they have different host responsibilities. The
-product adapters also bind the credential broker, extension wire hooks,
+product adapters also bind the credential broker, plugin wire hooks,
 provider-specific lifecycle, and product diagnostics. Shared request semantics
 are covered in both layers; a change to an overlapping protocol must update both
 contract suites.
@@ -36,7 +36,7 @@ contract suites.
 ## One execution path
 
 `AgentSession` owns product policy. It selects settings, providers, tools,
-extensions, and storage. It does not contain a second agent loop.
+plugins, and storage. It does not contain a second agent loop.
 
 The product bridge in `ohm` converts `ToolCoordinator` to the kernel
 `ToolExecutionPort`. It then delegates each run to the one
@@ -49,7 +49,7 @@ validates transformed input again, checks resource claims, and selects the
 local or external execution path. Its lifecycle observers connect tool
 execution to the V4 operation journal and public events.
 
-User shell shortcuts and extension process APIs are separate operator
+User shell shortcuts and plugin process APIs are separate operator
 surfaces. They do not bypass the model tool coordinator because they are not
 model tool calls. They still use the process runner, bounds, cancellation, and
 their documented session-event policy.
@@ -66,7 +66,8 @@ run follows this path:
 2. The session claims any accepted steering or follow-up item. It keeps later
    work in the durable queue.
 3. `SessionConversation` reconstructs the selected `SessionManager` branch.
-   The manager can use a V4 JSONL journal or an in-memory V4 state.
+   The manager uses one V4 reducer, with SQLite for saved sessions and memory
+   for ephemeral sessions. Storage never introduces a separate agent runtime.
 4. The product bridge sends the request and one tool execution port to the
    kernel runtime engine.
 5. The engine projects instructions, messages, tools, provider settings, and
@@ -118,9 +119,9 @@ generation owns:
 2. project trust;
 3. network and proxy configuration;
 4. provider adapters and credential bindings;
-5. installed and loose extensions;
+5. installed and loose plugins;
 6. skills, prompt templates, themes, and instruction roots;
-7. tool registrations and extension listeners.
+7. tool registrations and plugin listeners.
 
 `/refresh` is a transaction:
 
@@ -134,9 +135,16 @@ generation owns:
 8. bind the candidate and send `session_start`.
 
 Failure before the swap closes the candidate, restores the old model catalog
-and extension bindings, and leaves the original session active. The
+and plugin bindings, and leaves the original session active. The
 `SessionManager`, session ID, active branch, and V4 history remain the same
 across a resource refresh.
+
+The configured runtime owns the session store. Retiring or rejecting one of
+its session objects leaves that store open; closing the runtime releases it.
+Calling `refresh()` on a configured session delegates to this same runtime
+transaction. Afterward, callers use the owner's current `session` reference.
+Direct SDK sessions own their store and resource cleanup and refresh their
+injected resource loader in place.
 
 Session replacement is different. New, resume, fork, and clone operations can adopt another manager or branch and then rebind each front end to the new `AgentSession`.
 
@@ -148,13 +156,13 @@ The runtime checks tool-call/result ordering across history. Invalid historical 
 
 Provider continuation state is replayed only when its provider, protocol, model, and tool-definition fingerprint remain compatible. Hidden reasoning and opaque provider blocks are never exposed as ordinary assistant text.
 
-Instructions, skills, prompt expansion, image normalization, extension reducers, and input bounds all run before the provider request.
+Instructions, skills, prompt expansion, image normalization, plugin reducers, and input bounds all run before the provider request.
 
 ## Compaction
 
 Compaction shortens provider context without deleting session history. The planner can bound older tool output, then chooses a retained boundary that does not split a tool call from its result.
 
-The in-memory compaction plan contains exact source message IDs. A generated or extension-provided summary must match those IDs and pass shape and token-budget checks before it can commit.
+The in-memory compaction plan contains exact source message IDs. A generated or plugin-provided summary must match those IDs and pass shape and token-budget checks before it can commit.
 
 The V4 compaction node stores:
 
@@ -181,9 +189,10 @@ See [Context compaction](compaction.md) and [Session JSONL format](session-jsonl
 
 ## Storage and recovery
 
-Each durable product session is one strict V4 JSONL journal. The first record
-is an exact header. Every later record is an ordered commit with a non-empty
-change set. The reducer reconstructs:
+Each saved product session is a strict V4 journal in its own SQLite database.
+Unsaved sessions use memory. JSONL is the legacy and transfer format, not a
+second selectable persistence backend. Every commit has a non-empty
+change set; the host-owned reducer reconstructs:
 
 - immutable conversation nodes and the selected `main` head;
 - session names, node labels, and model, thinking, and tool selections;
@@ -191,8 +200,8 @@ change set. The reducer reconstructs:
 - steering, follow-up, and next-run queues;
 - prepared, dispatched, in-doubt, and settled tool effects.
 
-Only LF-terminated records are committed. A trailing unterminated fragment is
-ignored and truncated by a writable open. Invalid committed UTF-8, JSON,
+When reading legacy JSONL, only LF-terminated records are committed. A trailing
+unterminated fragment is ignored without changing the source. Invalid committed UTF-8, JSON,
 schema, sequence, ancestry, ownership, operation, queue, or effect
 transitions fail with a bounded diagnostic.
 
@@ -200,13 +209,37 @@ The writer validates a transition, appends and synchronizes it, then publishes
 the reduced state. A product writer lease rejects concurrent writers for the
 same file. Read-only snapshots do not take the writer lease.
 
+SQLite uses transactions, WAL and full synchronization. The manager validates
+records and faults after an uncertain append until reopened. Only a failed
+candidate session may be removed during replacement cleanup. Existing JSONL
+files are not migrated in the background: an explicit resume creates a
+validated SQLite copy and preserves the source. Read-only inspection never
+creates a database. See [session contracts](sessions.md) for import and ownership.
+
+The transcript keeps a bounded live viewport and a bounded history page, with
+journal-backed navigation/search. Owned saved sessions build connection-local
+SQL metadata from already-validated commits, with incremental catch-up and one
+reusable lineage for older navigation. The reducer uses explicit replace-only
+record collections: saved owners back validated payloads with connection-private,
+file-backed temporary tables and fixed decoded caches; memory sessions and
+detached snapshots use ordinary Maps. Cache misses never re-read unvalidated
+main-journal rows. Public full-state snapshots still return detached Maps, and
+detached snapshots retain no hidden database connection.
+
+Decoded caches total 8 MiB of serialized weight and 128 records; SQLite's
+temporary page cache targets 2 MiB. These are not a total-process RAM ceiling.
+Identity metadata, full requested outputs, initial index construction and full
+journal validation still scale with history. Temporary payload backing adds
+disk use and replay work; SQLite does not guarantee smaller durable files or
+faster startup. Private backing failures fault its owner until reopen.
+
 The current engine permits one open operation per session. Tool recovery is
 policy-driven: repeat verified repeatable work, reconcile when a tool provides
 that contract, and require an explicit decision for never-repeat effects.
 
-An external worker or delegated agent launched by an extension is not a child
+An external worker or delegated agent launched by a plugin is not a child
 of the current `AgentSession`. The parent journal records the ordinary tool
-call and result; the extension owns any external session, profile, scheduling,
+call and result; the plugin owns any external session, profile, scheduling,
 event parsing, and retained state. Managed-process ownership still guarantees
 bounded cancellation and process-tree cleanup on refresh or shutdown.
 
@@ -253,23 +286,23 @@ See [Install, update, and uninstall](install.md).
 
 The process runner owns cancellation, timeouts, process-tree termination, ordered output, byte limits, artifacts, and redaction. It starts commands directly unless a tool explicitly invokes the configured shell.
 
-An `ExternalToolBackend` can route selected model tools through a fixed executable. This routing does not provide isolation by itself. The executable must create the container, virtual machine, operating-system sandbox, or remote boundary. Trusted extension JavaScript and `ohm.exec` still have host-process authority unless you isolate them separately.
+An `ExternalToolBackend` can route selected model tools through a fixed executable. This routing does not provide isolation by itself. The executable must create the container, virtual machine, operating-system sandbox, or remote boundary. Trusted plugin JavaScript and `ohm.exec` still have host-process authority unless you isolate them separately.
 
 See [External execution backends](execution-backends.md).
 
-## Extensions and packages
+## Plugins and packages
 
-Runtime extensions can register tools, commands, shortcuts, flags, providers,
+Runtime plugins can register tools, commands, shortcuts, flags, providers,
 event handlers, UI renderers, bounded ordered TUI slots, generation-owned named
-rich-TUI routes, managed processes, and durable extension state. Extension
+rich-TUI routes, managed processes, and durable plugin state. Plugin
 tools can declare resource claims and recovery policy. Protocol bridges and
 delegated-agent workflows are built entirely from these generic surfaces: the
-extension owns protocol semantics, profiles, orchestration, limits, and
+plugin owns protocol semantics, profiles, orchestration, limits, and
 presentation, while ordinary tool validation, authorization, resource
 arbitration, and generation process cleanup remain harness-owned. Core has no
 MCP registry or subagent scheduler, handles, events, journals, or UI semantics.
 
-Installed packages can contribute extension factories, skills, prompts, and themes. Normal application loading trust-gates project packages. The root-exported `discoverAndLoadExtensions()` compatibility helper is only for callers that have already approved project-local executable code; it does not establish trust. Locked project declarations resolve exact versions, revisions, and digests before startup reconciliation.
+Installed packages can contribute plugin factories, skills, prompts, and themes. Normal application loading trust-gates project packages. The root-exported `discoverAndLoadPlugins()` compatibility helper is only for callers that have already approved project-local executable code; it does not establish trust. Locked project declarations resolve exact versions, revisions, and digests before startup reconciliation.
 
 ## TUI ownership
 
@@ -299,7 +332,7 @@ See [Run modes](modes.md), [HTTP and SSE service](serve.md), and [RPC](rpc.md).
 ## Verification
 
 Tests cover the runtime engine, provider fixtures, strict V4 replay and
-recovery, extension refresh, package transactions, TUI components, PTY
+recovery, plugin refresh, package transactions, TUI components, PTY
 behavior, public type surfaces, built output, and packed artifacts.
 
 Run the repository gate from the root:

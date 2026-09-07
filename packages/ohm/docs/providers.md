@@ -52,7 +52,7 @@ Environment credentials are read when needed. They are not copied into the crede
 
 OpenCode Go is a separate provider and stored credential identity. A stored OpenCode Zen key is never reused for Go. For the official shared environment-key workflow only, Go checks `OPENCODE_GO_API_KEY` first and then `OPENCODE_API_KEY`; Zen continues to use `OPENCODE_API_KEY`.
 
-A model brand is not an authentication identity. Kimi and Qwen routes selected under OpenCode Zen or OpenCode Go use that provider's credential. The separate `kimi-code` provider accepts its device account login or the membership API key created in the Kimi Code console. Qwen plans use their provider-issued API keys through a configured provider or extension; current Qwen browser OAuth is not a built-in login path.
+A model brand is not an authentication identity. Kimi and Qwen routes selected under OpenCode Zen or OpenCode Go use that provider's credential. The separate `kimi-code` provider accepts its device account login or the membership API key created in the Kimi Code console. Qwen plans use their provider-issued API keys through a configured provider or plugin; current Qwen browser OAuth is not a built-in login path.
 
 ## OAuth behavior
 
@@ -72,7 +72,7 @@ ohm provides native account login for five client-registration flows and one cli
 
 The five client-registration flows have bundled public client IDs. `OHM_OPENAI_CODEX_OAUTH_CLIENT_ID`, `OHM_ANTHROPIC_OAUTH_CLIENT_ID`, `OHM_GITHUB_COPILOT_OAUTH_CLIENT_ID`, `OHM_KIMI_CODE_OAUTH_CLIENT_ID`, and `OHM_XAI_OAUTH_CLIENT_ID` can replace the corresponding default for a deployment. Overrides must contain 1 through 512 visible ASCII characters with no surrounding whitespace; an invalid override stops setup. API-key, environment-token, cloud, and stored-credential paths remain available alongside account login.
 
-Browser flows validate their callback state. Device flows bound polling, cancellation, response size, and expiry. Refreshable credentials are refreshed before expiry, and rotating refresh tokens replace the previous stored token atomically. Cross-process refresh is serialized; a valid lock whose owning process has exited is reclaimed immediately, while a live owner is never displaced merely because the lock is old. Failed refreshes do not erase the last credential. OAuth credentials and API keys are never written to model catalogs, session JSONL, ordinary diagnostics, or tool output.
+Browser flows validate their callback state. Device flows bound polling, cancellation, response size, and expiry. Refreshable credentials are refreshed before expiry, and rotating refresh tokens replace the previous stored token atomically. Cross-process refresh is serialized; a valid lock whose owning process has exited is reclaimed immediately, while a live owner is never displaced merely because the lock is old. Failed refreshes do not erase the last credential. OAuth credentials and API keys are never written to model catalogs, session journals, ordinary diagnostics, or tool output.
 
 Direct OAuth protocols and account eligibility can change. Use a provider's documented API-key or token method when you need its public API contract.
 
@@ -94,7 +94,7 @@ Ollama discovers models from its configured local endpoint without requiring a k
 
 As observed on August 26, 2026, OpenCode Zen has 64 reviewed routes and OpenCode Go has 23. Their authenticated model listings filter those routes to models available to the account. IDs reported by an endpoint without reviewed protocol metadata, and deprecated IDs absent from the active catalog, are not guessed into the picker. Zen routes use Responses, Messages, Gemini Generate Content, and Chat Completions according to each model's provider-native contract. Go routes use Responses for GPT-5.6 Luna, Grok 4.6, and Muse Spark 1.2 Contributor; Messages for MiniMax and Qwen; and Chat Completions for DeepSeek, GLM, Hy, Kimi, LongCat, and MiMo.
 
-Moonshot's Kimi Chat boundary requires every property schema to carry an explicit JSON Schema `type`. Before a direct Moonshot or OpenCode Kimi request is serialized, ohm deep-copies the tool schemas and fills only missing wire types from their existing enum, constant, object, array, string, or numeric constraints. The registered schema is never mutated, and non-Kimi OpenCode routes are unchanged. This keeps standards-valid enum-only schemas from extensions and external tools compatible with Kimi's stricter wire validator.
+Moonshot's Kimi Chat boundary requires every property schema to carry an explicit JSON Schema `type`. Before a direct Moonshot or OpenCode Kimi request is serialized, ohm deep-copies the tool schemas and fills only missing wire types from their existing enum, constant, object, array, string, or numeric constraints. The registered schema is never mutated, and non-Kimi OpenCode routes are unchanged. This keeps standards-valid enum-only schemas from plugins and external tools compatible with Kimi's stricter wire validator.
 
 Cost estimates follow reviewed provider documentation and the machine-readable models.dev snapshot used to maintain the catalog. When those sources conflict, the conflict is reviewed instead of silently choosing one. OpenCode Go currently publishes weekday UTC time-window pricing for DeepSeek models, which the fixed-price catalog schema cannot represent truthfully. The new DeepSeek V4 Flash Vision Exp route therefore has no maintained price, and the existing Flash and Pro fixed estimates are retained as legacy estimates rather than presented as the current schedule.
 
@@ -115,7 +115,7 @@ All built-in adapters normalize text, public reasoning, tool calls, tool results
 Only provider-authorized public reasoning is rendered. Opaque continuation data remains provider state. A provider or model change discards incompatible continuation state.
 
 Request retries are bounded. A request is never replayed after semantic output has started. Responses transports may retry one HTTP body disconnect before any text, refusal, reasoning, tool, or unknown semantic event; transport-only metadata and valid empty lifecycle placeholders do not close that retry gate, while malformed, opaque, or unknown state does. Provider-reported cache reads and writes are normalized when available; missing telemetry remains unknown rather than being estimated as a hit.
-After a metered request, the built-in TUI footer shows the latest-request `cache hit N.N%` value beside non-zero aggregate cache-read (`R`) and cache-write (`W`) counters when space permits. A reported cold read is `cache hit 0.0%`; the chip is omitted when the newest completed non-summary model request lacks cache-read telemetry or an exact prompt denominator. The same aggregate counters remain available through session statistics, RPC, SDK, and footer extension data.
+After a metered request, the built-in TUI footer shows the latest-request `cache hit N.N%` value beside non-zero aggregate cache-read (`R`) and cache-write (`W`) counters when space permits. A reported cold read is `cache hit 0.0%`; the chip is omitted when the newest completed non-summary model request lacks cache-read telemetry or an exact prompt denominator. The same aggregate counters remain available through session statistics, RPC, SDK, and footer plugin data.
 
 | Provider ID | Cache-read telemetry | Cache-write telemetry |
 | --- | --- | --- |
@@ -134,7 +134,7 @@ After a metered request, the built-in TUI footer shows the latest-request `cache
 
 ## Custom providers
 
-The 12 entries above are the default product set, not a limit on extensions. Trusted extensions and SDK hosts can register a complete `@ohm/models` provider or compose a runtime provider configuration. Low-level generic protocol transports remain public so an extension can add another service without changing the built-in picker.
+The 12 entries above are the default product set, not a limit on plugins. Trusted plugins and SDK hosts can register a complete `@ohm/models` provider or compose a runtime provider configuration. Low-level generic protocol transports remain public so a plugin can add another service without changing the built-in picker.
 
 A custom provider must define:
 
@@ -144,7 +144,7 @@ A custom provider must define:
 - its authentication method;
 - normalized streaming and cancellation behavior.
 
-Custom providers are generation-scoped and removable. They do not become built-ins and are not added to the default environment credential map. See [Provider authoring](provider-authoring.md) and [Extension API](extension-api.md).
+Custom providers are generation-scoped and removable. They do not become built-ins and are not added to the default environment credential map. See [Provider authoring](provider-authoring.md) and [Plugin API](plugin-api.md).
 
 ## Troubleshooting
 

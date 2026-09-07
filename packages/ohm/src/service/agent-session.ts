@@ -61,7 +61,7 @@ import {
   cloneQueuedRunMessage,
   queuedRunDeliveryId,
   queuedRunDeliveryMessageId,
-  type AgentExtensionReducers,
+  type AgentPluginReducers,
   type AgentLifecycleObserver,
   type AgentRunRequest,
   type AgentRunResult,
@@ -117,7 +117,7 @@ import {
   DEFAULT_TRUSTED_RESOURCE_FILE_BYTES,
   readTrustedTextFileSync,
 } from "../core/resource-file.js";
-import type { ResourceExtensionPaths, ResourceLoader } from "../core/resource-loader.js";
+import type { ResourcePluginPaths, ResourceLoader } from "../core/resource-loader.js";
 import {
   beginProviderAttempt,
   DEFAULT_RETRY_POLICY,
@@ -162,10 +162,10 @@ import type {
   PortablePresentationEvent,
 } from "../interfaces/portable-presentation.js";
 import type {
-  ExtensionWireServiceDescriptor,
-  ExtensionWireServiceRequest,
-  ExtensionWireServiceResponse,
-} from "../extensions/wire-services.js";
+  PluginWireServiceDescriptor,
+  PluginWireServiceRequest,
+  PluginWireServiceResponse,
+} from "../plugins/wire-services.js";
 import {
   resolveEffectiveContextBudget,
   type ContextBudgetOptions,
@@ -208,31 +208,31 @@ import {
 import type {
   RuntimeCatalogOwner,
   RuntimeDirectActionsHandler,
-  RuntimeDirectExtensionEvent,
+  RuntimeDirectPluginEvent,
   RuntimeDirectProviderConfig,
   RuntimeDirectProviderOwner,
   RuntimeDirectReplacementContext,
   RuntimeAssistantStreamSnapshot,
-  RuntimeExtensionHost,
+  RuntimePluginHost,
   RuntimeSessionBeforeCompactEvent,
   RuntimeSessionBeforeTreeEvent,
   RuntimeToolCatalogEntry,
-} from "../extensions/runtime.js";
-import { dispatchAgentSessionMessageUpdate } from "../extensions/runtime.js";
+} from "../plugins/runtime.js";
+import { directToolRendererBinding, dispatchAgentSessionMessageUpdate } from "../plugins/runtime.js";
 import type {
   AgentMessage,
   AgentEndEvent,
   AgentSettledEvent,
   AgentStartEvent,
   CompactionResult,
-  ExtensionCommandContextActions,
-  ExtensionError,
-  ExtensionEventMap,
-  ExtensionMode,
-  ExtensionSessionDelivery,
+  PluginCommandContextActions,
+  PluginError,
+  PluginEventMap,
+  PluginMode,
+  PluginSessionDelivery,
   ReplacedSessionContext,
-  ExtensionUIContext,
-  LoadExtensionsResult,
+  PluginUIContext,
+  LoadPluginsResult,
   MessageEndEvent,
   MessageStartEvent,
   MessageUpdateEvent,
@@ -247,20 +247,20 @@ import type {
   ToolInfo,
   TurnEndEvent,
   TurnStartEvent,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 import {
-  ensureExtensionRuntimeHost,
-  ExtensionRunner,
-  getExtensionRuntimeHost,
-  projectLoadedExtensionHost,
-} from "../extensions/compat.js";
+  ensurePluginRuntimeHost,
+  PluginRunner,
+  getPluginRuntimeHost,
+  projectLoadedPluginHost,
+} from "../plugins/compat.js";
 import {
-  extensionModel,
-  extensionModelRegistry,
+  pluginModel,
+  pluginModelRegistry,
   protocolFromPublicApi,
   publicApiFromProtocol,
   streamFunctionAdapterEvents,
-} from "../extensions/model-boundary.js";
+} from "../plugins/model-boundary.js";
 import {
   canonicalContent,
   canonicalInputContent,
@@ -270,17 +270,19 @@ import {
   extensionAssistantEventFromMessage,
   extensionAssistantKernelStreamMessage,
   extensionCanonicalMessages,
+  extensionContextMessages,
   extensionInputContent,
   extensionMessage,
   extensionMessages,
   extensionSessionEntriesForCanonicalEntry,
-  extensionSessionManager,
+  pluginSessionManager,
   extensionToolResultBlock,
   extensionUsage,
-  type ExtensionSessionManager,
-  type SessionEntry as ExtensionSessionEntry,
-} from "../extensions/session-contract.js";
-import { SessionManager } from "../storage/index.js";
+  type ContextMessageProjection,
+  type PluginSessionManager,
+  type SessionEntry as PluginSessionEntry,
+} from "../plugins/session-contract.js";
+import { buildContextEntries, sessionEntryToContextMessages, SessionManager } from "../storage/index.js";
 import {
   renderSessionHtml,
   serializeSessionRecords,
@@ -293,7 +295,7 @@ import type {
   BranchSummaryMessage,
   CompactionSummaryMessage,
   CustomMessage,
-  ExtensionSessionProvenance,
+  PluginSessionProvenance,
   PersistedSessionMessage,
   SessionEntry,
   SessionHeader,
@@ -337,18 +339,16 @@ import { toolAuthorizationContext } from "../tools/approval.js";
 import { pruneToolOutputFilesBestEffort } from "../tools/output-accumulator.js";
 import {
   createHarnessToolDefinition,
+  createHarnessToolFromDefinition,
   createToolDefinitionFromAgentTool,
   wrapToolDefinition,
   type AgentTool,
 } from "../tools/direct-tool.js";
+import { getDirectToolOrigin } from "../tools/direct-tool-origin.js";
 import {
-  closeAgentSessionForReplacement,
+  clearAgentSessionRecoveryFinalizers,
   deferAgentSessionSelection,
-  disposeAgentSessionOwner,
   enqueueAgentSessionRecoveryFinalizer,
-  isAgentSessionSharedStoreReplacement,
-  isAgentSessionReplacementClose,
-  isAgentSessionStorePreserved,
   runAgentSessionRecoveryFinalizer,
 } from "./agent-session-owner.js";
 import { ToolAuthorizationQueue } from "./tool-authorization-queue.js";
@@ -406,7 +406,7 @@ const RECOVERY_ARTIFACT_VALUE = Type.Object({
   mediaType: Type.Unknown(),
   bytes: Type.Unknown(),
 });
-const EXTENSION_SESSION_PROVENANCE_VALUE = Type.Object({
+const PLUGIN_SESSION_PROVENANCE_VALUE = Type.Object({
   schemaVersion: Type.Literal(1),
   extensionId: Type.String(),
   sourceSha256: Type.String(),
@@ -415,14 +415,14 @@ const EXTENSION_SESSION_PROVENANCE_VALUE = Type.Object({
   manifestSha256: Type.Optional(Type.String()),
 });
 const CANONICAL_CUSTOM_PROVENANCE_VALUE = Type.Object({
-  provenance: Type.Optional(EXTENSION_SESSION_PROVENANCE_VALUE),
+  provenance: Type.Optional(PLUGIN_SESSION_PROVENANCE_VALUE),
 }, { additionalProperties: true });
 const CANONICAL_CUSTOM_VALUE = Type.Object({
   customType: Type.String(),
   display: Type.Boolean(),
   details: Type.Optional(Type.Unknown()),
   timestamp: Type.Number(),
-  provenance: Type.Optional(EXTENSION_SESSION_PROVENANCE_VALUE),
+  provenance: Type.Optional(PLUGIN_SESSION_PROVENANCE_VALUE),
 }, { additionalProperties: false });
 const QUEUED_RUN_MESSAGE_VALUE = Type.Object({
   mode: Type.Union([Type.Literal("steer"), Type.Literal("follow_up")]),
@@ -472,7 +472,7 @@ const RECOVERY_RESOLUTION_VALUE = Type.Object({
 }, { additionalProperties: false });
 
 type RecoveryContentBlockCandidate = Static<typeof RECOVERY_CONTENT_BLOCK_VALUE>;
-type DirectDispatchEvent = RuntimeDirectExtensionEvent & keyof ExtensionEventMap;
+type DirectDispatchEvent = RuntimeDirectPluginEvent & keyof PluginEventMap;
 type DirectDispatchPayload<K extends DirectDispatchEvent> =
   K extends "agent_end" ? { messages: CanonicalMessage[] }
     : K extends "turn_end" ? {
@@ -493,9 +493,9 @@ type DirectDispatchPayload<K extends DirectDispatchEvent> =
               summaryEntry?: Extract<SessionEntry, { type: "branch_summary" }>;
               fromExtension?: boolean;
             }
-            : Omit<ExtensionEventMap[K], "type">;
+            : Omit<PluginEventMap[K], "type">;
 
-interface DirectExtensionDispatch {
+interface DirectPluginDispatch {
   <K extends DirectDispatchEvent>(
     event: K,
     value: DirectDispatchPayload<K>,
@@ -503,14 +503,14 @@ interface DirectExtensionDispatch {
   ): Promise<void>;
 }
 
-async function dispatchDirectExtensionEvent<K extends DirectDispatchEvent>(
-  host: RuntimeExtensionHost,
+async function dispatchDirectPluginEvent<K extends DirectDispatchEvent>(
+  host: RuntimePluginHost,
   event: K,
   value: DirectDispatchPayload<K>,
   signal?: AbortSignal,
 ): Promise<void> {
-  // SAFETY: RuntimeExtensionHost owns this compatibility boundary and projects these public event payloads by key.
-  const dispatch = host.dispatch.bind(host) as DirectExtensionDispatch;
+  // SAFETY: RuntimePluginHost owns this compatibility boundary and projects these public event payloads by key.
+  const dispatch = host.dispatch.bind(host) as DirectPluginDispatch;
   await dispatch(event, value, signal);
 }
 
@@ -943,15 +943,20 @@ export interface AgentSessionModelMutationOptions {
   persist?: boolean;
 }
 
+export interface AgentSessionModelCycleOptions extends AgentSessionModelMutationOptions {
+  /** Invocation-local preferences, filtered through modelScope and available credentials. */
+  models?: readonly { selector: string; thinkingLevel?: ThinkingLevel }[];
+}
+
 export interface AgentSessionOptions {
   sessionManager: SessionManager;
   providers: ProviderRegistry;
   modelRegistry?: ModelRegistry;
   resourceLoader?: ResourceLoader;
   /** Public loader result used to construct this session's extension runner. */
-  extensionsResult?: LoadExtensionsResult;
-  /** @deprecated Pass extensionsResult, or let resourceLoader provide it. */
-  extensionRunner?: RuntimeExtensionHost;
+  pluginsResult?: LoadPluginsResult;
+  /** @deprecated Pass pluginsResult, or let resourceLoader provide it. */
+  pluginRunner?: RuntimePluginHost;
   providerWireLifecycle?: ProviderWireLifecycleHost;
   /** Optional bounded operational observer supplied by the owning host. */
   observability?: RuntimeObservability;
@@ -973,7 +978,7 @@ export interface AgentSessionOptions {
   /** Initial SDK/host tool policy, including tools registered by session_start. */
   initialToolSelection?: {
     names: readonly string[];
-    activateExtensionToolsOnBind?: boolean;
+    activatePluginToolsOnBind?: boolean;
     excludedNames?: readonly string[];
   };
   toolBackend?: ToolExecutionBackend;
@@ -1001,13 +1006,28 @@ export interface AgentSessionOptions {
   }) => Promise<void>;
 }
 
-export interface ExtensionBindings {
+export interface AgentSessionRefreshOptions {
+  validateSettings?: (settings: Readonly<Settings>) => void | Promise<void>;
+  beforeSessionStart?: () => void | Promise<void>;
+  signal?: AbortSignal;
+}
+
+/** Resource lifetime supplied by the host composing this session. */
+export interface AgentSessionOwnership {
+  /** Defaults to session ownership. A host-owned store survives session replacement. */
+  sessionStore?: "session" | "host";
+  dispose?: () => void | Promise<void>;
+  /** Configured hosts refresh their entire generation through this owner. */
+  refresh?: (options: AgentSessionRefreshOptions) => Promise<void>;
+}
+
+export interface PluginBindings {
   abortHandler?: () => void;
-  commandContextActions?: ExtensionCommandContextActions;
-  mode?: ExtensionMode;
-  onError?: (error: ExtensionError) => void;
+  commandContextActions?: PluginCommandContextActions;
+  mode?: PluginMode;
+  onError?: (error: PluginError) => void;
   shutdownHandler?: () => void;
-  uiContext?: ExtensionUIContext;
+  uiContext?: PluginUIContext;
 }
 
 export type AgentSessionInputImage = ImageBlock | ImageContent;
@@ -1492,7 +1512,7 @@ export type AgentSessionEvent =
   | { type: "summarization_retry_finished" }
   | AgentSessionBashUpdateEvent
   | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
-  | { type: "entry_appended"; entry: ExtensionSessionEntry }
+  | { type: "entry_appended"; entry: PluginSessionEntry }
   | { type: "session_info_changed"; name: string | undefined }
   | { type: "thinking_level_changed"; level: ThinkingLevelSelectEvent["level"] };
 
@@ -1526,7 +1546,7 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void | Pro
 /** Envelope listener retained for application owners that need durable sequence metadata. */
 export type AgentSessionEnvelopeListener = (event: EventEnvelope) => void | Promise<void>;
 
-interface ExtensionTurnState {
+interface PluginTurnState {
   threadId: string;
   runId: string;
   branch: string;
@@ -1601,7 +1621,7 @@ interface RetryLifecycleState {
   cancelled: boolean;
 }
 
-type DirectProviderRegistration = ReturnType<RuntimeExtensionHost["directProviderRegistrations"]>[number];
+type DirectProviderRegistration = ReturnType<RuntimePluginHost["directProviderRegistrations"]>[number];
 
 interface DirectProviderRegistrationBinding {
   registration: DirectProviderRegistration;
@@ -1619,28 +1639,29 @@ interface DirectProviderRegistrationStack {
 }
 
 interface DirectProviderGenerationBinding {
-  host: RuntimeExtensionHost;
+  host: RuntimePluginHost;
   registrations: Map<string, DirectProviderRegistrationStack>;
 }
 
 type CanonicalCustomWithProvenance = NonNullable<CanonicalMessage["custom"]> & {
-  provenance?: ExtensionSessionProvenance;
+  provenance?: PluginSessionProvenance;
 };
 
 function customMetadataProvenance(
   custom: CanonicalMessage["custom"] | undefined,
-): ExtensionSessionProvenance | undefined {
+): PluginSessionProvenance | undefined {
   return Value.Check(CANONICAL_CUSTOM_PROVENANCE_VALUE, custom)
     ? custom.provenance
     : undefined;
 }
 
-function customMessageProvenance(message: CanonicalMessage): ExtensionSessionProvenance | undefined {
+function customMessageProvenance(message: CanonicalMessage): PluginSessionProvenance | undefined {
   return customMetadataProvenance(message.custom);
 }
 
 function canonicalContextMessage(
   value: PersistedSessionMessage | BranchSummaryMessage | CompactionSummaryMessage | CustomMessage,
+  sourceId?: string,
 ): CanonicalMessage | undefined {
   if (
     value.role === "system" ||
@@ -1653,7 +1674,7 @@ function canonicalContextMessage(
   }
   if (value.role === "compactionSummary") {
     return {
-      id: createId("msg"),
+      id: sourceId ?? createId("msg"),
       role: "user",
       content: [{ type: "text", text: `[Compacted session history]\n${value.summary}` }],
       createdAt: new Date(value.timestamp).toISOString(),
@@ -1663,7 +1684,7 @@ function canonicalContextMessage(
   }
   if (value.role === "branchSummary") {
     return {
-      id: createId("msg"),
+      id: sourceId ?? createId("msg"),
       role: "user",
       content: [{ type: "text", text: `[Summary of the abandoned branch]\n${value.summary}` }],
       createdAt: new Date(value.timestamp).toISOString(),
@@ -1681,7 +1702,7 @@ function canonicalContextMessage(
       timestamp: value.timestamp,
     };
     return {
-      id: createId("msg"),
+      id: sourceId ?? createId("msg"),
       role: "user",
       content,
       createdAt: new Date(value.timestamp).toISOString(),
@@ -1690,7 +1711,7 @@ function canonicalContextMessage(
   }
   if (value.role === "bashExecution" && value.excludeFromContext !== true) {
     return {
-      id: createId("msg"),
+      id: sourceId ?? createId("msg"),
       role: "user",
       content: [{
         type: "text",
@@ -1700,6 +1721,13 @@ function canonicalContextMessage(
     };
   }
   return undefined;
+}
+
+function canonicalContextEntries(entries: readonly SessionEntry[]): CanonicalMessage[] {
+  return entries.flatMap((entry) => sessionEntryToContextMessages(entry).flatMap((message) => {
+    const canonical = canonicalContextMessage(message, `context_${entry.id}`);
+    return canonical === undefined ? [] : [canonical];
+  }));
 }
 
 type PersistedAssistantMessage = CanonicalMessage & {
@@ -1726,10 +1754,9 @@ function sessionConversationContext(
   projection: ProviderProjectionOptions,
 ): ConversationContext {
   const branch = session.getBranch();
-  const sessionMessages = session.buildSessionContext().messages;
-  const messages = sessionMessages
-    .map(canonicalContextMessage)
-    .filter((message): message is CanonicalMessage => message !== undefined);
+  const contextEntries = buildContextEntries(branch);
+  const sessionMessages = contextEntries.flatMap(sessionEntryToContextMessages);
+  const messages = canonicalContextEntries(contextEntries);
   const projected = projectMessagesForProvider(messages, provider, projection);
   const latestCompactionIndex = branch.findLastIndex((entry) => entry.type === "compaction");
   const usageSource = branch.slice(latestCompactionIndex + 1).findLast((entry): entry is
@@ -2379,8 +2406,8 @@ function structurallySafePublicToolResultMessage(message: ToolResultMessage): To
 }
 
 function structurallySafePublicProvenance(
-  provenance: ExtensionSessionProvenance,
-): ExtensionSessionProvenance {
+  provenance: PluginSessionProvenance,
+): PluginSessionProvenance {
   return {
     schemaVersion: provenance.schemaVersion,
     extensionId: provenance.extensionId,
@@ -2418,7 +2445,7 @@ function structurallySafePublicMessage(message: AgentMessage): AgentMessage {
       const provenance = Value.Check(CANONICAL_CUSTOM_PROVENANCE_VALUE, message)
         ? message.provenance
         : undefined;
-      const selected: typeof message & { provenance?: ExtensionSessionProvenance } = {
+      const selected: typeof message & { provenance?: PluginSessionProvenance } = {
         role: message.role,
         timestamp: message.timestamp,
         customType: message.customType,
@@ -2539,7 +2566,7 @@ function structurallySafePublicCompactionResult(result: CompactionResult): Compa
   };
 }
 
-function structurallySafePublicEntry(entry: ExtensionSessionEntry): ExtensionSessionEntry {
+function structurallySafePublicEntry(entry: PluginSessionEntry): PluginSessionEntry {
   const base = { id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp };
   switch (entry.type) {
     case "message": return {
@@ -2751,7 +2778,7 @@ function structurallySafeAgentSessionEvent(event: AgentSessionEvent): AgentSessi
   }
 }
 
-interface ExtensionCompactionFileOperations {
+interface PluginCompactionFileOperations {
   read: Set<string>;
   written: Set<string>;
   edited: Set<string>;
@@ -2764,7 +2791,7 @@ interface RunToolSelection {
 
 function extensionCompactionFileOps(
   messages: readonly CanonicalMessage[],
-): ExtensionCompactionFileOperations {
+): PluginCompactionFileOperations {
   const fileOps = {
     read: new Set<string>(),
     written: new Set<string>(),
@@ -2949,8 +2976,7 @@ class SessionEventSink implements EventSink {
   }
 
   #checkpoint(phase: string, data: Record<string, JsonValue>): void {
-    const state = this.#session.getV4State();
-    const branch = state.branches.get(state.primaryBranchId);
+    const branch = this.#session.getV4Branch();
     if (branch?.openOperationId !== this.#runId) return;
     this.#session.commitChanges([{
       type: "run_checkpoint",
@@ -2969,8 +2995,7 @@ class SessionEventSink implements EventSink {
       return;
     }
     if (event.type === "message_appended") {
-      const queuedBeforeAppend = [...this.#session.getV4State().queue.values()]
-        .find((entry) => entry.targetNodeId === event.message.id);
+      const queuedBeforeAppend = this.#session.getV4QueueEntryForNode(event.message.id);
       if (queuedBeforeAppend?.status === "queued") {
         this.#session.commitChanges([{
           type: "queue_claimed",
@@ -3015,8 +3040,7 @@ class SessionEventSink implements EventSink {
           },
         );
       }
-      const queued = [...this.#session.getV4State().queue.values()]
-        .find((entry) => entry.targetNodeId === message.id);
+      const queued = this.#session.getV4QueueEntryForNode(message.id);
       if (queued !== undefined && queued.status === "claimed" && queued.operationId === this.#runId) {
         this.#session.commitChanges([{
           type: "queue_finished",
@@ -3031,7 +3055,7 @@ class SessionEventSink implements EventSink {
       return;
     }
     if (event.type === "provider_attempt_started") {
-      const operation = this.#session.getV4State().operations.get(this.#runId);
+      const operation = this.#session.getV4Operation(this.#runId);
       const selection = {
         provider: event.provider,
         model: event.model,
@@ -3119,7 +3143,7 @@ class SessionEventSink implements EventSink {
         "id" in entry.message &&
         entry.message.id === event.firstKeptMessageId);
       if (firstKept === undefined) {
-        throw new Error("Compaction retained message is not present in the active JSONL branch");
+        throw new Error("Compaction retained message is not present in the active session branch");
       }
       this.#session.appendCompaction(
         durableCompactionText(event.summary),
@@ -3162,10 +3186,9 @@ class SessionEventSink implements EventSink {
   }
 
   #finish<Detail>(outcome: SessionV4RunOutcome, detail: Detail): void {
-    let state = this.#session.getV4State();
-    const branch = state.branches.get(state.primaryBranchId);
+    const branch = this.#session.getV4Branch();
     if (branch?.openOperationId !== this.#runId) return;
-    const operation = state.operations.get(this.#runId);
+    const operation = this.#session.getV4Operation(this.#runId);
     if (operation === undefined) return;
     if (outcome === "cancelled" && operation.cancel === null) {
       this.#session.commitChanges([{
@@ -3175,12 +3198,11 @@ class SessionEventSink implements EventSink {
         requestedAt: new Date().toISOString(),
         reason: "Runtime cancellation",
       }]);
-      state = this.#session.getV4State();
     }
-    const abandonedQueues = [...state.queue.values()].filter((entry) =>
+    const abandonedQueues = this.#session.getV4PendingQueue().filter((entry) =>
       entry.operationId === this.#runId &&
       entry.status === "claimed" &&
-      !state.nodes.has(entry.targetNodeId));
+      !this.#session.hasV4Node(entry.targetNodeId));
     for (const entry of abandonedQueues) {
       this.#session.commitChanges([{
         type: "queue_finished",
@@ -3190,21 +3212,19 @@ class SessionEventSink implements EventSink {
         outcome: "cancelled",
       }]);
     }
-    state = this.#session.getV4State();
-    const current = state.operations.get(this.#runId);
+    const current = this.#session.getV4Operation(this.#runId);
     if (
       current === undefined ||
-      (current.promptNodeId !== null && !state.nodes.has(current.promptNodeId)) ||
-      [...state.queue.values()].some((entry) =>
+      (current.promptNodeId !== null && !this.#session.hasV4Node(current.promptNodeId)) ||
+      this.#session.getV4PendingQueue().some((entry) =>
         entry.operationId === this.#runId && entry.status === "claimed") ||
-      [...state.toolEffects.values()].some((effect) =>
-        effect.operationId === this.#runId &&
+      this.#session.getV4ToolEffects(this.#runId).some((effect) =>
         (
           effect.status === "prepared" ||
           effect.status === "dispatched" ||
           effect.status === "in_doubt" ||
           effect.status === "recovery_started" ||
-          !state.nodes.has(effect.resultNodeId) ||
+          !this.#session.hasV4Node(effect.resultNodeId) ||
           ((effect.status === "succeeded" || effect.status === "failed") && effect.result === undefined)
         ))
     ) {
@@ -3404,73 +3424,23 @@ function defaultAgentMessageConversion(messages: AgentMessage[]): Message[] {
     message.role === "user" || message.role === "assistant" || message.role === "toolResult");
 }
 
-function agentToolFromHarness(tool: HarnessTool, cwd: string): AgentTool {
-  return wrapToolDefinition(createHarnessToolDefinition({
+function agentToolFromHarness(tool: HarnessTool, cwd: string, threadId: string, origin?: ToolDefinition): AgentTool {
+  const definition = createHarnessToolDefinition({
     cwd,
+    threadId,
     tool,
     label: tool.definition.label ?? tool.definition.name,
     parameters: Type.Unsafe(tool.definition.inputSchema),
     details: (result) => result.metadata,
-  }));
-}
-
-function harnessToolFromAgent(tool: AgentTool): HarnessTool {
-  const parameters = sessionJson(tool.parameters);
-  if (!isJsonObject(parameters)) throw new TypeError(`Tool ${tool.name} parameters must be JSON schema`);
-  return {
-    definition: {
-      name: tool.name,
-      label: tool.label,
-      description: tool.description,
-      inputSchema: parameters,
-    },
-    ...optionalProperties(tool.prepareArguments === undefined ? undefined : {
-      prepareInput: async (input) => sessionJson(await tool.prepareArguments?.(input)),
-    }),
-    ...optionalProperties(tool.executionMode === undefined ? undefined : { executionMode: tool.executionMode }),
-    ...optionalProperties(tool.recovery === undefined ? undefined : { recovery: tool.recovery }),
-    validate(): void {},
-    resources: tool.resources === undefined
-      ? () => []
-      : async (input, context) => await tool.resources?.(input, context) ?? [],
-    async execute(input, context) {
-      const result = await tool.execute(
-        context.toolCallId,
-        input,
-        context.signal,
-        context.reportProgress === undefined
-          ? undefined
-          : (partial) => {
-              const blocks = canonicalContent(partial.content ?? []);
-              const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
-              context.reportProgress?.({
-                type: "result",
-                content: text,
-                isError: false,
-                ...optionalProperties(isJsonValue(partial.details) ? { metadata: partial.details } : undefined),
-              });
-            },
-      );
-      const blocks = canonicalContent(result.content ?? []);
-      const images = blocks.filter((block): block is ImageBlock => block.type === "image");
-      return {
-        content: blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"),
-        contentBlocks: blocks,
-        isError: false,
-        ...optionalProperties(result.usage === undefined ? undefined : { usage: canonicalUsage(result.usage) }),
-        ...optionalProperties(result.terminate === undefined ? undefined : { terminate: result.terminate }),
-        ...optionalProperties(result.addedToolNames === undefined ? undefined : { addedToolNames: [...result.addedToolNames] }),
-        ...optionalProperties(images.length === 0 ? undefined : { images }),
-        ...optionalProperties(isJsonValue(result.details) ? { metadata: result.details } : undefined),
-      };
-    },
-  };
+  });
+  return wrapToolDefinition({ ...origin, ...definition });
 }
 
 function forceSequentialTool(tool: HarnessTool): HarnessTool {
   return tool.executionMode === "sequential" ? tool : {
     definition: tool.definition,
     ...optionalProperties(tool.prepareInput === undefined ? undefined : { prepareInput: tool.prepareInput }),
+    ...optionalProperties(tool.recovery === undefined ? undefined : { recovery: tool.recovery }),
     executionMode: "sequential",
     validate: (input) => tool.validate(input),
     resources: (input, context) => tool.resources(input, context),
@@ -3481,7 +3451,7 @@ function forceSequentialTool(tool: HarnessTool): HarnessTool {
 interface SessionBackedAgentHost {
   getSystemPrompt(): string;
   setSystemPrompt(value: string): void;
-  getMessages(): AgentMessage[];
+  getMessages(): CanonicalMessage[];
   setMessages(messages: readonly AgentMessage[]): void;
   getTools(): AgentTool[];
   setTools(tools: readonly AgentTool[]): void;
@@ -3521,7 +3491,12 @@ class SessionBackedAgent implements AgentSessionAgent {
   #maxRetryDelayMsCustomized = false;
   #settingsThinkingBudgets: ThinkingBudgets | undefined;
   #callerOwnedModel: Model<Api> | undefined;
-  #preparedContext: { context: AgentContext; sourceMessageCount: number } | undefined;
+  #preparedContext: {
+    context: AgentContext;
+    sourceMessageIds: string[];
+    owners: ContextMessageProjection["owners"];
+  } | undefined;
+  #preparingContext: ContextMessageProjection | undefined;
 
   convertToLlm: AgentSessionAgent["convertToLlm"] = defaultAgentMessageConversion;
   transformContext: AgentSessionAgent["transformContext"];
@@ -3625,15 +3600,21 @@ class SessionBackedAgent implements AgentSessionAgent {
   get systemPrompt(): string { return this.#host.getSystemPrompt(); }
   set systemPrompt(value: string) { this.#host.setSystemPrompt(value); }
   get messages(): AgentMessage[] {
-    const durable = this.#host.getMessages();
-    const prepared = this.#preparedContext;
+    if (this.#preparingContext !== undefined) return [...this.#preparingContext.messages];
+    const source = this.#host.getMessages();
+    const prepared = this.#preparedContextFor(source);
+    const durable = extensionCanonicalMessages(source.slice(prepared?.sourceMessageIds.length ?? 0));
     return prepared === undefined
       ? durable
-      : [...prepared.context.messages, ...durable.slice(prepared.sourceMessageCount)];
+      : [...structuredClone(prepared.context.messages).map((message) => {
+          if (!("contextId" in message)) return message;
+          const { contextId: _contextId, ...value } = message;
+          return value;
+        }), ...durable];
   }
   set messages(value: AgentMessage[]) {
-    this.#preparedContext = undefined;
     this.#host.setMessages(value);
+    this.clearPreparedContext();
   }
   get tools(): AgentTool[] { return this.#host.getTools(); }
   set tools(value: AgentTool[]) { this.#host.setTools(value); }
@@ -3667,7 +3648,7 @@ class SessionBackedAgent implements AgentSessionAgent {
             },
           }
         : selected.info;
-      return extensionModel(providerModelFromInfo(info), publicApiFromProtocol(selected.api));
+      return pluginModel(providerModelFromInfo(info), publicApiFromProtocol(selected.api));
     }
     return {
       ...structuredClone(UNKNOWN_AGENT_MODEL),
@@ -3742,8 +3723,33 @@ class SessionBackedAgent implements AgentSessionAgent {
   }
   async waitForIdle(): Promise<void> { await this.#session.waitForIdle(); }
   reset(): void {
-    this.#preparedContext = undefined;
     this.#host.reset();
+    this.clearPreparedContext();
+  }
+
+  clearPreparedContext(): void {
+    this.#preparedContext = undefined;
+    this.#preparingContext = undefined;
+  }
+
+  #preparedContextFor(source: readonly CanonicalMessage[]) {
+    const prepared = this.#preparedContext;
+    if (prepared?.sourceMessageIds.some((id, index) => source[index]?.id !== id)) {
+      this.#preparedContext = undefined;
+      return undefined;
+    }
+    return prepared;
+  }
+
+  #contextProjection(messages: readonly CanonicalMessage[], source: readonly CanonicalMessage[]): ContextMessageProjection {
+    const prepared = this.#preparedContextFor(source);
+    if (prepared === undefined) return extensionContextMessages(messages);
+    const sourceIds = new Set(prepared.sourceMessageIds);
+    const tail = extensionContextMessages(messages.filter((message) => !sourceIds.has(message.id)));
+    return {
+      messages: [...prepared.context.messages, ...tail.messages],
+      owners: new Map([...prepared.owners, ...tail.owners]),
+    };
   }
 
   usesContextReducer(): boolean {
@@ -3757,40 +3763,54 @@ class SessionBackedAgent implements AgentSessionAgent {
       return [...messages];
     }
     const conversational = messages.filter((message) => message.role !== "system");
-    const durable = extensionCanonicalMessages(conversational);
-    let selected = prepared === undefined
-      ? durable
-      : [...prepared.context.messages, ...durable.slice(prepared.sourceMessageCount)];
+    const projection = this.#contextProjection(conversational, this.#host.getMessages());
+    let selected = projection.messages;
     if (this.transformContext !== undefined) selected = await this.transformContext([...selected], signal);
     const converted = await this.convertToLlm([...selected]);
-    return canonicalAgentMessages(converted, conversational);
+    signal.throwIfAborted();
+    return canonicalAgentMessages(converted, projection.owners);
   }
 
   async nextTurn(signal: AbortSignal): Promise<AgentLoopTurnUpdate | undefined> {
+    const source = this.#host.getMessages();
+    const projection = this.#contextProjection(source, source);
+    this.#preparingContext = projection;
     let update: AgentLoopTurnUpdate | undefined;
-    if (this.prepareNextTurnWithContext !== undefined) {
-      const messages = this.messages;
-      const assistantIndex = messages.findLastIndex((message) => message.role === "assistant");
-      const assistant = assistantIndex < 0 ? undefined : messages[assistantIndex];
-      if (assistant?.role !== "assistant") return await this.prepareNextTurn?.(signal);
-      const newMessages = messages.slice(assistantIndex);
-      const toolResults = newMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
-      update = await this.prepareNextTurnWithContext({
-        message: assistant,
-        toolResults,
-        context: { systemPrompt: this.systemPrompt, messages, tools: this.tools },
-        newMessages,
-      }, signal);
-    } else {
-      update = await this.prepareNextTurn?.(signal);
+    try {
+      if (this.prepareNextTurnWithContext !== undefined) {
+        const messages = [...projection.messages];
+        const assistantIndex = messages.findLastIndex((message) => message.role === "assistant");
+        const assistant = assistantIndex < 0 ? undefined : messages[assistantIndex];
+        if (assistant?.role !== "assistant") update = await this.prepareNextTurn?.(signal);
+        else {
+          const newMessages = messages.slice(assistantIndex);
+          const toolResults = newMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+          update = await this.prepareNextTurnWithContext({
+            message: assistant,
+            toolResults,
+            context: { systemPrompt: this.systemPrompt, messages, tools: this.tools },
+            newMessages,
+          }, signal);
+        }
+      } else {
+        update = await this.prepareNextTurn?.(signal);
+      }
+    } finally {
+      this.#preparingContext = undefined;
     }
+    signal.throwIfAborted();
     if (update?.context !== undefined) this.#preparedContext = {
       context: {
         systemPrompt: update.context.systemPrompt,
         messages: [...update.context.messages],
         ...optionalProperties(update.context.tools === undefined ? undefined : { tools: [...update.context.tools] }),
       },
-      sourceMessageCount: this.#host.getMessages().length,
+      sourceMessageIds: source.map((message) => message.id),
+      owners: new Map(update.context.messages.flatMap((message) => {
+        if (!("contextId" in message) || !Value.Check(STRING_VALUE, message.contextId)) return [];
+        const owner = projection.owners.get(message.contextId);
+        return owner === undefined ? [] : [[message.contextId, owner] as const];
+      })),
     };
     return update;
   }
@@ -3912,8 +3932,9 @@ class SessionBackedAgent implements AgentSessionAgent {
 }
 
 interface NativeAgentSessionConstruction {
+  ownership?: AgentSessionOwnership;
   modelRuntime?: ModelRuntime;
-  policyExtensions?: RuntimeExtensionHost;
+  policyPlugins?: RuntimePluginHost;
   toolAuthorizationQueue?: ToolAuthorizationQueue;
   toolResourceArbiter?: ToolResourceArbiter;
   toolAuthorizationOwners?: ReadonlyMap<string, ToolAuthorizationOwner>;
@@ -3938,15 +3959,16 @@ interface RestoredSessionSelection {
 }
 
 export class AgentSession {
+  readonly #ownership: AgentSessionOwnership;
   readonly #providers: ProviderRegistry;
   readonly #modelRegistry: ModelRegistry | undefined;
   readonly #modelRuntime: ModelRuntime | undefined;
   readonly #resourceLoader: ResourceLoader | undefined;
-  #extensionsResult: LoadExtensionsResult | undefined;
-  #extensionRunner: ExtensionRunner | undefined;
-  #extensionHost: RuntimeExtensionHost | undefined;
-  readonly #policyExtensions: RuntimeExtensionHost | undefined;
-  #incompleteExtensionRuntime: LoadExtensionsResult["runtime"] | undefined;
+  #pluginsResult: LoadPluginsResult | undefined;
+  #pluginRunner: PluginRunner | undefined;
+  #pluginHost: RuntimePluginHost | undefined;
+  readonly #policyPlugins: RuntimePluginHost | undefined;
+  #incompletePluginRuntime: LoadPluginsResult["runtime"] | undefined;
   readonly #providerWireLifecycle: ProviderWireLifecycleHost | undefined;
   readonly #providerDisplayNameOverride: AgentSessionOptions["providerDisplayNameOverride"];
   readonly #observability: RuntimeObservability | undefined;
@@ -3970,17 +3992,20 @@ export class AgentSession {
   readonly #listeners = new Set<AgentSessionEnvelopeListener>();
   readonly #publicListeners = new Set<AgentSessionEventListener>();
   readonly #unsubscribeSessionAppend: () => void;
-  readonly #extensionTurns = new Map<string, ExtensionTurnState>();
+  readonly #extensionTurns = new Map<string, PluginTurnState>();
   readonly #extensionRunMessages = new Map<string, CanonicalMessage[]>();
   readonly #retryRuns = new Map<string, RetryLifecycleState>();
-  readonly #directProviderBindings = new Map<RuntimeExtensionHost, DirectProviderGenerationBinding>();
+  readonly #directProviderBindings = new Map<RuntimePluginHost, DirectProviderGenerationBinding>();
   readonly #undeliveredNextTurnMessages = new Map<string, CanonicalMessage>();
-  readonly #options: Omit<AgentSessionOptions, "providers" | "modelRegistry" | "resourceLoader" | "extensionsResult" | "extensionRunner" | "providerWireLifecycle" | "providerDisplayNameOverride" | "observability" | "sessionManager" | "workspace" | "agentDirectory" | "settingsManager" | "projectTrusted" | "tools" | "baseToolsOverride" | "allowedToolNames" | "excludedToolNames" | "toolRendererBinding" | "initialToolSelection" | "toolBackend" | "toolAuthorizationHandler" | "model" | "modelScope" | "thinkingLevel" | "sessionStartEvent">;
+  readonly #options: Omit<AgentSessionOptions, "providers" | "modelRegistry" | "resourceLoader" | "pluginsResult" | "pluginRunner" | "providerWireLifecycle" | "providerDisplayNameOverride" | "observability" | "sessionManager" | "workspace" | "agentDirectory" | "settingsManager" | "projectTrusted" | "tools" | "baseToolsOverride" | "allowedToolNames" | "excludedToolNames" | "toolRendererBinding" | "initialToolSelection" | "toolBackend" | "toolAuthorizationHandler" | "model" | "modelScope" | "thinkingLevel" | "sessionStartEvent">;
   readonly #sessionStartEvent: SessionStartEvent;
-  #extensionBindings: ExtensionBindings = {};
-  #activeDirectProviderHost: RuntimeExtensionHost | undefined;
+  #extensionBindings: PluginBindings = {};
+  #extensionBindingInProgress = false;
+  #extensionRefreshInProgress = false;
+  #startedPluginBinding: { host: RuntimePluginHost; sessionId: string; mode: NonNullable<PluginBindings["mode"]>; detached: boolean } | undefined;
+  #activeDirectProviderHost: RuntimePluginHost | undefined;
   #directProviderSelectionRefreshPending = false;
-  #unsubscribeExtensionError: (() => void) | undefined;
+  #unsubscribePluginError: (() => void) | undefined;
   #model: AgentSessionModel | undefined;
   #modelScopeSelectors: string[];
   #modelScopeOverride: string[] | undefined;
@@ -4008,14 +4033,15 @@ export class AgentSession {
   #pendingQueuedMessages: QueuedRunMessage[] = [];
   #pendingNextTurnMessages: CanonicalMessage[] = [];
   #activeToolNames: Set<string> | undefined;
-  #activateExtensionToolsOnBind = false;
+  #activatePluginToolsOnBind = false;
   #excludedActiveToolNames = new Set<string>();
   #settingsOwnToolSelection = false;
   #activeToolCoordinator: ToolCoordinator | undefined;
   #activeToolRefresh: (() => void) | undefined;
   #toolCatalogRevision = 0;
-  #activeExtensionRunBranch: string | undefined;
+  #activePluginRunBranch: string | undefined;
   #agentToolsOverride: HarnessTool[] | undefined;
+  #agentToolRenderer: RuntimeToolRendererBinding | undefined;
   #agentSystemPromptOverride: string | undefined;
   #lastSystemPrompt = "";
   #lastSystemPromptOptions: BuildSystemPromptOptions | undefined;
@@ -4037,13 +4063,14 @@ export class AgentSession {
 
   private constructor(construction: NativeAgentSessionConstruction) {
     const { options, settings, workspaceBoundary } = construction;
+    this.#ownership = { ...construction.ownership };
     this.#providers = options.providers;
     this.#modelRegistry = options.modelRegistry;
     this.#modelRuntime = construction.modelRuntime ?? (options.modelRegistry === undefined
       ? undefined
       : modelRuntimeForInternalRegistry(options.modelRegistry));
     this.#resourceLoader = options.resourceLoader;
-    this.#policyExtensions = construction.policyExtensions;
+    this.#policyPlugins = construction.policyPlugins;
     this.#providerWireLifecycle = options.providerWireLifecycle;
     this.#providerDisplayNameOverride = options.providerDisplayNameOverride;
     this.#observability = options.observability;
@@ -4057,7 +4084,7 @@ export class AgentSession {
       ? undefined
       : Object.entries(options.baseToolsOverride).map(([name, tool]) => {
           if (name !== tool.name) throw new Error(`Base tool key ${name} must match tool name ${tool.name}`);
-          return harnessToolFromAgent(tool);
+          return this.#toolFromAgent(tool);
         });
     this.#allowedToolNames = options.allowedToolNames === undefined
       ? undefined
@@ -4068,18 +4095,18 @@ export class AgentSession {
     this.#session = options.sessionManager;
     this.#settings = settings;
     this.#restoreDurableQueues();
-    const extensionsResult = options.extensionsResult
-      ?? options.resourceLoader?.getExtensions()
-      ?? (options.extensionRunner === undefined ? undefined : projectLoadedExtensionHost(options.extensionRunner));
-    if (extensionsResult !== undefined) {
-      const host = getExtensionRuntimeHost(extensionsResult.runtime)
-        ?? ensureExtensionRuntimeHost(extensionsResult.runtime, this.#workspace);
-      const extensionFlags = extensionsResult.runtime.flagValues;
+    const pluginsResult = options.pluginsResult
+      ?? options.resourceLoader?.getPlugins()
+      ?? (options.pluginRunner === undefined ? undefined : projectLoadedPluginHost(options.pluginRunner));
+    if (pluginsResult !== undefined) {
+      const host = getPluginRuntimeHost(pluginsResult.runtime)
+        ?? ensurePluginRuntimeHost(pluginsResult.runtime, this.#workspace);
+      const extensionFlags = pluginsResult.runtime.flagValues;
       for (const [name, value] of host.flagValues()) extensionFlags.set(name, value);
-      this.#extensionsResult = extensionsResult;
-      this.#extensionHost = host;
+      this.#pluginsResult = pluginsResult;
+      this.#pluginHost = host;
     }
-    const extensionTools = new Set(this.#extensionHost?.tools() ?? []);
+    const extensionTools = new Set(this.#pluginHost?.tools() ?? []);
     this.#extraTools = Object.freeze(
       [...(options.tools ?? [])].filter((tool) => !extensionTools.has(tool)),
     );
@@ -4088,7 +4115,7 @@ export class AgentSession {
       this.#activeToolNames = new Set(
         options.initialToolSelection.names.filter((name) => !this.#excludedActiveToolNames.has(name)),
       );
-      this.#activateExtensionToolsOnBind = options.initialToolSelection.activateExtensionToolsOnBind === true;
+      this.#activatePluginToolsOnBind = options.initialToolSelection.activatePluginToolsOnBind === true;
     } else this.#applySettingsToolSelection();
     this.#model = options.model === undefined ? undefined : cloneModel(options.model);
     this.#modelScopeOverride = options.modelScope === undefined
@@ -4101,23 +4128,22 @@ export class AgentSession {
       type: "session_start",
       reason: "startup",
     });
-    const context = options.sessionManager.buildSessionContext();
-    const hasPersistedThinking = options.sessionManager.getEntries().some((entry) => entry.type === "thinking_level_change");
-    const selectedReference = options.model ?? (context.model === null
+    const persistedSelection = options.sessionManager.getPersistedSelection();
+    const selectedReference = options.model ?? (persistedSelection.model === null
       ? undefined
-      : { provider: context.model.provider, id: context.model.modelId });
+      : { provider: persistedSelection.model.provider, id: persistedSelection.model.modelId });
     const modelThinkingLevel = selectedReference === undefined
       ? undefined
       : settings.getModelThinkingLevel(selectedReference.provider, selectedReference.id);
     this.#thinkingLevel = options.thinkingLevel ?? (
-      hasPersistedThinking ? context.thinkingLevel : modelThinkingLevel ?? settings.getDefaultThinkingLevel() ?? "off"
+      persistedSelection.hasPersistedThinking ? persistedSelection.thinkingLevel : modelThinkingLevel ?? settings.getDefaultThinkingLevel() ?? "off"
     );
     const {
       providers: _providers,
       modelRegistry: _modelRegistry,
       resourceLoader: _resourceLoader,
-      extensionsResult: _extensionsResult,
-      extensionRunner: _extensionRunner,
+      pluginsResult: _pluginsResult,
+      pluginRunner: _extensionRunner,
       providerWireLifecycle: _providerWireLifecycle,
       providerDisplayNameOverride: _providerDisplayNameOverride,
       observability: _observability,
@@ -4159,10 +4185,8 @@ export class AgentSession {
         this.#lastSystemPrompt = value;
         this.#lastPromptComposition = undefined;
       },
-      getMessages: () => this.#session.buildSessionContext().messages.flatMap((message) => {
-        const canonical = canonicalContextMessage(message);
-        return canonical === undefined || canonical.role === "system" ? [] : extensionMessages(canonical);
-      }),
+      getMessages: () => canonicalContextEntries(this.#session.buildContextEntries())
+        .filter((message) => message.role !== "system"),
       setMessages: (messages) => {
         this.#assertIdle();
         const canonical = canonicalAgentMessages(messages);
@@ -4177,13 +4201,11 @@ export class AgentSession {
         const active = this.#activeToolNames;
         return this.#buildTools()
           .filter((tool) => active === undefined || active.has(tool.definition.name))
-          .map((tool) => agentToolFromHarness(tool, this.#workspace));
+          .map((tool) => this.#publicTool(tool));
       },
       setTools: (tools) => {
         this.#assertIdle();
-        this.#agentToolsOverride = tools.map(harnessToolFromAgent);
-        this.#activeToolNames = new Set(this.#agentToolsOverride.map((tool) => tool.definition.name));
-        this.#takeToolSelectionOwnership();
+        this.#replaceAgentTools(tools);
       },
       setModel: (model, selected) => this.#setAgentModel(model, selected),
       reset: () => {
@@ -4203,22 +4225,22 @@ export class AgentSession {
         this.#errorMessage = safeErrorMessage(error);
       },
     });
-    this.#listeners.add(async (envelope) => await this.#observeExtensionEnvelope(envelope));
+    this.#listeners.add(async (envelope) => await this.#observePluginEnvelope(envelope));
     this.#listeners.add((envelope) => {
       if (envelope.event.type === "message_appended" && envelope.event.message.custom !== undefined) {
         this.#undeliveredNextTurnMessages.delete(envelope.event.message.id);
       }
     });
-    if (this.#extensionsResult !== undefined) {
-      this.#extensionRunner = new ExtensionRunner(
-        this.#extensionsResult.extensions,
-        this.#extensionsResult.runtime,
+    if (this.#pluginsResult !== undefined) {
+      this.#pluginRunner = new PluginRunner(
+        this.#pluginsResult.plugins,
+        this.#pluginsResult.runtime,
         this.#workspace,
         this.#session,
         this.#modelRegistry ?? new ModelRegistry(createModels()),
       );
     }
-    this.#bindDirectExtensionActions();
+    this.#bindDirectPluginActions();
     this.#unsubscribeSessionAppend = this.#session.onAppend((entry) => {
       const visible = extensionSessionEntriesForCanonicalEntry(this.#session, entry);
       for (const projected of visible) {
@@ -4227,8 +4249,8 @@ export class AgentSession {
     });
   }
 
-  static async create(options: AgentSessionConfig): Promise<AgentSession> {
-    return await AgentSession.#create(options);
+  static async create(options: AgentSessionConfig, ownership: AgentSessionOwnership = {}): Promise<AgentSession> {
+    return await AgentSession.#create(options, { ownership });
   }
 
   static async #create(
@@ -4261,11 +4283,9 @@ export class AgentSession {
       : initialRecovery.openOperation ?? undefined;
     const interruptedSelection = suspendedOperation?.stepSelections.at(-1)?.selection
       ?? suspendedOperation?.selection;
-    const sessionContext = options.sessionManager.buildSessionContext();
-    const hasPersistedThinking = options.sessionManager.getEntries()
-      .some((entry) => entry.type === "thinking_level_change");
-    const historicalThinking = hasPersistedThinking
-      ? sessionContext.thinkingLevel
+    const persistedSelection = options.sessionManager.getPersistedSelection();
+    const historicalThinking = persistedSelection.hasPersistedThinking
+      ? persistedSelection.thinkingLevel
       : interruptedSelection?.thinkingLevel;
     const {
       model: requestedModel,
@@ -4284,10 +4304,10 @@ export class AgentSession {
       workspaceBoundary: await WorkspaceBoundary.create(workspace),
     });
     try {
-      if (session.#extensionHost !== undefined) {
-        session.#activateDirectProviderGeneration(session.#extensionHost);
+      if (session.#pluginHost !== undefined) {
+        session.#activateDirectProviderGeneration(session.#pluginHost);
       }
-      const persisted = sessionContext.model;
+      const persisted = persistedSelection.model;
       if (session.#model === undefined && persisted !== null) {
         session.#model = session.#resolvePersistedModel(persisted);
       }
@@ -4343,11 +4363,7 @@ export class AgentSession {
       return session;
     } catch (error) {
       try {
-        if (isAgentSessionSharedStoreReplacement(options)) {
-          await closeAgentSessionForReplacement(session, { preserveSessionStore: true });
-        } else {
-          await session.close();
-        }
+        await session.close();
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "AgentSession construction and cleanup failed");
       }
@@ -4355,8 +4371,8 @@ export class AgentSession {
     }
   }
 
-  get sessionManager(): ExtensionSessionManager {
-    return extensionSessionManager(this.#session);
+  get sessionManager(): PluginSessionManager {
+    return pluginSessionManager(this.#session);
   }
 
   /** @internal Canonical V4 journal manager used by product runtime adapters. */
@@ -4400,16 +4416,16 @@ export class AgentSession {
     return this.#resourceLoader;
   }
 
-  get extensionRunner(): ExtensionRunner {
-    if (this.#extensionRunner === undefined) {
-      if (this.#incompleteExtensionRuntime !== undefined) {
+  get pluginRunner(): PluginRunner {
+    if (this.#pluginRunner === undefined) {
+      if (this.#incompletePluginRuntime !== undefined) {
         throw new Error(
           "This AgentSession extension generation did not finish starting; refresh must publish a fresh generation",
         );
       }
       throw new Error("This AgentSession has no extension runner");
     }
-    return this.#extensionRunner;
+    return this.#pluginRunner;
   }
 
   get state(): AgentSessionState {
@@ -4533,14 +4549,14 @@ export class AgentSession {
 
   #presentModel(model: ProviderModel): Model<Api> {
     return this.#modelRegistry === undefined
-      ? extensionModel(model)
-      : extensionModelRegistry(this.#modelRegistry).present(model);
+      ? pluginModel(model)
+      : pluginModelRegistry(this.#modelRegistry).present(model);
   }
 
   #resolvePublicModel(model: Model<Api>): ProviderModel {
     return this.#modelRegistry === undefined
       ? providerModelFromAgentModel(model)
-      : extensionModelRegistry(this.#modelRegistry).resolve(model);
+      : pluginModelRegistry(this.#modelRegistry).resolve(model);
   }
 
   get thinkingLevel(): ThinkingLevel {
@@ -4553,7 +4569,7 @@ export class AgentSession {
 
   get isIdle(): boolean {
     return this.#active === undefined &&
-      (this.#preparingPromptCount === 0 || this.#hasExtensionCommandPermit()) &&
+      (this.#preparingPromptCount === 0 || this.#hasPluginCommandPermit()) &&
       this.#compactionAbortController === undefined &&
       this.#branchSummaryOperation === undefined &&
       this.suspendedRun === undefined;
@@ -4621,13 +4637,13 @@ export class AgentSession {
   /** Subscribe to transport-neutral extension presentation changes for this runtime. */
   onPortablePresentation(listener: (event: PortablePresentationEvent) => void): () => void {
     this.#assertOpen();
-    return this.#extensionHost?.onPortablePresentation(listener) ?? (() => undefined);
+    return this.#pluginHost?.onPortablePresentation(listener) ?? (() => undefined);
   }
 
   /** Current portable views for late-connecting RPC, serve, web, or desktop adapters. */
   listPortablePresentations(): readonly PortablePresentationEvent[] {
     this.#assertOpen();
-    return this.#extensionHost?.portablePresentations() ?? Object.freeze([]);
+    return this.#pluginHost?.portablePresentations() ?? Object.freeze([]);
   }
 
   /** Route a versioned portable action back to its generation-owned extension handler. */
@@ -4636,24 +4652,34 @@ export class AgentSession {
     signal?: AbortSignal,
   ): Promise<PortablePresentationActionResult> {
     this.#assertOpen();
-    const host = this.#extensionHost;
+    const host = this.#pluginHost;
     if (host === undefined) throw new TypeError("Portable presentations are unavailable");
     return await host.invokePortablePresentationAction(request, signal);
   }
 
-  listExtensionWireServices(): readonly ExtensionWireServiceDescriptor[] {
-    this.#assertOpen();
-    return this.#extensionHost?.extensionWireServices() ?? Object.freeze([]);
+  /** Detached discovery metadata; empty for sessions without an extension host. */
+  getLoadedPlugins() {
+    return this.#pluginHost?.plugins().map((extension) => ({
+      id: extension.extensionId,
+      path: extension.sourcePath,
+      sha256: extension.sha256,
+      scope: extension.scope ?? "invocation",
+    })) ?? [];
   }
 
-  async invokeExtensionWireService(
-    request: ExtensionWireServiceRequest,
-    signal?: AbortSignal,
-  ): Promise<ExtensionWireServiceResponse> {
+  listPluginWireServices(): readonly PluginWireServiceDescriptor[] {
     this.#assertOpen();
-    const host = this.#extensionHost;
-    if (host === undefined) throw new TypeError("Extension wire services are unavailable");
-    return await host.invokeExtensionWireService(request, signal);
+    return this.#pluginHost?.pluginWireServices() ?? Object.freeze([]);
+  }
+
+  async invokePluginWireService(
+    request: PluginWireServiceRequest,
+    signal?: AbortSignal,
+  ): Promise<PluginWireServiceResponse> {
+    this.#assertOpen();
+    const host = this.#pluginHost;
+    if (host === undefined) throw new TypeError("Plugin wire services are unavailable");
+    return await host.invokePluginWireService(request, signal);
   }
 
   async #emitPublic(event: AgentSessionEvent): Promise<void> {
@@ -4794,6 +4820,7 @@ export class AgentSession {
     selected: AgentSessionModel,
     source: ModelSelectEvent["source"],
     persistDefault = false,
+    thinkingOverride?: ThinkingLevel,
   ): Promise<void> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
@@ -4803,6 +4830,9 @@ export class AgentSession {
       throw new Error(`No API key for ${selected.provider}/${selected.id}`);
     }
     const thinkingLevel = this.#thinkingLevelForModelSwitch(selected);
+    const effectiveThinking = this.#effectiveThinkingLevelForModel(
+      selected, thinkingOverride ?? selected.reasoningEffort ?? thinkingLevel,
+    );
     this.#publicAgent.clearCallerOwnedModel();
     const previous = this.#model;
     this.#model = cloneModel(selected);
@@ -4810,9 +4840,10 @@ export class AgentSession {
     this.#session.appendModelChange(selected.provider, selected.id, this.#activeOperationId);
     if (persistDefault) this.#settings.setDefaultModelAndProvider(selected.provider, selected.id);
     this.setThinkingLevel(
-      selected.reasoningEffort ?? thinkingLevel,
-      selected.reasoningEffort === undefined ? "restore" : "run",
+      effectiveThinking,
+      thinkingOverride !== undefined || selected.reasoningEffort === undefined ? "restore" : "run",
     );
+    if (persistDefault && thinkingOverride !== undefined) this.#settings.setDefaultThinkingLevel(this.thinkingLevel);
     await this.#dispatchModelSelect(previous, selected, source);
   }
 
@@ -4834,23 +4865,33 @@ export class AgentSession {
 
   async cycleModel(
     direction: "forward" | "backward" = "forward",
+    options: AgentSessionModelCycleOptions = {},
   ): Promise<AgentSessionModelCycleResult | undefined> {
-    const isScoped = this.#modelScopeSelectors.length > 0;
-    const candidates = isScoped
-      ? this.nativeScopedModels.map((entry) => entry.model)
-      : this.#modelRegistry?.getAvailable() ?? [];
-    if (candidates.length <= 1) return undefined;
-    let currentIndex = candidates.findIndex((candidate) =>
-      candidate.provider === this.#model?.provider && candidate.id === this.#model.id);
-    if (currentIndex === -1) currentIndex = 0;
+    const preferences = options.models ?? [];
+    const selectors = normalizeModelScopeSelectors(preferences.map((entry) => entry.selector));
+    const levels = Object.fromEntries(preferences.flatMap((entry) => entry.thinkingLevel === undefined
+      ? [] : [[entry.selector, entry.thinkingLevel]]));
+    const isScoped = selectors.length > 0 || this.#modelScopeSelectors.length > 0;
+    const candidates = resolveScopedModels(
+      selectors,
+      this.nativeScopedModels.map((entry) => entry.model),
+      levels,
+    );
+    if (candidates.length === 0) return undefined;
+    const currentIndex = candidates.findIndex(({ model }) =>
+      model.provider === this.#model?.provider && model.id === this.#model.id);
+    if (candidates.length === 1 && currentIndex === 0) return undefined;
     const offset = direction === "forward" ? 1 : -1;
-    const selected = candidates[(currentIndex + offset + candidates.length) % candidates.length]!;
+    const index = currentIndex === -1
+      ? direction === "forward" ? 0 : candidates.length - 1
+      : (currentIndex + offset + candidates.length) % candidates.length;
+    const { model: selected, thinkingLevel } = candidates[index]!;
     await this.#selectModel({
       provider: selected.provider,
       api: selected.api,
       id: selected.id,
       info: providerModelToInfo(selected),
-    }, "cycle", false);
+    }, "cycle", options.persist === true, thinkingLevel);
     return {
       model: this.#presentModel(selected),
       thinkingLevel: this.thinkingLevel,
@@ -4884,7 +4925,7 @@ export class AgentSession {
   ): AgentModelSelection {
     const callerOwned = !this.#providers.has(converted.provider);
     const internal = callerOwned && this.#modelRegistry !== undefined
-      ? extensionModelRegistry(this.#modelRegistry).resolve(model)
+      ? pluginModelRegistry(this.#modelRegistry).resolve(model)
       : converted;
     const info = providerModelToInfo(internal);
     if (model.contextWindow === 0) delete info.contextTokens;
@@ -4922,7 +4963,7 @@ export class AgentSession {
     selected: AgentSessionModel,
     source: ModelSelectEvent["source"],
   ): Promise<void> {
-    const host = this.#extensionHost;
+    const host = this.#pluginHost;
     if (sameModel(previous, selected) || host?.hasListeners("model_select") !== true) return;
     const selectedModel = this.#modelRegistry?.find(selected.provider, selected.id)
       ?? (selected.info === undefined ? undefined : providerModelFromInfo(selected.info));
@@ -4933,13 +4974,13 @@ export class AgentSession {
     if (selectedModel === undefined) return;
     const extensionModels = this.#modelRegistry === undefined
       ? undefined
-      : extensionModelRegistry(this.#modelRegistry);
+      : pluginModelRegistry(this.#modelRegistry);
     const event = {
-      model: extensionModels?.present(selectedModel) ?? extensionModel(selectedModel),
-      ...optionalProperties(previousModel === undefined ? undefined : { previousModel: extensionModels?.present(previousModel) ?? extensionModel(previousModel) }),
+      model: extensionModels?.present(selectedModel) ?? pluginModel(selectedModel),
+      ...optionalProperties(previousModel === undefined ? undefined : { previousModel: extensionModels?.present(previousModel) ?? pluginModel(previousModel) }),
       source: source === "run" ? "set" : source,
     } satisfies Omit<ModelSelectEvent, "type">;
-    await dispatchDirectExtensionEvent(host, "model_select", event);
+    await dispatchDirectPluginEvent(host, "model_select", event);
   }
 
   setThinkingLevel(level: string, source: "set" | "restore" | "run" = "set"): void {
@@ -4954,13 +4995,13 @@ export class AgentSession {
     if (source !== "restore" && (this.supportsThinking() || effective !== "off")) {
       this.#settings.setDefaultThinkingLevel(effective);
     }
-    const host = this.#extensionHost;
+    const host = this.#pluginHost;
     if (host?.hasListeners("thinking_level_select") === true) {
       const event = {
         level: effective,
         previousLevel: sessionThinkingLevel(previousLevel),
       } satisfies Omit<ThinkingLevelSelectEvent, "type">;
-      void dispatchDirectExtensionEvent(host, "thinking_level_select", event).catch(() => undefined);
+      void dispatchDirectPluginEvent(host, "thinking_level_select", event).catch(() => undefined);
     }
     void this.#emitPublic({
       type: "thinking_level_changed",
@@ -4998,13 +5039,13 @@ export class AgentSession {
     return effective;
   }
 
-  cycleThinkingLevel(): ThinkingLevel | undefined {
+  cycleThinkingLevel(options: AgentSessionModelMutationOptions = {}): ThinkingLevel | undefined {
     const thinkingSupported = this.supportsThinking();
     if (!thinkingSupported) return undefined;
     const availableLevels = Array.from(this.getAvailableThinkingLevels());
     const index = availableLevels.indexOf(this.thinkingLevel);
     const next = availableLevels[(index + 1) % availableLevels.length] ?? "off";
-    this.setThinkingLevel(next);
+    this.setThinkingLevel(next, options.persist === false ? "restore" : "set");
     return next;
   }
 
@@ -5072,10 +5113,7 @@ export class AgentSession {
       ...optionalProperties(allowedTools === undefined ? undefined : { allowedTools }),
       ...optionalProperties(excludedTools === undefined ? undefined : { excludedTools }),
     };
-    if (
-      this.#branchSummaryOperation !== undefined ||
-      (this.#compactionAbortController !== undefined && normalizedOptions.manualCompaction !== true)
-    ) throw new Error("AgentSession must be idle");
+    this.#assertPromptPreparationAllowed(normalizedOptions, text);
     let preflightReported = false;
     const reportPreflight = (succeeded: boolean): void => {
       if (preflightReported) return;
@@ -5103,10 +5141,7 @@ export class AgentSession {
       this.#assertOpen();
       this.#assertNoSuspendedRun();
       await runAgentSessionRecoveryFinalizer(this);
-      if (
-        this.#branchSummaryOperation !== undefined ||
-        (this.#compactionAbortController !== undefined && normalizedOptions.manualCompaction !== true)
-      ) throw new Error("AgentSession must be idle");
+      this.#assertPromptPreparationAllowed(normalizedOptions, text);
       preflightSignal.throwIfAborted();
       const prepared = await this.#preparePrompt(
         text,
@@ -5120,6 +5155,7 @@ export class AgentSession {
       } else {
         this.#assertOpen();
         this.#assertNoSuspendedRun();
+        this.#assertPromptPreparationAllowed(normalizedOptions);
         if (this.#active !== undefined) {
           if (normalizedOptions.streamingBehavior === undefined) {
             throw new Error(
@@ -5211,14 +5247,14 @@ export class AgentSession {
   async steer(text: string, images?: readonly AgentSessionInputImage[]): Promise<void> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
-    this.#throwIfExtensionCommand(text);
+    this.#throwIfPluginCommand(text);
     this.#queueSteer(this.#expandPrompt(text), canonicalAgentSessionImages(images, "steer.images"));
   }
 
   async followUp(text: string, images?: readonly AgentSessionInputImage[]): Promise<void> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
-    this.#throwIfExtensionCommand(text);
+    this.#throwIfPluginCommand(text);
     this.#queueFollowUp(this.#expandPrompt(text), canonicalAgentSessionImages(images, "followUp.images"));
   }
 
@@ -5258,7 +5294,7 @@ export class AgentSession {
   async #sendCustomMessage<T = unknown>(
     message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
     options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } = {},
-    provenance?: ExtensionSessionProvenance,
+    provenance?: PluginSessionProvenance,
   ): Promise<void> {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
@@ -5291,7 +5327,7 @@ export class AgentSession {
     );
   }
 
-  #acknowledgedSessionDelivery(): ExtensionSessionDelivery {
+  #acknowledgedSessionDelivery(): PluginSessionDelivery {
     const target: AgentSessionDeliveryTarget = {
       sessionId: this.sessionId,
       binding: this.#sessionDeliveryBinding,
@@ -5300,7 +5336,7 @@ export class AgentSession {
       this.#assertOpen();
       this.#assertSessionDeliveryTarget(target);
     };
-    const delivery: ExtensionSessionDelivery = {
+    const delivery: PluginSessionDelivery = {
       sessionId: target.sessionId,
       sendMessage: async (message, options): Promise<void> => {
         assertTarget();
@@ -5448,8 +5484,8 @@ export class AgentSession {
       }
 
       this.#materializeInterruptedPrompt(operation);
-      for (const effect of this.#session.getV4State().toolEffects.values()) {
-        if (effect.operationId !== operationId || effect.status !== "dispatched") continue;
+      for (const effect of this.#session.getV4ToolEffects(operationId)) {
+        if (effect.status !== "dispatched") continue;
         this.#session.commitChanges([{
           type: "tool_effect_in_doubt",
           effectId: effect.id,
@@ -5474,7 +5510,7 @@ export class AgentSession {
       const selectedTools = (
         effect: SessionV4ToolEffectState,
       ): SelectedRecoveryTools | undefined => {
-        const currentOperation = this.#session.getV4State().operations.get(operationId);
+        const currentOperation = this.#session.getV4Operation(operationId);
         const selection = currentOperation?.stepSelections[effect.step]?.selection;
         if (selection === undefined) {
           automaticBlocks.set(effect.id, "The exact provider step selection is unavailable.");
@@ -5502,15 +5538,14 @@ export class AgentSession {
         return { tools, registry, selection };
       };
 
-      let effects = [...this.#session.getV4State().toolEffects.values()]
-        .filter((effect) => effect.operationId === operationId)
+      let effects = this.#session.getV4ToolEffects(operationId)
         .sort((left, right) =>
           left.step - right.step || left.index - right.index || left.id.localeCompare(right.id));
       for (const effect of effects) {
         signal.throwIfAborted();
         if (effect.status !== "in_doubt" || effect.policy !== "repeatable") continue;
         if (resolutions.has(effect.id)) continue;
-        const currentOperation = this.#session.getV4State().operations.get(operationId);
+        const currentOperation = this.#session.getV4Operation(operationId);
         if (currentOperation?.cancel !== null) {
           automaticBlocks.set(effect.id, "A cancelled operation cannot repeat an uncertain tool effect.");
           continue;
@@ -5523,7 +5558,7 @@ export class AgentSession {
         if (selected === undefined) continue;
         const authorizationOwners = new Map(selected.tools.map((tool) => [
           tool.definition.name,
-          this.#toolAuthorizationOwner(tool, this.#extensionHost),
+          this.#toolAuthorizationOwner(tool, this.#pluginHost),
         ]));
         const coordinator = new ToolCoordinator(
           selected.registry,
@@ -5597,7 +5632,7 @@ export class AgentSession {
           });
         } catch (error) {
           if (signal.aborted) signal.throwIfAborted();
-          const current = this.#session.getV4State().toolEffects.get(effect.id);
+          const current = this.#session.getV4ToolEffect(effect.id);
           if (current?.status === "dispatched") {
             this.#session.commitChanges([{
               type: "tool_effect_in_doubt",
@@ -5627,8 +5662,7 @@ export class AgentSession {
         }
       }
 
-      effects = [...this.#session.getV4State().toolEffects.values()]
-        .filter((effect) => effect.operationId === operationId)
+      effects = this.#session.getV4ToolEffects(operationId)
         .sort((left, right) =>
           left.step - right.step || left.index - right.index || left.id.localeCompare(right.id));
       for (const effect of effects) {
@@ -5709,7 +5743,7 @@ export class AgentSession {
         }
       }
 
-      let currentOperation = this.#session.getV4State().operations.get(operationId);
+      let currentOperation = this.#session.getV4Operation(operationId);
       if (currentOperation?.cancel === null) {
         this.#session.commitChanges([{
           type: "run_cancel",
@@ -5720,8 +5754,7 @@ export class AgentSession {
         }]);
       }
 
-      effects = [...this.#session.getV4State().toolEffects.values()]
-        .filter((effect) => effect.operationId === operationId)
+      effects = this.#session.getV4ToolEffects(operationId)
         .sort((left, right) =>
           left.step - right.step || left.index - right.index || left.id.localeCompare(right.id));
       for (const effect of effects) {
@@ -5739,9 +5772,8 @@ export class AgentSession {
         }]);
       }
 
-      const unresolved = [...this.#session.getV4State().toolEffects.values()]
+      const unresolved = this.#session.getV4ToolEffects(operationId)
         .filter((effect) =>
-          effect.operationId === operationId &&
           (
             effect.status === "prepared" ||
             effect.status === "dispatched" ||
@@ -5767,7 +5799,7 @@ export class AgentSession {
 
       this.#materializeInterruptedToolResults(operationId);
       this.#finishInterruptedQueues(operationId);
-      currentOperation = this.#session.getV4State().operations.get(operationId);
+      currentOperation = this.#session.getV4Operation(operationId);
       if (currentOperation === undefined) throw new Error(`Interrupted operation ${operationId} disappeared`);
       const cancellationReason = currentOperation.cancel?.reason ??
         "The process ended before the operation settled.";
@@ -5798,9 +5830,8 @@ export class AgentSession {
     ).text;
     const operationId = this.#activeOperationId;
     if (operationId === undefined) return selected;
-    const state = this.#session.getV4State();
-    const operation = state.operations.get(operationId);
-    const branch = state.branches.get(state.primaryBranchId);
+    const operation = this.#session.getV4Operation(operationId);
+    const branch = this.#session.getV4Branch();
     if (
       operation === undefined ||
       operation.cancel !== null ||
@@ -5897,7 +5928,7 @@ export class AgentSession {
           delta,
         }).catch(() => undefined);
       };
-      const coordinator = this.#createToolCoordinator([tool], [tool], this.#extensionHost, this.#extensionBranch(), false);
+      const coordinator = this.#createToolCoordinator([tool], [tool], this.#pluginHost, this.#extensionBranch(), false);
       const [completed] = await coordinator.execute([{
         callId,
         name: "bash",
@@ -5994,7 +6025,7 @@ export class AgentSession {
   }
 
   async waitForIdle(): Promise<void> {
-    if (this.#hasExtensionCommandPermit()) {
+    if (this.#hasPluginCommandPermit()) {
       for (;;) {
         const active = this.#active;
         await active?.then(() => undefined, () => undefined);
@@ -6049,6 +6080,16 @@ export class AgentSession {
       completed = true;
       estimatedTokensAfter = envelope.event.estimatedTokensAfter;
     });
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      unsubscribe();
+      this.#manualCompactionOwnsPublicEvents = false;
+      if (this.#compactionAbortController === controller) this.#compactionAbortController = undefined;
+      settleCompaction();
+      if (this.#manualCompactionCompletion === completion) this.#manualCompactionCompletion = undefined;
+    };
     try {
       await this.#emitPublic({ type: "compaction_start", reason: "manual" });
       try {
@@ -6076,6 +6117,7 @@ export class AgentSession {
         throw new Error("Manual compaction did not produce a result");
       }
       const result = this.#compactionResult(entry, estimatedTokensAfter);
+      release();
       await this.#emitPublic({
         type: "compaction_end",
         reason: "manual",
@@ -6088,6 +6130,7 @@ export class AgentSession {
       const aborted = controller.signal.aborted ||
         (isHarnessError(error) && error.code === "EXTENSION_COMPACTION_CANCELLED");
       const message = safeErrorMessage(error);
+      release();
       await this.#emitPublic({
         type: "compaction_end",
         reason: "manual",
@@ -6098,11 +6141,7 @@ export class AgentSession {
       });
       throw error;
     } finally {
-      unsubscribe();
-      this.#manualCompactionOwnsPublicEvents = false;
-      if (this.#compactionAbortController === controller) this.#compactionAbortController = undefined;
-      settleCompaction();
-      if (this.#manualCompactionCompletion === completion) this.#manualCompactionCompletion = undefined;
+      release();
     }
   }
 
@@ -6294,10 +6333,10 @@ export class AgentSession {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
     this.#session.appendSessionInfo(name);
-    const host = this.#extensionHost;
+    const host = this.#pluginHost;
     if (host?.hasListeners("session_info_changed") === true) {
       const selected = this.#session.getSessionName();
-      void dispatchDirectExtensionEvent(host, "session_info_changed", { name: selected }).catch(() => undefined);
+      void dispatchDirectPluginEvent(host, "session_info_changed", { name: selected }).catch(() => undefined);
     }
     void this.#emitPublic({ type: "session_info_changed", name: this.#session.getSessionName() }).catch(() => undefined);
   }
@@ -6315,7 +6354,7 @@ export class AgentSession {
   #appendCustomEntry<T = unknown>(
     customType: string,
     data?: T,
-    provenance?: ExtensionSessionProvenance,
+    provenance?: PluginSessionProvenance,
   ): string {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
@@ -6336,7 +6375,7 @@ export class AgentSession {
     content: CustomMessage<T>["content"],
     display = true,
     details?: T,
-    provenance?: ExtensionSessionProvenance,
+    provenance?: PluginSessionProvenance,
   ): string {
     this.#assertOpen();
     this.#assertNoSuspendedRun();
@@ -6359,31 +6398,32 @@ export class AgentSession {
     this.#excludedActiveToolNames = excluded;
     if (configured.enabled !== undefined) {
       this.#activeToolNames = new Set(configured.enabled.filter((name) => !excluded.has(name)));
-      this.#activateExtensionToolsOnBind = false;
+      this.#activatePluginToolsOnBind = false;
       return;
     }
     this.#activeToolNames = new Set([
       ...allToolNames,
       ...this.#extraTools.map((tool) => tool.definition.name),
-      ...(this.#extensionHost?.tools() ?? []).map((tool) => tool.definition.name),
+      ...(this.#pluginHost?.tools() ?? []).map((tool) => tool.definition.name),
     ].filter((name) => !excluded.has(name)));
-    this.#activateExtensionToolsOnBind = true;
+    this.#activatePluginToolsOnBind = true;
   }
 
   #takeToolSelectionOwnership(): void {
     this.#settingsOwnToolSelection = false;
-    this.#activateExtensionToolsOnBind = false;
+    this.#activatePluginToolsOnBind = false;
     this.#excludedActiveToolNames.clear();
   }
 
   /** Renderer binding for the active extension generation plus caller-owned tools. */
   toolRendererBinding(): RuntimeToolRendererBinding | undefined {
-    if (this.#extensionHost === undefined && this.#customToolRenderer === undefined) return undefined;
-    const extensionBinding = this.#extensionHost?.toolRendererBinding();
+    if (this.#pluginHost === undefined && this.#customToolRenderer === undefined && this.#agentToolRenderer === undefined) return undefined;
+    const extensionBinding = this.#pluginHost?.toolRendererBinding();
     const customBinding = this.#customToolRenderer;
     const selected = (name: string): RuntimeToolRendererBinding | undefined => {
-      const extensionHost = this.#extensionHost;
-      if (extensionHost?.tools().some((tool) => tool.definition.name === name) === true) {
+      if (this.#agentToolsOverride !== undefined) return this.#agentToolRenderer;
+      const pluginHost = this.#pluginHost;
+      if (pluginHost?.tools().some((tool) => tool.definition.name === name) === true) {
         return extensionBinding;
       }
       return customBinding?.has(name) === true ? customBinding : undefined;
@@ -6406,9 +6446,11 @@ export class AgentSession {
           : direct.call(binding, name, view, content, context, bridge);
       },
       reconcile: (liveCallIds) => {
+        this.#agentToolRenderer?.reconcile?.(liveCallIds);
         for (const binding of bindings) binding.reconcile?.(liveCallIds);
       },
       dispose: () => {
+        this.#agentToolRenderer?.dispose?.();
         for (const binding of bindings) binding.dispose?.();
       },
       reportError: (failure) => {
@@ -6421,10 +6463,41 @@ export class AgentSession {
 
   getTools(): AgentSessionToolInfo[] {
     return this.#buildTools().map((tool) => ({
-      definition: createToolDefinitionFromAgentTool(agentToolFromHarness(tool, this.#workspace)),
+      definition: createToolDefinitionFromAgentTool(this.#publicTool(tool)),
       active: this.#activeToolNames === undefined || this.#activeToolNames.has(tool.definition.name),
       executionMode: tool.executionMode ?? "parallel",
     }));
+  }
+
+  #publicTool(tool: HarnessTool): AgentTool {
+    const owner = this.#pluginHost?.toolOwner(tool);
+    const origin = owner?.kind === "extension"
+      ? this.#pluginHost?.compatibilityProjection(owner.sourcePath)?.tools.get(tool.definition.name)?.definition
+      : getDirectToolOrigin(tool);
+    return agentToolFromHarness(tool, this.#workspace, this.sessionId, origin);
+  }
+
+  #toolFromAgent(tool: AgentTool): HarnessTool {
+    return createHarnessToolFromDefinition(
+      createToolDefinitionFromAgentTool(tool),
+      () => this.createReplacedSessionContext(),
+    );
+  }
+
+  #replaceAgentTools(tools: readonly AgentTool[]): HarnessTool[] {
+    const definitions = tools.map(createToolDefinitionFromAgentTool);
+    const converted = tools.map((tool) => this.#toolFromAgent(tool));
+    const renderer = directToolRendererBinding(definitions, this.#workspace, (diagnostic) => {
+      this.#pluginHost?.addDiagnostic({
+        extensionId: "sdk", sourcePath: "<sdk:tool-replacement>", message: diagnostic.message,
+      });
+    });
+    this.#agentToolRenderer?.dispose?.();
+    this.#agentToolRenderer = renderer;
+    this.#agentToolsOverride = converted;
+    this.#activeToolNames = new Set(converted.map((tool) => tool.definition.name));
+    this.#takeToolSelectionOwnership();
+    return converted;
   }
 
   /** @internal Provider-facing tool metadata used by transport and export adapters. */
@@ -6443,6 +6516,20 @@ export class AgentSession {
 
   getActiveToolNames(): string[] {
     return this.getActiveTools();
+  }
+
+  /** Current gate configuration, without invoking callbacks or predicting authorization decisions. */
+  getToolPolicy() {
+    return {
+      authorization: {
+        scope: "model_requested_tools" as const,
+        mode: this.#toolAuthorizationHandler === undefined ? "default_allow" as const : "host_handler" as const,
+      },
+      dynamicGates: {
+        pluginToolCall: (this.#policyPlugins ?? this.#pluginHost)?.hasListeners("tool_call") ?? false,
+        agentBeforeToolCall: this.#publicAgent.beforeToolCall !== undefined,
+      },
+    };
   }
 
   getAllTools(): ToolInfo[] {
@@ -6487,17 +6574,17 @@ export class AgentSession {
   #runtimeToolCatalog(): RuntimeToolCatalogEntry[] {
     const active = this.#activeToolNames;
     const projectedTools = new Map(
-      (this.#extensionRunner?.getAllRegisteredTools() ?? [])
+      (this.#pluginRunner?.getAllRegisteredTools() ?? [])
         .map((tool) => [tool.definition.name, tool] as const),
     );
     const extensionSources = new Map(
-      (this.#extensionsResult?.extensions ?? [])
+      (this.#pluginsResult?.plugins ?? [])
         .map((extension) => [extension.resolvedPath, extension.sourceInfo] as const),
     );
     return this.#buildTools().map((tool) => {
       const owner: RuntimeCatalogOwner = this.#agentToolsOverride !== undefined
         ? { kind: "host" }
-        : this.#extensionHost?.toolOwner(tool)
+        : this.#pluginHost?.toolOwner(tool)
           ?? (this.#extraTools.includes(tool) ? { kind: "host" } : { kind: "builtin" });
       const sourcePath = owner.kind === "extension"
         ? owner.sourcePath
@@ -6591,7 +6678,7 @@ export class AgentSession {
     for (const message of remaining) this.#cancelQueuedMessage(message);
     this.#pendingNextTurnMessages = [];
     this.#undeliveredNextTurnMessages.clear();
-    for (const entry of this.#session.getV4State().queue.values()) {
+    for (const entry of this.#session.getV4PendingQueue()) {
       if (entry.status === "queued") this.#cancelQueueEntry(entry.id);
     }
     this.#emitQueueUpdate();
@@ -6660,7 +6747,7 @@ export class AgentSession {
   branch(entryId: string): void {
     this.#assertIdle();
     this.#session.branch(entryId);
-    this.#extensionHost?.invalidateDirectSessionBinding();
+    this.#pluginHost?.invalidateDirectSessionBinding();
   }
 
   createBranchedSession(entryId: string): string | undefined {
@@ -6694,7 +6781,7 @@ export class AgentSession {
     });
     this.#branchSummaryOperation = operation;
     const result = await operation;
-    if (!result.cancelled) this.#extensionHost?.invalidateDirectSessionBinding();
+    if (!result.cancelled) this.#pluginHost?.invalidateDirectSessionBinding();
     return result;
   }
 
@@ -6733,7 +6820,7 @@ export class AgentSession {
       metadata?: import("../core/json.js").JsonValue;
       usage?: NormalizedUsage;
     } | undefined;
-    const extensions = this.#extensionHost;
+    const extensions = this.#pluginHost;
     try {
       if (extensions?.hasListeners("session_before_tree") === true) {
         const preparation = {
@@ -6850,7 +6937,7 @@ export class AgentSession {
           ...optionalProperties(summaryEntry === undefined ? undefined : { summaryEntry }),
           ...optionalProperties(extensionSummary === undefined ? undefined : { fromExtension: true }),
         };
-        await dispatchDirectExtensionEvent(extensions, "session_tree", directEvent, controller.signal);
+        await dispatchDirectPluginEvent(extensions, "session_tree", directEvent, controller.signal);
       }
 
       return {
@@ -6872,6 +6959,7 @@ export class AgentSession {
     const selectedThinkingLevel = this.#thinkingLevel;
     const providerSessionTracksManager = this.#publicAgent.sessionId === this.#session.getSessionId();
     const path = this.#session.newSession(options);
+    this.#publicAgent.clearPreparedContext();
     this.#sessionDeliveryBinding = Object.freeze({});
     this.#abortReplacedSessionPromptPreflights();
     if (providerSessionTracksManager) this.#publicAgent.sessionId = this.#session.getSessionId();
@@ -6885,7 +6973,7 @@ export class AgentSession {
     }
     this.#session.appendThinkingLevelChange(selectedThinkingLevel, this.#activeOperationId);
     this.#emitQueueUpdate();
-    this.#extensionHost?.invalidateDirectSessionBinding();
+    this.#pluginHost?.invalidateDirectSessionBinding();
     return path;
   }
 
@@ -6901,6 +6989,7 @@ export class AgentSession {
       durableQueues = this.#prepareDurableQueues(candidate);
       selection = this.#restoredSessionSelection(candidate);
     });
+    this.#publicAgent.clearPreparedContext();
     this.#sessionDeliveryBinding = Object.freeze({});
     this.#abortReplacedSessionPromptPreflights();
     if (providerSessionTracksManager) this.#publicAgent.sessionId = this.#session.getSessionId();
@@ -6910,11 +6999,11 @@ export class AgentSession {
     this.#model = selection.model;
     this.#thinkingLevel = selection.thinkingLevel;
     this.#emitQueueUpdate();
-    this.#extensionHost?.invalidateDirectSessionBinding();
+    this.#pluginHost?.invalidateDirectSessionBinding();
   }
 
-  close(): Promise<void> {
-    return this.#close(!isAgentSessionReplacementClose(this));
+  close(options: { reason?: "replacement" } = {}): Promise<void> {
+    return this.#close(options.reason !== "replacement");
   }
 
   #close(waitForPromptAdmission: boolean): Promise<void> {
@@ -6957,6 +7046,7 @@ export class AgentSession {
     }
     await capture(async () => await active?.then(() => undefined, () => undefined));
     await capture(async () => await branchSummary?.then(() => undefined));
+    this.#publicAgent.clearPreparedContext();
     pruneToolOutputFilesBestEffort();
     this.#active = undefined;
     this.#control = undefined;
@@ -6965,26 +7055,28 @@ export class AgentSession {
     this.#pendingNextTurnMessages = [];
     this.#undeliveredNextTurnMessages.clear();
     await capture(() => this.#unsubscribeSessionAppend());
-    await capture(() => this.#unsubscribeExtensionError?.());
-    this.#unsubscribeExtensionError = undefined;
+    await capture(() => this.#agentToolRenderer?.dispose?.());
+    await capture(() => this.#unsubscribePluginError?.());
+    this.#unsubscribePluginError = undefined;
     for (const binding of [...this.#directProviderBindings.values()].reverse()) {
       await capture(() => this.#disposeDirectProviderBinding(binding));
     }
     this.#directProviderBindings.clear();
-    const extensionHost = this.#extensionHost;
+    const pluginHost = this.#pluginHost;
     await capture(() => {
-      if (extensionHost === undefined || extensionHost.lifecycleSignal().aborted) return;
-      extensionHost.setDirectActionsHandler(undefined);
-      extensionHost.setDirectContextHandler(undefined);
-      extensionHost.setDirectUiHandler(undefined);
+      if (pluginHost === undefined || pluginHost.lifecycleSignal().aborted) return;
+      pluginHost.setDirectActionsHandler(undefined);
+      pluginHost.setDirectContextHandler(undefined);
+      pluginHost.setDirectUiHandler(undefined);
     });
     await capture(async () => await this.#settings.flush());
     this.#listeners.clear();
     this.#publicListeners.clear();
     this.#retryRuns.clear();
-    await capture(() => this.#extensionRunner?.invalidate("Extension runtime context is stale after AgentSession close"));
-    await capture(async () => await disposeAgentSessionOwner(this));
-    if (!isAgentSessionStorePreserved(this)) {
+    await capture(() => this.#pluginRunner?.invalidate("Plugin runtime context is stale after AgentSession close"));
+    clearAgentSessionRecoveryFinalizers(this);
+    await capture(async () => await this.#ownership.dispose?.());
+    if (this.#ownership.sessionStore !== "host") {
       await capture(() => this.#session.closeV4Store());
     }
     if (failures.length === 1) throw failures[0];
@@ -7295,7 +7387,7 @@ export class AgentSession {
   }
 
   createReplacedSessionContext(): AgentSessionReplacedContext {
-    const runner = this.#extensionRunner;
+    const runner = this.#pluginRunner;
     if (runner === undefined) throw new Error("This AgentSession has no extension runner");
     const context = Object.defineProperties(
       {},
@@ -7321,93 +7413,138 @@ export class AgentSession {
     return Object.freeze(replacedContext);
   }
 
-  hasExtensionHandlers(eventType: string): boolean {
+  hasPluginHandlers(eventType: string): boolean {
     if (eventType.trim() === "") return false;
-    return this.#extensionRunner?.hasHandlers(eventType) ?? false;
+    return this.#pluginRunner?.hasHandlers(eventType) ?? false;
   }
 
-  async bindExtensions(bindings?: ExtensionBindings, signal?: AbortSignal): Promise<void>;
-  async bindExtensions(event: Omit<SessionStartEvent, "type">, signal?: AbortSignal): Promise<void>;
-  async bindExtensions(
-    bindingsOrEvent: ExtensionBindings | Omit<SessionStartEvent, "type"> = {},
+  async bindPlugins(bindings?: PluginBindings, signal?: AbortSignal): Promise<void>;
+  async bindPlugins(event: Omit<SessionStartEvent, "type">, signal?: AbortSignal): Promise<void>;
+  async bindPlugins(
+    bindingsOrEvent: PluginBindings | Omit<SessionStartEvent, "type"> = {},
     signal?: AbortSignal,
   ): Promise<void> {
-    const host = this.#extensionHost;
-    const runner = this.#extensionRunner;
+    const host = this.#pluginHost;
+    const runner = this.#pluginRunner;
+    if (this.#extensionBindingInProgress) throw new Error("Plugin session binding is already in progress");
+    if (this.#extensionRefreshInProgress && !("reason" in bindingsOrEvent)) {
+      throw new Error("Plugin session refresh is already in progress");
+    }
+    const previous = this.#startedPluginBinding;
+    if (
+      !("reason" in bindingsOrEvent)
+      && previous?.host === host
+      && previous?.sessionId === this.sessionId
+      && !previous.detached
+    ) signal?.throwIfAborted();
+    if (
+      !("reason" in bindingsOrEvent)
+      && previous?.host === host
+      && previous?.sessionId === this.sessionId
+      && (previous.detached || previous.mode !== (bindingsOrEvent.mode ?? this.#extensionBindings.mode ?? "print"))
+    ) this.#assertIdle();
     try {
-      signal?.throwIfAborted();
-      await this.#bindExtensions(bindingsOrEvent, signal);
+      await this.#bindPlugins(bindingsOrEvent, signal);
     } catch (error) {
       if (
         host !== undefined
         && runner !== undefined
-        && this.#extensionHost === host
-        && this.#extensionRunner === runner
+        && this.#pluginHost === host
+        && this.#pluginRunner === runner
       ) {
-        const failures = [error, ...await this.#disableIncompleteExtensionGeneration(runner, host)];
+        const failures = [error, ...await this.#disableIncompletePluginGeneration(runner, host)];
         if (failures.length > 1) {
-          throw new AggregateError(failures, "Extension session binding and cleanup failed");
+          throw new AggregateError(failures, "Plugin session binding and cleanup failed");
         }
       }
       throw error;
     }
   }
 
-  async #bindExtensions(
-    bindingsOrEvent: ExtensionBindings | Omit<SessionStartEvent, "type">,
+  async #bindPlugins(
+    bindingsOrEvent: PluginBindings | Omit<SessionStartEvent, "type">,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.#extensionBindingInProgress) throw new Error("Plugin session binding is already in progress");
+    this.#extensionBindingInProgress = true;
+    try {
+      await this.#startPluginBinding(bindingsOrEvent, signal);
+    } finally {
+      this.#extensionBindingInProgress = false;
+    }
+  }
+
+  async #startPluginBinding(
+    bindingsOrEvent: PluginBindings | Omit<SessionStartEvent, "type">,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const host = this.#extensionHost;
-    const runner = this.#extensionRunner;
+    const host = this.#pluginHost;
+    const runner = this.#pluginRunner;
     if (host === undefined || runner === undefined) return;
     let start: Omit<SessionStartEvent, "type">;
     if ("reason" in bindingsOrEvent) {
       this.#activateDirectProviderGeneration(host);
       start = bindingsOrEvent;
     } else {
-      this.updateExtensionBindings(bindingsOrEvent);
-      const { type: _type, ...event } = this.#sessionStartEvent;
-      start = event;
+      const previous = this.#startedPluginBinding;
+      const mode = bindingsOrEvent.mode ?? this.#extensionBindings.mode ?? "print";
+      if (previous?.host === host && previous.sessionId === this.sessionId) {
+        if (previous.mode === mode && !previous.detached) {
+          this.updatePluginBindings(bindingsOrEvent);
+          return;
+        }
+        await dispatchDirectPluginEvent(host, "session_shutdown", { reason: "refresh" }, signal);
+        this.#startedPluginBinding = undefined;
+        signal?.throwIfAborted();
+        if (previous.mode !== mode) this.#extensionBindings = { mode };
+        start = { reason: "refresh" };
+      } else {
+        const { type: _type, ...event } = this.#sessionStartEvent;
+        start = event;
+      }
+      this.updatePluginBindings(bindingsOrEvent);
     }
-    await dispatchDirectExtensionEvent(host, "session_start", start, signal);
+    await dispatchDirectPluginEvent(host, "session_start", start, signal);
     signal?.throwIfAborted();
-    if (this.#activateExtensionToolsOnBind) {
+    if (this.#activatePluginToolsOnBind) {
       const selected = this.#activeToolNames ?? new Set<string>();
       for (const tool of host.tools()) {
         if (!this.#excludedActiveToolNames.has(tool.definition.name)) selected.add(tool.definition.name);
       }
       this.#activeToolNames = selected;
     }
-    await this.#extendResourcesFromExtensions(
+    await this.#extendResourcesFromPlugins(
       host,
       start.reason === "refresh" ? "refresh" : "startup",
       signal,
     );
+    this.#startedPluginBinding = { host, sessionId: this.sessionId, mode: this.#extensionBindings.mode ?? "print", detached: false };
   }
 
   /** @internal Replace host bindings without emitting another session_start event. */
-  updateExtensionBindings(bindings: ExtensionBindings): void {
+  updatePluginBindings(bindings: PluginBindings): void {
     this.#assertOpen();
-    const host = this.#extensionHost;
-    const runner = this.#extensionRunner;
+    const host = this.#pluginHost;
+    const runner = this.#pluginRunner;
     if (host === undefined || runner === undefined) return;
     this.#extensionBindings = { ...this.#extensionBindings, ...bindings };
-    this.#applyExtensionBindings(runner, host);
+    this.#applyPluginBindings(runner, host);
   }
 
   /** @internal Release mode-owned callbacks while retaining this session runtime. */
-  clearExtensionBindings(): void {
+  clearPluginBindings(): void {
     this.#assertOpen();
-    this.#extensionBindings = {};
-    const host = this.#extensionHost;
-    const runner = this.#extensionRunner;
+    this.#extensionBindings = { mode: this.#extensionBindings.mode ?? "print" };
+    if (this.#startedPluginBinding !== undefined) this.#startedPluginBinding.detached = true;
+    const host = this.#pluginHost;
+    const runner = this.#pluginRunner;
     if (host === undefined || runner === undefined) return;
-    this.#applyExtensionBindings(runner, host);
+    this.#applyPluginBindings(runner, host);
   }
 
   /** Replace host-owned session lifecycle actions without emitting a session event. */
-  setExtensionCommandActions(actions: ExtensionCommandContextActions | undefined): void {
+  setPluginCommandActions(actions: PluginCommandContextActions | undefined): void {
     this.#assertOpen();
     if (actions === undefined) {
       const { commandContextActions: _commands, ...bindings } = this.#extensionBindings;
@@ -7415,24 +7552,24 @@ export class AgentSession {
     } else {
       this.#extensionBindings = { ...this.#extensionBindings, commandContextActions: actions };
     }
-    this.#bindDirectExtensionActions();
+    this.#bindDirectPluginActions();
   }
 
-  async #extendResourcesFromExtensions(
-    extensions: RuntimeExtensionHost,
+  async #extendResourcesFromPlugins(
+    extensions: RuntimePluginHost,
     reason: "startup" | "refresh",
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
     const loader = this.#resourceLoader;
     if (loader === undefined) return;
-    const runtime = this.#extensionsResult?.runtime;
-    if (loader.extendResourcesFromExtensions !== undefined && runtime !== undefined) {
-      await loader.extendResourcesFromExtensions(runtime, reason, signal);
+    const runtime = this.#pluginsResult?.runtime;
+    if (loader.extendResourcesFromPlugins !== undefined && runtime !== undefined) {
+      await loader.extendResourcesFromPlugins(runtime, reason, signal);
       return;
     }
     const discovered = await extensions.discoverResources(reason, signal);
-    const paths = (entries: typeof discovered.skillPaths): NonNullable<ResourceExtensionPaths["skillPaths"]> =>
+    const paths = (entries: typeof discovered.skillPaths): NonNullable<ResourcePluginPaths["skillPaths"]> =>
       entries.map((entry) => ({
         path: entry.path,
         metadata: {
@@ -7453,7 +7590,7 @@ export class AgentSession {
     });
   }
 
-  #directProviderBinding(host: RuntimeExtensionHost): DirectProviderGenerationBinding {
+  #directProviderBinding(host: RuntimePluginHost): DirectProviderGenerationBinding {
     const existing = this.#directProviderBindings.get(host);
     if (existing !== undefined) return existing;
     const binding: DirectProviderGenerationBinding = { host, registrations: new Map() };
@@ -7470,7 +7607,7 @@ export class AgentSession {
   ): DirectProviderRegistrationBinding {
     const registry = this.#modelRegistry;
     if (registry === undefined) throw new Error("This AgentSession has no model registry");
-    const extensionModels = extensionModelRegistry(registry);
+    const extensionModels = pluginModelRegistry(registry);
     const name = registration.name;
     const previousNative = extensionModels.getRegisteredNativeProvider(name);
     const previousConfig = extensionModels.getRegisteredProviderConfig(name);
@@ -7649,7 +7786,7 @@ export class AgentSession {
     if (failures.length > 1) throw new AggregateError(failures, "Direct provider cleanup failed");
   }
 
-  #activateDirectProviderGeneration(host: RuntimeExtensionHost): void {
+  #activateDirectProviderGeneration(host: RuntimePluginHost): void {
     if (this.#activeDirectProviderHost === host) return;
     const previousHost = this.#activeDirectProviderHost;
     const previousBinding = previousHost === undefined
@@ -7691,27 +7828,28 @@ export class AgentSession {
     }
   }
 
-  #applyExtensionBindings(runner: ExtensionRunner, host: RuntimeExtensionHost): void {
+  #applyPluginBindings(runner: PluginRunner, host: RuntimePluginHost): void {
     const bindings = this.#extensionBindings;
     const mode = bindings.mode ?? "print";
     host.setHostContext({ mode });
     host.setSessionUiHandler(bindings.uiContext === undefined ? undefined : () => bindings.uiContext!);
     runner.setUIContext(bindings.uiContext, mode);
-    this.#unsubscribeExtensionError?.();
-    this.#unsubscribeExtensionError = bindings.onError === undefined
+    this.#unsubscribePluginError?.();
+    this.#unsubscribePluginError = bindings.onError === undefined
       ? undefined
       : runner.onError(bindings.onError);
-    this.#bindDirectExtensionActions(runner, host);
+    this.#bindDirectPluginActions(runner, host);
     this.#activateDirectProviderGeneration(host);
   }
 
-  async #disableIncompleteExtensionGeneration(
-    runner: ExtensionRunner,
-    host: RuntimeExtensionHost,
+  async #disableIncompletePluginGeneration(
+    runner: PluginRunner,
+    host: RuntimePluginHost,
   ): Promise<unknown[]> {
     const failures: unknown[] = [];
-    this.#unsubscribeExtensionError?.();
-    this.#unsubscribeExtensionError = undefined;
+    if (this.#startedPluginBinding?.host === host) this.#startedPluginBinding = undefined;
+    this.#unsubscribePluginError?.();
+    this.#unsubscribePluginError = undefined;
     for (const clear of [
       () => host.setDirectActionsHandler(undefined),
       () => host.setDirectContextHandler(undefined),
@@ -7735,15 +7873,15 @@ export class AgentSession {
     }
     if (this.#activeDirectProviderHost === host) this.#activeDirectProviderHost = undefined;
     try {
-      runner.invalidate("Extension runtime context is incomplete after session_start failed");
+      runner.invalidate("Plugin runtime context is incomplete after session_start failed");
     } catch (error) {
       failures.push(error);
     }
-    if (this.#extensionRunner === runner) {
-      this.#extensionRunner = undefined;
+    if (this.#pluginRunner === runner) {
+      this.#pluginRunner = undefined;
     }
-    if (this.#extensionHost === host) this.#extensionHost = undefined;
-    this.#incompleteExtensionRuntime = this.#extensionsResult?.runtime;
+    if (this.#pluginHost === host) this.#pluginHost = undefined;
+    this.#incompletePluginRuntime = this.#pluginsResult?.runtime;
     try {
       await host.close();
     } catch (error) {
@@ -7752,39 +7890,50 @@ export class AgentSession {
     return failures;
   }
 
-  async refresh(options: {
-    validateSettings?: (settings: Readonly<Settings>) => void | Promise<void>;
-    beforeSessionStart?: () => void | Promise<void>;
-    signal?: AbortSignal;
-  } = {}): Promise<void> {
+  async refresh(options: AgentSessionRefreshOptions = {}): Promise<void> {
     options.signal?.throwIfAborted();
+    if (this.#extensionBindingInProgress) throw new Error("Plugin session binding is already in progress");
+    if (this.#extensionRefreshInProgress) throw new Error("Plugin session refresh is already in progress");
     this.#assertIdle();
+    this.#extensionRefreshInProgress = true;
+    try {
+      await this.#refresh(options);
+    } finally {
+      this.#extensionRefreshInProgress = false;
+    }
+  }
+
+  async #refresh(options: AgentSessionRefreshOptions): Promise<void> {
+    if (this.#ownership.refresh !== undefined) {
+      await this.#ownership.refresh(options);
+      return;
+    }
     if (this.#resourceLoader !== undefined && this.#resourceLoader.supportsTransactionalRefresh !== true) {
       throw new Error(
-        "This resource loader does not support transactional refresh; add supportsTransactionalRefresh: true and honor prepareExtensions before publishing resources",
+        "This resource loader does not support transactional refresh; add supportsTransactionalRefresh: true and honor preparePlugins before publishing resources",
       );
     }
     await this.#settings.flush();
     const rollbackSettings = this.#settings.createRollback();
-    const previousRunner = this.#extensionRunner;
-    const previousHost = this.#extensionHost;
+    const previousRunner = this.#pluginRunner;
+    const previousHost = this.#pluginHost;
     const previousProviderHost = this.#activeDirectProviderHost;
-    const previousResult = this.#extensionsResult;
+    const previousResult = this.#pluginsResult;
     const previousFlagValues = previousRunner?.getFlagValues() ?? new Map<string, boolean | string>();
     let shutdownStarted = false;
     let startAttempted = false;
     let settingsRevision: number | undefined;
     let resourcesCommitted = false;
-    let preparedExtensions: {
+    let preparedPlugins: {
       result: NonNullable<typeof previousResult>;
-      host: RuntimeExtensionHost;
-      runner: ExtensionRunner;
+      host: RuntimePluginHost;
+      runner: PluginRunner;
     } | undefined;
     try {
       if (previousHost !== undefined) {
         shutdownStarted = true;
         const event = { reason: "refresh" } satisfies Omit<SessionShutdownEvent, "type">;
-        await dispatchDirectExtensionEvent(previousHost, "session_shutdown", event, options.signal);
+        await dispatchDirectPluginEvent(previousHost, "session_shutdown", event, options.signal);
       }
       options.signal?.throwIfAborted();
       this.#settings.drainErrors();
@@ -7809,21 +7958,21 @@ export class AgentSession {
         await this.#resourceLoader.refresh({
           ...optionalProperties(preparedSettings === undefined ? undefined : { preparedSettings }),
           ...optionalProperties(options.signal === undefined ? undefined : { signal: options.signal }),
-          prepareExtensions: (result) => {
+          preparePlugins: (result) => {
             if (result === previousResult) return;
             if (result.runtime === previousResult?.runtime) {
               if (previousRunner === undefined || previousHost === undefined
-                || result.extensions.length !== previousResult.extensions.length
-                || result.extensions.some((extension, index) => extension !== previousResult.extensions[index])) {
+                || result.plugins.length !== previousResult.plugins.length
+                || result.plugins.some((plugin, index) => plugin !== previousResult.plugins[index])) {
                 throw new Error("A refresh cannot change the extension projection without a new runtime generation");
               }
               return;
             }
-            const host = getExtensionRuntimeHost(result.runtime)
-              ?? ensureExtensionRuntimeHost(result.runtime, this.#workspace);
+            const host = getPluginRuntimeHost(result.runtime)
+              ?? ensurePluginRuntimeHost(result.runtime, this.#workspace);
             for (const [name, value] of host.flagValues()) result.runtime.flagValues.set(name, value);
-            const runner = new ExtensionRunner(
-              result.extensions,
+            const runner = new PluginRunner(
+              result.plugins,
               result.runtime,
               this.#workspace,
               this.#session,
@@ -7833,7 +7982,7 @@ export class AgentSession {
               if (runner.getFlags().has(name)) runner.setFlagValue(name, value);
             }
             this.#activateDirectProviderGeneration(host);
-            preparedExtensions = { result, host, runner };
+            preparedPlugins = { result, host, runner };
             return () => {
               if (previousProviderHost !== undefined) {
                 this.#activateDirectProviderGeneration(previousProviderHost);
@@ -7846,20 +7995,20 @@ export class AgentSession {
         });
         resourcesCommitted = true;
       }
-      const nextResult = this.#resourceLoader?.getExtensions() ?? previousResult;
+      const nextResult = this.#resourceLoader?.getPlugins() ?? previousResult;
       if (nextResult !== undefined && nextResult !== previousResult) {
         if (nextResult.runtime === previousResult?.runtime) {
-          this.#extensionsResult = nextResult;
+          this.#pluginsResult = nextResult;
         } else {
-          const prepared = preparedExtensions?.result === nextResult ? preparedExtensions : undefined;
+          const prepared = preparedPlugins?.result === nextResult ? preparedPlugins : undefined;
           const nextHost = prepared?.host
-            ?? getExtensionRuntimeHost(nextResult.runtime)
-            ?? ensureExtensionRuntimeHost(nextResult.runtime, this.#workspace);
+            ?? getPluginRuntimeHost(nextResult.runtime)
+            ?? ensurePluginRuntimeHost(nextResult.runtime, this.#workspace);
           if (prepared === undefined) {
             for (const [name, value] of nextHost.flagValues()) nextResult.runtime.flagValues.set(name, value);
           }
-          const nextRunner = prepared?.runner ?? new ExtensionRunner(
-            nextResult.extensions,
+          const nextRunner = prepared?.runner ?? new PluginRunner(
+            nextResult.plugins,
             nextResult.runtime,
             this.#workspace,
             this.#session,
@@ -7870,22 +8019,22 @@ export class AgentSession {
               if (nextRunner.getFlags().has(name)) nextRunner.setFlagValue(name, value);
             }
           }
-          this.#extensionsResult = nextResult;
-          this.#extensionHost = nextHost;
-          this.#extensionRunner = nextRunner;
-          this.#incompleteExtensionRuntime = undefined;
-          previousRunner?.invalidate("Extension runtime context is stale after AgentSession refresh");
+          this.#pluginsResult = nextResult;
+          this.#pluginHost = nextHost;
+          this.#pluginRunner = nextRunner;
+          this.#incompletePluginRuntime = undefined;
+          previousRunner?.invalidate("Plugin runtime context is stale after AgentSession refresh");
         }
       }
       if (
-        this.#incompleteExtensionRuntime !== undefined
-        && nextResult?.runtime === this.#incompleteExtensionRuntime
-        && this.#extensionHost === undefined
+        this.#incompletePluginRuntime !== undefined
+        && nextResult?.runtime === this.#incompletePluginRuntime
+        && this.#pluginHost === undefined
       ) {
         throw new Error("An incomplete extension generation cannot be restarted; refresh must publish a fresh generation");
       }
-      if (this.#extensionRunner !== undefined && this.#extensionHost !== undefined) {
-        this.#applyExtensionBindings(this.#extensionRunner, this.#extensionHost);
+      if (this.#pluginRunner !== undefined && this.#pluginHost !== undefined) {
+        this.#applyPluginBindings(this.#pluginRunner, this.#pluginHost);
       }
       if (this.#settingsOwnToolSelection) this.#applySettingsToolSelection();
       this.#publicAgent.refreshSettings();
@@ -7895,14 +8044,14 @@ export class AgentSession {
       await this.#options.refresh?.(options);
       options.signal?.throwIfAborted();
       startAttempted = true;
-      await this.#bindExtensions({ reason: "refresh" }, options.signal);
+      await this.#bindPlugins({ reason: "refresh" }, options.signal);
     } catch (error) {
       const failures: unknown[] = [error];
       if (resourcesCommitted && startAttempted) {
-        const activeRunner = this.#extensionRunner;
-        const activeHost = this.#extensionHost;
+        const activeRunner = this.#pluginRunner;
+        const activeHost = this.#pluginHost;
         if (activeRunner !== undefined && activeHost !== undefined) {
-          failures.push(...await this.#disableIncompleteExtensionGeneration(activeRunner, activeHost));
+          failures.push(...await this.#disableIncompletePluginGeneration(activeRunner, activeHost));
         }
       }
       if (!resourcesCommitted) {
@@ -7925,11 +8074,11 @@ export class AgentSession {
           failures.push(settingsRecoveryError);
         }
       }
-      const active = this.#extensionHost;
+      const active = this.#pluginHost;
       const shouldRestart = active !== undefined && !startAttempted && (active !== previousHost || shutdownStarted);
       if (shouldRestart) {
         try {
-          await this.bindExtensions({ reason: "refresh" });
+          await this.bindPlugins({ reason: "refresh" });
         } catch (restartError) {
           failures.push(restartError);
         }
@@ -7954,8 +8103,8 @@ export class AgentSession {
     return this.#session.getLeafId() ?? "root";
   }
 
-  async #flushExtensionTurn(runId: string, signal?: AbortSignal): Promise<void> {
-    const extensions = this.#extensionHost;
+  async #flushPluginTurn(runId: string, signal?: AbortSignal): Promise<void> {
+    const extensions = this.#pluginHost;
     const turn = this.#extensionTurns.get(runId);
     if (turn === undefined) return;
     this.#extensionTurns.delete(runId);
@@ -7965,7 +8114,7 @@ export class AgentSession {
       toolResults: turn.toolResults,
     };
     if (extensions?.hasListeners("turn_end") === true) {
-      await dispatchDirectExtensionEvent(extensions, "turn_end", event, signal);
+      await dispatchDirectPluginEvent(extensions, "turn_end", event, signal);
     }
     await this.#emitPublic({
       type: "turn_end",
@@ -7976,13 +8125,13 @@ export class AgentSession {
   }
 
   async #emitAgentEnd(runId: string, willRetry: boolean, signal?: AbortSignal): Promise<void> {
-    await this.#flushExtensionTurn(runId, signal);
+    await this.#flushPluginTurn(runId, signal);
     const messages = structuredClone(this.#extensionRunMessages.get(runId) ?? []);
     if (willRetry) this.#extensionRunMessages.set(runId, []);
     else this.#extensionRunMessages.delete(runId);
-    const extensions = this.#extensionHost;
+    const extensions = this.#pluginHost;
     if (extensions?.hasListeners("agent_end") === true) {
-      await dispatchDirectExtensionEvent(extensions, "agent_end", { messages }, signal);
+      await dispatchDirectPluginEvent(extensions, "agent_end", { messages }, signal);
     }
     await this.#emitPublic({
       type: "agent_end",
@@ -7995,10 +8144,10 @@ export class AgentSession {
     if (!this.#settlementPending) return;
     this.#settlementPending = false;
     const failures: unknown[] = [];
-    const extensions = this.#extensionHost;
+    const extensions = this.#pluginHost;
     if (extensions?.hasListeners("agent_settled") === true) {
       try {
-        await dispatchDirectExtensionEvent(extensions, "agent_settled", {});
+        await dispatchDirectPluginEvent(extensions, "agent_settled", {});
       } catch (error) {
         failures.push(error);
       }
@@ -8032,18 +8181,18 @@ export class AgentSession {
         }, operation),
       }),
       beforeRun: async (event, signal) => {
-        const extensions = this.#extensionHost;
+        const extensions = this.#pluginHost;
         this.#settlementPending = true;
         this.#extensionRunMessages.set(event.runId, []);
         if (extensions?.hasListeners("agent_start") === true) {
           const directEvent = {} satisfies Omit<AgentStartEvent, "type">;
-          await dispatchDirectExtensionEvent(extensions, "agent_start", directEvent, signal);
+          await dispatchDirectPluginEvent(extensions, "agent_start", directEvent, signal);
         }
         await this.#emitPublic({ type: "agent_start" });
       },
       beforeTurn: async (event, signal) => {
-        const extensions = this.#extensionHost;
-        await this.#flushExtensionTurn(event.runId, signal);
+        const extensions = this.#pluginHost;
+        await this.#flushPluginTurn(event.runId, signal);
         const snapshot: RuntimeAssistantStreamSnapshot = {
           role: "assistant",
           provider: event.provider,
@@ -8075,17 +8224,17 @@ export class AgentSession {
         });
         const directEvent = { turnIndex: event.step - 1, timestamp: Date.now() } satisfies Omit<TurnStartEvent, "type">;
         if (extensions?.hasListeners("turn_start") === true) {
-          await dispatchDirectExtensionEvent(extensions, "turn_start", directEvent, signal);
+          await dispatchDirectPluginEvent(extensions, "turn_start", directEvent, signal);
         }
         await this.#emitPublic({ type: "turn_start", ...directEvent });
       },
       beforeModel: async (event, signal) => {
-        const extensions = this.#extensionHost;
+        const extensions = this.#pluginHost;
         const turn = this.#extensionTurns.get(event.runId);
         if (turn === undefined) return;
         const directEvent = { message: structuredClone(turn.message) };
         if (extensions?.hasListeners("message_start") === true) {
-          await dispatchDirectExtensionEvent(extensions, "message_start", directEvent, signal);
+          await dispatchDirectPluginEvent(extensions, "message_start", directEvent, signal);
         }
         await this.#emitPublic({ type: "message_start", message: extensionMessage(turn.message) });
       },
@@ -8110,7 +8259,7 @@ export class AgentSession {
         }
       },
       beforeCompaction: async (event, signal) => {
-        const extensions = this.#extensionHost;
+        const extensions = this.#pluginHost;
         if (extensions === undefined) return undefined;
         if (!extensions.hasListeners("session_before_compact")) return undefined;
         const branchEntries = this.#session.getBranch();
@@ -8162,13 +8311,13 @@ export class AgentSession {
           ? undefined
           : branchEntries.find((entry) => entry.id === result.compaction?.firstKeptEntryId);
         if (result.compaction !== undefined && selectedEntry?.type !== "message") {
-          throw new Error("Extension compaction firstKeptEntryId must identify a message on the active branch");
+          throw new Error("Plugin compaction firstKeptEntryId must identify a message on the active branch");
         }
         const selectedMessageId = selectedEntry?.type === "message" && "id" in selectedEntry.message
           ? selectedEntry.message.id
           : undefined;
         if (selectedEntry !== undefined && !Value.Check(STRING_VALUE, selectedMessageId)) {
-          throw new Error("Extension compaction retained message has no stable message id");
+          throw new Error("Plugin compaction retained message has no stable message id");
         }
         return {
           ...optionalProperties(result.cancel === undefined ? undefined : { cancel: result.cancel }),
@@ -8180,7 +8329,7 @@ export class AgentSession {
         };
       },
       afterCompaction: async (event, signal) => {
-        const extensions = this.#extensionHost;
+        const extensions = this.#pluginHost;
         const compactionEntry = this.#session.getBranch().findLast((entry) => entry.type === "compaction");
         if (compactionEntry === undefined) return;
         try {
@@ -8191,7 +8340,7 @@ export class AgentSession {
               reason: event.reason,
               willRetry: event.willRetry,
             };
-            await dispatchDirectExtensionEvent(extensions, "session_compact", directEvent, signal);
+            await dispatchDirectPluginEvent(extensions, "session_compact", directEvent, signal);
           }
         } finally {
           if (!this.#manualCompactionOwnsPublicEvents) {
@@ -8208,8 +8357,8 @@ export class AgentSession {
     };
   }
 
-  #agentExtensionReducers(): AgentExtensionReducers | undefined {
-    const extensions = this.#extensionHost;
+  #agentPluginReducers(): AgentPluginReducers | undefined {
+    const extensions = this.#pluginHost;
     const beforeAgentStart = extensions?.hasListeners("before_agent_start") === true;
     const context = extensions?.hasListeners("context") === true;
     const agentContext = this.#publicAgent.usesContextReducer();
@@ -8230,6 +8379,10 @@ export class AgentSession {
                 }),
               };
               const reduced = await extensions!.reduceBeforeAgentStart(directEvent, signal);
+              this.#lastSystemPrompt = reduced.systemPrompt;
+              this.#lastPromptComposition = reduced.promptComposition === undefined
+                ? undefined
+                : structuredClone(reduced.promptComposition);
               return {
                 systemPrompt: reduced.systemPrompt,
                 messages: reduced.messages.map((message) => ({
@@ -8254,7 +8407,7 @@ export class AgentSession {
               let selected = [...messages];
               if (context) {
                 const active = [...this.#extensionTurns.values()].at(-1);
-                if (active === undefined) throw new Error("Extension context hook has no active run scope");
+                if (active === undefined) throw new Error("Plugin context hook has no active run scope");
                 selected = await extensions!.reduceContext({
                   threadId: active.threadId,
                   runId: active.runId,
@@ -8270,7 +8423,7 @@ export class AgentSession {
             messageStart: async (message, signal) => {
               const directEvent = { message };
               if (extensions?.hasListeners("message_start") === true) {
-                await dispatchDirectExtensionEvent(extensions, "message_start", directEvent, signal);
+                await dispatchDirectPluginEvent(extensions, "message_start", directEvent, signal);
               }
               for (const publicMessage of extensionMessages(message)) {
                 await this.#emitPublic({ type: "message_start", message: publicMessage });
@@ -8331,8 +8484,8 @@ export class AgentSession {
     };
   }
 
-  async #observeExtensionEnvelope(envelope: EventEnvelope): Promise<void> {
-    const extensions = this.#extensionHost;
+  async #observePluginEnvelope(envelope: EventEnvelope): Promise<void> {
+    const extensions = this.#pluginHost;
     const runId = envelope.runId;
     if (runId === undefined) return;
     const event = envelope.event;
@@ -8402,7 +8555,7 @@ export class AgentSession {
     if (event.type === "retry_attempt_started") {
       this.#retrySleeping = false;
       if (extensions?.hasListeners("agent_start") === true) {
-        await dispatchDirectExtensionEvent(extensions, "agent_start", {});
+        await dispatchDirectPluginEvent(extensions, "agent_start", {});
       }
       await this.#emitPublic({ type: "agent_start" });
       const turnIndex = Math.max(0, event.step + event.attempt - 3);
@@ -8436,7 +8589,7 @@ export class AgentSession {
       });
       const timestamp = Date.now();
       if (extensions?.hasListeners("turn_start") === true) {
-        await dispatchDirectExtensionEvent(extensions, "turn_start", { turnIndex, timestamp });
+        await dispatchDirectPluginEvent(extensions, "turn_start", { turnIndex, timestamp });
       }
       await this.#emitPublic({ type: "turn_start", turnIndex, timestamp });
       return;
@@ -8459,7 +8612,7 @@ export class AgentSession {
         if (event.message.stopReason === "error" || event.message.stopReason === "cancelled") {
           const directEvent = { message: structuredClone(event.message) };
           if (extensions?.hasListeners("message_end") === true) {
-            await dispatchDirectExtensionEvent(extensions, "message_end", directEvent);
+            await dispatchDirectPluginEvent(extensions, "message_end", directEvent);
           }
           for (const publicMessage of extensionMessages(event.message)) {
             await this.#emitPublic({ type: "message_end", message: publicMessage });
@@ -8605,7 +8758,7 @@ export class AgentSession {
               assistantMessageEvent: publicAssistantEvent,
             });
           } else {
-            await dispatchDirectExtensionEvent(extensions, "message_update", {
+            await dispatchDirectPluginEvent(extensions, "message_update", {
               message: { ...turn.message, content: assistantStreamContent(turn.snapshot) },
               assistantMessageEvent,
             });
@@ -8620,9 +8773,9 @@ export class AgentSession {
     }
   }
 
-  #bindDirectExtensionActions(
-    runner: ExtensionRunner | undefined = this.#extensionRunner,
-    extensions: RuntimeExtensionHost | undefined = this.#extensionHost,
+  #bindDirectPluginActions(
+    runner: PluginRunner | undefined = this.#pluginRunner,
+    extensions: RuntimePluginHost | undefined = this.#pluginHost,
   ): void {
     if (runner === undefined || extensions === undefined) return;
     const commandActions = this.#extensionBindings.commandContextActions;
@@ -8718,7 +8871,7 @@ export class AgentSession {
       setActiveTools: (toolNames) => { this.setActiveTools(toolNames); },
       refreshTools: () => {
         this.#toolCatalogRevision += 1;
-        if (this.#activateExtensionToolsOnBind && this.#activeToolNames !== undefined) {
+        if (this.#activatePluginToolsOnBind && this.#activeToolNames !== undefined) {
           for (const tool of extensions.tools()) {
             if (!this.#excludedActiveToolNames.has(tool.definition.name)) {
               this.#activeToolNames.add(tool.definition.name);
@@ -8731,7 +8884,7 @@ export class AgentSession {
       setModel: async (model) => {
         const registry = this.#modelRegistry;
         if (registry === undefined) return false;
-        const internal = extensionModelRegistry(registry).resolve(model);
+        const internal = pluginModelRegistry(registry).resolve(model);
         if (!this.#providers.has(internal.provider)) return false;
         await this.setModel({
           provider: internal.provider,
@@ -8801,7 +8954,7 @@ export class AgentSession {
         this.newSession({
           ...optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
         });
-        await options.setup?.(extensionSessionManager(this.#session));
+        await options.setup?.(pluginSessionManager(this.#session));
         await options.withSession?.(runtimeReplacementContext(this.createReplacedSessionContext()));
         signal?.throwIfAborted();
         return { cancelled: false };
@@ -8816,7 +8969,7 @@ export class AgentSession {
         signal?.throwIfAborted();
         if (!this.isIdle) return { cancelled: true };
         const target = options.position === "before"
-          ? this.#session.getEntries().find((entry) => entry.id === entryId)?.parentId ?? null
+          ? this.#session.getEntry(entryId)?.parentId ?? null
           : entryId;
         if (target === null) throw new Error("Cannot fork before the first session entry");
         const path = this.createBranchedSession(target);
@@ -8921,7 +9074,7 @@ export class AgentSession {
         getModel: () => {
           const selected = this.#model;
           const model = selected === undefined ? undefined : this.#modelRegistry?.find(selected.provider, selected.id);
-          return model === undefined ? undefined : extensionModel(model);
+          return model === undefined ? undefined : pluginModel(model);
         },
         getScopedModels: () => this.scopedModels,
         isIdle: () => this.isIdle,
@@ -8953,14 +9106,14 @@ export class AgentSession {
         this.newSession({
           ...optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
         });
-        await options.setup?.(extensionSessionManager(this.#session));
+        await options.setup?.(pluginSessionManager(this.#session));
         await options.withSession?.(this.createReplacedSessionContext());
         return { cancelled: false };
       },
       fork: async (entryId, options = {}) => {
         if (!this.isIdle) return { cancelled: true };
         const target = options.position === "before"
-          ? this.#session.getEntries().find((entry) => entry.id === entryId)?.parentId ?? null
+          ? this.#session.getEntry(entryId)?.parentId ?? null
           : entryId;
         if (target === null) throw new Error("Cannot fork before the first session entry");
         const path = this.createBranchedSession(target);
@@ -8993,7 +9146,7 @@ export class AgentSession {
       if (
         target?.branch !== undefined &&
         target.branch !== this.#extensionBranch() &&
-        target.branch !== this.#activeExtensionRunBranch
+        target.branch !== this.#activePluginRunBranch
       ) {
         throw new Error("Direct extension context only exposes the current branch");
       }
@@ -9003,7 +9156,7 @@ export class AgentSession {
         : modelRegistry.find(selected.provider, selected.id)
           ?? (selected.info === undefined ? undefined : providerModelFromInfo(selected.info, selected.api));
       return {
-        sessionManager: extensionSessionManager(this.#session),
+        sessionManager: pluginSessionManager(this.#session),
         modelRegistry,
         completeModel: (model, context, options) => {
           const complete = () => this.modelRuntime.complete(model, context, options);
@@ -9034,6 +9187,16 @@ export class AgentSession {
     });
   }
 
+  #assertPromptPreparationAllowed(options: NormalizedAgentSessionPromptOptions, text?: string): void {
+    if (this.#branchSummaryOperation !== undefined) throw new Error("AgentSession must be idle");
+    if (this.#compactionAbortController === undefined || options.manualCompaction === true) return;
+    const command = text === undefined || options.expandPromptTemplates === false
+      ? undefined
+      : this.#extensionCommand(text);
+    if (command !== undefined && this.#pluginHost?.hasCommand(command.name) === true) return;
+    throw new Error("AgentSession must be idle");
+  }
+
   async #preparePrompt(
     text: string,
     options: NormalizedAgentSessionPromptOptions,
@@ -9043,12 +9206,12 @@ export class AgentSession {
     const expand = options.expandPromptTemplates !== false;
     let currentText = text;
     let currentImages = options.images;
-    const extensions = this.#extensionHost;
+    const extensions = this.#pluginHost;
     if (expand && extensions !== undefined) {
       const command = this.#extensionCommand(currentText);
       if (command !== undefined && extensions.hasCommand(command.name)) {
         const commandScope = { active: true, preflight };
-        let result: Awaited<ReturnType<RuntimeExtensionHost["runCommand"]>>;
+        let result: Awaited<ReturnType<RuntimePluginHost["runCommand"]>>;
         try {
           result = await this.#extensionCommandScope.run(commandScope, async () =>
             await extensions.runCommand(command.name, {
@@ -9065,6 +9228,7 @@ export class AgentSession {
         if (result.prompt !== undefined) currentText = result.prompt;
       }
     }
+    this.#assertPromptPreparationAllowed(options);
     if (extensions?.hasListeners("input") === true) {
       const result = await extensions.reduceInput({
         threadId: this.sessionId,
@@ -9184,9 +9348,9 @@ export class AgentSession {
     return { name, args: space < 0 ? "" : text.slice(space + 1) };
   }
 
-  #throwIfExtensionCommand(text: string): void {
+  #throwIfPluginCommand(text: string): void {
     const command = this.#extensionCommand(text);
-    if (command === undefined || this.#extensionHost?.hasCommand(command.name) !== true) return;
+    if (command === undefined || this.#pluginHost?.hasCommand(command.name) !== true) return;
     throw new Error(
       `Queued input cannot invoke extension command "/${command.name}"; submit it with prompt() or run it while the session is idle.`,
     );
@@ -9219,7 +9383,7 @@ export class AgentSession {
       const args = space < 0 ? "" : text.slice(space + 1).trim();
       return args === "" ? invocation : `${invocation}\n\n${args}`;
     } catch (error) {
-      this.#extensionHost?.addDiagnostic({
+      this.#pluginHost?.addDiagnostic({
         extensionId: "skill",
         sourcePath: skill.filePath,
         message: `Skill expansion failed: ${safeErrorMessage(error)}`,
@@ -9290,7 +9454,7 @@ export class AgentSession {
 
   #queuedMessagesInDurableOrder(messages: readonly QueuedRunMessage[]): QueuedRunMessage[] {
     const order = new Map(
-      [...this.#session.getV4State().queue.keys()].map((id, index) => [id, index]),
+      this.#session.getV4PendingQueue().map((entry, index) => [entry.id, index]),
     );
     return [...messages].sort((left, right) =>
       (order.get(queuedRunDeliveryId(left) ?? "") ?? Number.MAX_SAFE_INTEGER) -
@@ -9312,7 +9476,7 @@ export class AgentSession {
 
   #canonicalCustomMessage<T>(
     value: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-    provenance?: ExtensionSessionProvenance,
+    provenance?: PluginSessionProvenance,
   ): CanonicalMessage {
     const customType = value.customType.trim();
     if (customType === "" || customType.includes("\0") || Buffer.byteLength(customType, "utf8") > 256) {
@@ -9373,7 +9537,7 @@ export class AgentSession {
       begin: () => {
         const operationId = this.#activeOperationId;
         if (operationId === undefined) throw new Error("Durable queue delivery requires an active operation");
-        const entry = this.#session.getV4State().queue.get(entryId);
+        const entry = this.#session.getV4QueueEntry(entryId);
         if (entry === undefined) throw new Error(`Durable queue entry ${entryId} is missing`);
         if (entry.status === "claimed" && entry.operationId === operationId) return;
         if (entry.status !== "queued") {
@@ -9388,9 +9552,9 @@ export class AgentSession {
         }]);
       },
       delivered: () => {
-        const entry = this.#session.getV4State().queue.get(entryId);
+        const entry = this.#session.getV4QueueEntry(entryId);
         if (entry === undefined || entry.status === "consumed") return;
-        if (entry.status !== "claimed" || !this.#session.getV4State().nodes.has(messageId)) {
+        if (entry.status !== "claimed" || !this.#session.hasV4Node(messageId)) {
           throw new Error(`Durable queue entry ${entryId} was not materialized before delivery completed`);
         }
         this.#session.commitChanges([{
@@ -9430,7 +9594,6 @@ export class AgentSession {
   }
 
   #materializeInterruptedPrompt(operation: SessionV4OperationState): void {
-    const state = this.#session.getV4State();
     const request = isJsonObject(operation.request)
       ? operation.request
       : undefined;
@@ -9446,8 +9609,7 @@ export class AgentSession {
     });
     let expectedParentId = operation.sourceHeadId;
     for (const message of initialMessages) {
-      const current = this.#session.getV4State();
-      const existing = current.nodes.get(message.id);
+      const existing = this.#session.getV4Node(message.id);
       if (existing !== undefined) {
         if (
           existing.nodeType !== "message" ||
@@ -9460,7 +9622,7 @@ export class AgentSession {
           );
         }
       } else {
-        const branch = current.branches.get(operation.branchId);
+        const branch = this.#session.getV4Branch();
         if (branch?.headNodeId !== expectedParentId) {
           throw new Error(
             `Interrupted operation ${operation.id} cannot restore accepted message ${message.id} out of order`,
@@ -9475,7 +9637,7 @@ export class AgentSession {
       expectedParentId = message.id;
     }
     if (operation.promptNodeId === null) return;
-    const existingPrompt = this.#session.getV4State().nodes.get(operation.promptNodeId);
+    const existingPrompt = this.#session.getV4Node(operation.promptNodeId);
     if (existingPrompt !== undefined) {
       if (
         existingPrompt.operationId !== operation.id ||
@@ -9485,8 +9647,7 @@ export class AgentSession {
       }
       return;
     }
-    const queueEntry = [...state.queue.values()]
-      .find((entry) => entry.targetNodeId === operation.promptNodeId);
+    const queueEntry = this.#session.getV4QueueEntryForNode(operation.promptNodeId);
     let text: string | undefined;
     let images: ImageBlock[] = [];
     let custom: QueuedRunMessage["custom"] | undefined;
@@ -9551,13 +9712,13 @@ export class AgentSession {
   }
 
   #materializeInterruptedToolResults(operationId: string): void {
-    const state = this.#session.getV4State();
-    const operation = state.operations.get(operationId);
+    const operation = this.#session.getV4Operation(operationId);
     if (operation === undefined) throw new Error(`Interrupted operation ${operationId} is missing`);
+    const operationEffects = this.#session.getV4ToolEffects(operationId);
     const assistantToolCalls = (
       nodeId: string,
     ): Array<{ callId: string; name: string; index: number }> => {
-      const node = this.#session.getV4State().nodes.get(nodeId);
+      const node = this.#session.getV4Node(nodeId);
       if (node?.nodeType !== "message" || node.role !== "assistant") return [];
       const message = isJsonObject(node.content)
         ? node.content
@@ -9575,9 +9736,8 @@ export class AgentSession {
     };
     const existingToolResultCallIds = (): Set<string> => {
       const result = new Set<string>();
-      for (const node of this.#session.getV4State().nodes.values()) {
+      for (const node of this.#session.getV4OperationNodes(operationId)) {
         if (
-          node.operationId !== operationId ||
           node.nodeType !== "message" ||
           node.role !== "tool" ||
           !isJsonObject(node.content) ||
@@ -9594,8 +9754,7 @@ export class AgentSession {
       return result;
     };
     const groups = new Map<string, SessionV4ToolEffectState[]>();
-    for (const effect of state.toolEffects.values()) {
-      if (effect.operationId !== operationId) continue;
+    for (const effect of operationEffects) {
       const existing = groups.get(effect.resultNodeId);
       if (existing === undefined) groups.set(effect.resultNodeId, [effect]);
       else existing.push(effect);
@@ -9606,7 +9765,7 @@ export class AgentSession {
       return firstLeft.step - firstRight.step || firstLeft.index - firstRight.index;
     });
     for (const [resultNodeId, effects] of ordered) {
-      if (this.#session.getV4State().nodes.has(resultNodeId)) continue;
+      if (this.#session.hasV4Node(resultNodeId)) continue;
       const selected = effects.toSorted((left, right) =>
         left.index - right.index || left.id.localeCompare(right.id));
       const unfinished = selected.find((effect) =>
@@ -9630,8 +9789,7 @@ export class AgentSession {
             if (effect !== undefined) {
               return [persistedRecoveryToolResult(effect) ?? unavailableRecoveryToolResult(effect)];
             }
-            const belongsToAnotherResult = [...state.toolEffects.values()].some((candidate) =>
-              candidate.operationId === operationId &&
+            const belongsToAnotherResult = operationEffects.some((candidate) =>
               candidate.callId === call.callId &&
               candidate.resultNodeId !== resultNodeId);
             return belongsToAnotherResult ? [] : [undispatchedRecoveryToolResult(call)];
@@ -9648,15 +9806,14 @@ export class AgentSession {
       });
     }
 
-    const refreshed = this.#session.getV4State();
-    const branch = refreshed.branches.get(operation.branchId);
+    const branch = this.#session.getV4Branch();
     const operationNodeIds: string[] = [];
     let cursor = branch?.headNodeId ?? null;
     while (cursor !== operation.sourceHeadId) {
       if (cursor === null) {
         throw new Error(`Interrupted operation ${operationId} no longer descends from its source head`);
       }
-      const node = refreshed.nodes.get(cursor);
+      const node = this.#session.getV4Node(cursor);
       if (node === undefined || node.operationId !== operationId) {
         throw new Error(`Interrupted operation ${operationId} has an invalid conversation path`);
       }
@@ -9670,10 +9827,8 @@ export class AgentSession {
         .filter((call) => !existing.has(call.callId))
         .sort((left, right) => left.index - right.index);
       if (missing.length === 0) continue;
-      const current = this.#session.getV4State();
       const effects = new Map(
-        [...current.toolEffects.values()]
-          .filter((effect) => effect.operationId === operationId)
+        this.#session.getV4ToolEffects(operationId)
           .map((effect) => [effect.callId, effect]),
       );
       this.#session.appendMessage({
@@ -9691,9 +9846,9 @@ export class AgentSession {
   }
 
   #finishInterruptedQueues(operationId: string): void {
-    for (const entry of this.#session.getV4State().queue.values()) {
+    for (const entry of this.#session.getV4PendingQueue()) {
       if (entry.operationId !== operationId || entry.status !== "claimed") continue;
-      if (!this.#session.getV4State().nodes.has(entry.targetNodeId)) {
+      if (!this.#session.hasV4Node(entry.targetNodeId)) {
         if (entry.kind === "next_run") {
           const message = durableCanonicalMessage(
             entry.message,
@@ -9754,13 +9909,12 @@ export class AgentSession {
           }
         }
       }
-      const state = this.#session.getV4State();
       this.#session.commitChanges([{
         type: "queue_finished",
         branchId: entry.branchId,
         entryId: entry.id,
         finishedAt: new Date().toISOString(),
-        outcome: state.nodes.has(entry.targetNodeId) ? "consumed" : "cancelled",
+        outcome: this.#session.hasV4Node(entry.targetNodeId) ? "consumed" : "cancelled",
       }]);
     }
   }
@@ -9793,7 +9947,7 @@ export class AgentSession {
   }
 
   #cancelQueueEntry(entryId: string): void {
-    const entry = this.#session.getV4State().queue.get(entryId);
+    const entry = this.#session.getV4QueueEntry(entryId);
     if (entry === undefined || entry.status === "cancelled" || entry.status === "consumed") return;
     this.#session.commitChanges([{
       type: "queue_finished",
@@ -9841,7 +9995,7 @@ export class AgentSession {
 
   #toolAuthorizationOwner(
     tool: HarnessTool,
-    extensions: RuntimeExtensionHost | undefined,
+    extensions: RuntimePluginHost | undefined,
   ): ToolAuthorizationOwner {
     const captured = this.#toolAuthorizationOwners?.get(tool.definition.name);
     if (captured !== undefined) return { ...captured };
@@ -9856,7 +10010,7 @@ export class AgentSession {
   #createToolCoordinator(
     eligibleTools: HarnessTool[],
     activeTools: HarnessTool[],
-    extensions: RuntimeExtensionHost | undefined = this.#extensionHost,
+    extensions: RuntimePluginHost | undefined = this.#pluginHost,
     activeBranch = this.#extensionBranch(),
     modelInitiated = true,
     authorizationOwners = new Map(eligibleTools.map((tool) => [
@@ -9864,7 +10018,7 @@ export class AgentSession {
       this.#toolAuthorizationOwner(tool, extensions),
     ])),
   ): ToolCoordinator {
-    const policyExtensions = this.#policyExtensions ?? extensions;
+    const policyPlugins = this.#policyPlugins ?? extensions;
     const runScope = (context: { threadId: string; runId: string; branch?: string; step?: number }) => ({
       threadId: context.threadId,
       runId: context.runId,
@@ -9881,7 +10035,7 @@ export class AgentSession {
             args: structuredClone(invocation.input),
           } satisfies Omit<ToolExecutionStartEvent, "type">;
           if (extensions?.hasListeners("tool_execution_start") === true) {
-            await dispatchDirectExtensionEvent(extensions, "tool_execution_start", event, context.signal);
+            await dispatchDirectPluginEvent(extensions, "tool_execution_start", event, context.signal);
           }
           await this.#emitPublic({ type: "tool_execution_start", ...event });
         },
@@ -9892,7 +10046,7 @@ export class AgentSession {
             partialResult: structuredClone(update.progress),
           };
           if (extensions?.hasListeners("tool_execution_update") === true) {
-            await dispatchDirectExtensionEvent(extensions, "tool_execution_update", event, context.signal);
+            await dispatchDirectPluginEvent(extensions, "tool_execution_update", event, context.signal);
           }
           await this.#emitPublic({ type: "tool_execution_update", ...event });
         },
@@ -9904,7 +10058,7 @@ export class AgentSession {
             isError: entry.result.isError,
           };
           if (extensions?.hasListeners("tool_execution_end") === true) {
-            await dispatchDirectExtensionEvent(extensions, "tool_execution_end", event, context.signal);
+            await dispatchDirectPluginEvent(extensions, "tool_execution_end", event, context.signal);
           }
           await this.#emitPublic({ type: "tool_execution_end", ...event });
         },
@@ -9921,11 +10075,11 @@ export class AgentSession {
                 authorizationOwners.get(request.invocation.name) ?? { kind: "host" },
               ),
             } : undefined),
-        ...optionalProperties(policyExtensions?.hasListeners("tool_call") === true ||
+        ...optionalProperties(policyPlugins?.hasListeners("tool_call") === true ||
           (modelInitiated && this.#publicAgent.beforeToolCall !== undefined) ? {
               beforeCall: async (invocation, context) => {
-                const reduction = policyExtensions?.hasListeners("tool_call") === true
-                  ? await policyExtensions.reduceToolCall({
+                const reduction = policyPlugins?.hasListeners("tool_call") === true
+                  ? await policyPlugins.reduceToolCall({
                       ...runScope(context),
                       ...invocation,
                     }, context.signal, runScope(context))
@@ -9952,11 +10106,11 @@ export class AgentSession {
                 };
               },
             } : undefined),
-        ...optionalProperties(policyExtensions?.hasListeners("tool_result") === true ||
+        ...optionalProperties(policyPlugins?.hasListeners("tool_result") === true ||
           (modelInitiated && this.#publicAgent.afterToolCall !== undefined) ? {
               afterResult: async (invocation, result, context) => {
-                const reduced = policyExtensions?.hasListeners("tool_result") === true
-                  ? await policyExtensions.reduceToolResult({
+                const reduced = policyPlugins?.hasListeners("tool_result") === true
+                  ? await policyPlugins.reduceToolResult({
                       ...runScope(context),
                       invocation,
                       result,
@@ -10037,7 +10191,7 @@ export class AgentSession {
     const initialTools = runTools();
     const eligibleTools = initialTools.eligible;
     const tools = initialTools.active;
-    const extensions = this.#extensionHost;
+    const extensions = this.#pluginHost;
     const activeBranch = this.#extensionBranch();
     const authorizationOwners = new Map(eligibleTools.map((tool) => [
       tool.definition.name,
@@ -10101,7 +10255,7 @@ export class AgentSession {
       }
     }
     this.#activeToolCoordinator = coordinator;
-    this.#activeExtensionRunBranch = activeBranch;
+    this.#activePluginRunBranch = activeBranch;
     try {
     const autoCompactionOverride = options.autoCompaction ?? this.#options.autoCompaction;
     const autoCompaction = autoCompactionOverride ?? this.#settings.getCompactionEnabled();
@@ -10109,13 +10263,13 @@ export class AgentSession {
     const compactionRecentTokens = this.#options.compactionRecentTokens ?? this.#settings.getCompactionRecentTokens();
     const compactionTriggerPercent = this.#settings.getCompactionTriggerPercentOverride();
     const currentInstructions = this.#session.buildSessionContext().messages
-      .map(canonicalContextMessage)
+      .map((message) => canonicalContextMessage(message))
       .filter((message): message is CanonicalMessage => message !== undefined)
       .findLast((message) => message.purpose === "instructions");
     const currentInstructionsText = currentInstructions?.content
       .flatMap((block) => block.type === "text" ? [block.text] : [])
       .join("\n");
-    const extensionReducers = this.#agentExtensionReducers();
+    const extensionReducers = this.#agentPluginReducers();
     const initialMessages = [
       ...(options.manualCompaction === true || currentInstructionsText === systemPrompt
         ? []
@@ -10218,7 +10372,7 @@ export class AgentSession {
       autoCompactionEnabled: () => autoCompactionOverride !== false && this.#settings.getCompactionEnabled(),
       ...optionalProperties(options.manualCompaction === true ? { manualCompaction: true } : undefined),
       ...optionalProperties(options.compactionInstructions === undefined ? undefined : { compactionInstructions: options.compactionInstructions }),
-      ...optionalProperties(extensionReducers === undefined ? undefined : { extensions: extensionReducers }),
+      ...optionalProperties(extensionReducers === undefined ? undefined : { pluginReducers: extensionReducers }),
       retry: {
         enabled: this.#settings.getRetryEnabled(),
         maxAttempts: this.#settings.getRetrySettings().maxRetries + 1,
@@ -10270,18 +10424,16 @@ export class AgentSession {
               if (update?.context !== undefined) {
                 this.#publicAgent.systemPrompt = update.context.systemPrompt;
                 if (update.context.tools !== undefined) {
-                  this.#agentToolsOverride = update.context.tools.map(harnessToolFromAgent);
-                  this.#activeToolNames = new Set(this.#agentToolsOverride.map((tool) => tool.definition.name));
-                  this.#takeToolSelectionOwnership();
+                  const replacedTools = this.#replaceAgentTools(update.context.tools);
                   const nextTools = this.#publicAgent.toolExecution === "sequential"
-                    ? this.#agentToolsOverride.map(forceSequentialTool)
-                    : this.#agentToolsOverride;
+                    ? replacedTools.map(forceSequentialTool)
+                    : replacedTools;
                   replaceAuthorizationOwners(new Map(nextTools.map((tool) => [
                     tool.definition.name,
                     this.#toolAuthorizationOwner(tool, extensions),
                   ])));
                   pendingAuthorizationOwners = undefined;
-                  coordinator.queueTools(nextTools, [...this.#activeToolNames]);
+                  coordinator.queueTools(nextTools, nextTools.map((tool) => tool.definition.name));
                 }
               }
               const refreshedSystemPrompt = update?.context !== undefined
@@ -10403,7 +10555,7 @@ export class AgentSession {
       if (queuedEntryId === undefined) {
         this.#session.commitChanges([accepted]);
       } else {
-        const entry = this.#session.getV4State().queue.get(queuedEntryId);
+        const entry = this.#session.getV4QueueEntry(queuedEntryId);
         if (entry === undefined || entry.status !== "queued" || entry.targetNodeId !== queuedMessageId) {
           throw new Error(`Queued prompt ${queuedEntryId} is not available for delivery`);
         }
@@ -10518,7 +10670,7 @@ export class AgentSession {
       detachAbort?.();
       if (this.#activeToolCoordinator === coordinator) this.#activeToolCoordinator = undefined;
       if (this.#activeToolRefresh === refreshActiveTools) this.#activeToolRefresh = undefined;
-      if (this.#activeExtensionRunBranch === activeBranch) this.#activeExtensionRunBranch = undefined;
+      if (this.#activePluginRunBranch === activeBranch) this.#activePluginRunBranch = undefined;
     }
   }
 
@@ -10551,7 +10703,7 @@ export class AgentSession {
     ) {
       throw new Error("The selected model does not leave a positive input budget for branch summarization");
     }
-    const publicSession = extensionSessionManager(this.#session);
+    const publicSession = pluginSessionManager(this.#session);
     const sourcePath = publicSession.getBranch();
     const targetIds = new Set(publicSession.getBranch(targetId).map((entry) => entry.id));
     const commonIndex = sourcePath.findLastIndex((entry) => targetIds.has(entry.id));
@@ -10894,7 +11046,7 @@ export class AgentSession {
       : [...this.#baseToolsOverride];
     const byName = new Map(tools.map((tool) => [tool.definition.name, tool]));
     for (const tool of this.#extraTools) byName.set(tool.definition.name, tool);
-    for (const tool of this.#extensionHost?.tools() ?? []) byName.set(tool.definition.name, tool);
+    for (const tool of this.#pluginHost?.tools() ?? []) byName.set(tool.definition.name, tool);
     return [...byName.values()].filter((tool) => isAllowed(tool.definition.name));
   }
 
@@ -11005,14 +11157,13 @@ export class AgentSession {
   }
 
   #restoredSessionSelection(manager: SessionManager): RestoredSessionSelection {
-    const context = manager.buildSessionContext();
+    const selection = manager.getPersistedSelection();
     let model = this.#model;
-    if (context.model !== null) {
-      model = this.#resolvePersistedModel(context.model) ?? model;
+    if (selection.model !== null) {
+      model = this.#resolvePersistedModel(selection.model) ?? model;
     }
-    const hasPersistedThinking = manager.getEntries().some((entry) => entry.type === "thinking_level_change");
-    const restoredThinkingLevel = hasPersistedThinking
-      ? context.thinkingLevel
+    const restoredThinkingLevel = selection.hasPersistedThinking
+      ? selection.thinkingLevel
       : this.#settings.getDefaultThinkingLevel() ?? this.#thinkingLevel;
     const thinkingLevel = this.#effectiveThinkingLevelForModel(model, restoredThinkingLevel);
     if (model !== undefined) this.#assertRunnableModel(model);
@@ -11090,7 +11241,7 @@ export class AgentSession {
     );
   }
 
-  #hasExtensionCommandPermit(): boolean {
+  #hasPluginCommandPermit(): boolean {
     return this.#extensionCommandScope.getStore()?.active === true;
   }
 

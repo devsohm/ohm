@@ -42,7 +42,7 @@ function waitForModelRefresh<T>(operation: Promise<T>, signal: AbortSignal | und
   });
 }
 
-export interface ExtensionOAuthConfig {
+export interface PluginOAuthConfig {
   name: string;
   isSubscription?: boolean;
   login(input: {
@@ -101,7 +101,7 @@ export interface ProviderConfigInput {
   ): AsyncIterable<import("../core/types.js").AdapterEvent>;
   headers?: Record<string, string>;
   authHeader?: boolean;
-  oauth?: ExtensionOAuthConfig;
+  oauth?: PluginOAuthConfig;
   models?: ProviderConfigModel[];
   refreshModels?(context: ProviderRefreshContext): Promise<ProviderConfigModel[]>;
 }
@@ -279,7 +279,7 @@ function mergedModel(
   };
 }
 
-function extensionOAuth(config: ExtensionOAuthConfig) {
+function extensionOAuth(config: PluginOAuthConfig) {
   return {
     name: config.name,
     ...optionalProperties(config.isSubscription === undefined ? undefined : { isSubscription: config.isSubscription }),

@@ -4,7 +4,7 @@ import type { BackgroundCell } from "@ohm/terminal";
 import type { JsonValue } from "../core/json.js";
 import type { ImageBlock, ModelInfo, NormalizedUsage } from "../core/types.js";
 import type { ImageCoordinateMetadata } from "../images/preprocess.js";
-import type { CustomEntry, CustomMessageEntry } from "../extensions/session-contract.js";
+import type { CustomEntry, CustomMessageEntry } from "../plugins/session-contract.js";
 import type {
   RuntimeToolRenderProgress,
   RuntimeToolRenderResult,
@@ -219,7 +219,7 @@ export type TuiAction =
   | { type: "signal"; signal: NodeJS.Signals }
   | { type: "error"; error: Error };
 
-export interface TuiExtensionShortcut {
+export interface TuiPluginShortcut {
   shortcut: string;
   description?: string;
 }
@@ -353,6 +353,8 @@ export interface TranscriptEntry {
   summary?: string;
   inputPreview?: string;
   status?: "pending" | "running" | "completed" | "failed" | "in_doubt";
+  /** Unfinished call restored from a snapshot; not evidence of currently queued or running work. */
+  historical?: boolean;
   streaming?: boolean;
   expanded?: boolean;
   reasoningStartedAt?: number;
@@ -419,6 +421,8 @@ export interface TuiViewState {
     cursor: number;
     selectedMatch?: number;
     anchorRow?: number;
+    /** Durable journal search status; omitted for viewport-only search. */
+    status?: string;
   };
   editorText: string;
   editorCursor: number;
@@ -469,6 +473,8 @@ export interface TuiViewState {
   }[];
   overlay?: {
     title: string;
+    /** Host prompt presentation; omitted for a selectable picker. */
+    promptMode?: "input" | "confirmation";
     pickerKind?: PickerKind;
     inline?: boolean;
     settings?: boolean;
@@ -476,7 +482,7 @@ export interface TuiViewState {
     states?: readonly string[];
     queryLabel?: string;
     query: string;
-    /** Grapheme offset in the controller-owned picker query. */
+    /** Grapheme offset in the controller-owned overlay query. */
     queryCursor?: number;
     selected: number;
     items: readonly PickerItem[];

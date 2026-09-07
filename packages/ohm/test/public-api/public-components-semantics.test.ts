@@ -35,9 +35,9 @@ import {
   CustomMessageComponent,
   CustomEditor,
   DynamicBorder,
-  ExtensionEditorComponent,
-  ExtensionInputComponent,
-  ExtensionSelectorComponent,
+  PluginEditorComponent,
+  PluginInputComponent,
+  PluginSelectorComponent,
   FooterComponent,
   LoginDialogComponent,
   ModelSelectorComponent,
@@ -57,7 +57,7 @@ import {
 } from "../../src/tui/public-components.js";
 import { currentTheme, syncPublicTheme } from "../../src/tui/public-theme.js";
 import { createTheme, THEME_BACKGROUND_TOKENS, THEME_TOKENS, Theme, type ThemeBg, type ThemeColor } from "../../src/tui/theme.js";
-import type { ToolDefinition } from "../../src/extensions/direct.js";
+import type { ToolDefinition } from "../../src/plugins/direct.js";
 import type { SessionInfo } from "../../src/storage/types.js";
 
 function fakeTerminal(): Terminal {
@@ -298,7 +298,7 @@ test("custom editor gives extension and reserved application actions determinist
     matches(data, action) { return matched.get(data) === action; },
   });
   const actions: string[] = [];
-  editor.onExtensionShortcut = (data) => data === "claimed";
+  editor.onPluginShortcut = (data) => data === "claimed";
   editor.onPasteImage = () => actions.push("paste");
   editor.onEscape = () => actions.push("escape");
   editor.onCtrlD = () => actions.push("exit");
@@ -963,7 +963,7 @@ test("public footer reports session context and keeps compaction policy out of c
   }, {
     getGitBranch: () => "main",
     getAvailableProviderCount: () => 2,
-    getExtensionStatuses: () => new Map([["memory", "memory: ready"]]),
+    getPluginStatuses: () => new Map([["memory", "memory: ready"]]),
   });
 
   assert.match(text(footer), /workspace · main · audit/u);
@@ -1183,7 +1183,7 @@ test("compaction and custom cards retain bounded provenance and full-width surfa
 
 test("extension input, editor, and selector honor public options and focus", () => {
   let inputValue: string | undefined;
-  const input = new ExtensionInputComponent("Input", "placeholder", (value) => { inputValue = value; }, () => {}, { tui: fakeTui() });
+  const input = new PluginInputComponent("Input", "placeholder", (value) => { inputValue = value; }, () => {}, { tui: fakeTui() });
   input.focused = true;
   assert.match(text(input), /\(placeholder\)/u);
   assert.match(text(input), /Enter submit.*Escape cancel/u);
@@ -1192,14 +1192,14 @@ test("extension input, editor, and selector honor public options and focus", () 
   assert.equal(inputValue, "value");
 
   let editorValue: string | undefined;
-  const editor = new ExtensionEditorComponent(fakeTui(), new FixtureKeybindings(() => false), "Editor", "draft", (value) => { editorValue = value; }, () => {}, { paddingX: 2 }, "false");
+  const editor = new PluginEditorComponent(fakeTui(), new FixtureKeybindings(() => false), "Editor", "draft", (value) => { editorValue = value; }, () => {}, { paddingX: 2 }, "false");
   editor.focused = true;
   editor.handleInput("\r");
   assert.equal(editorValue, "draft");
 
   let selected: string | undefined;
   let toggles = 0;
-  const selector = new ExtensionSelectorComponent("Choose", ["one", "two"], (value) => { selected = value; }, () => {}, { onToggleToolsExpanded: () => { toggles += 1; } });
+  const selector = new PluginSelectorComponent("Choose", ["one", "two"], (value) => { selected = value; }, () => {}, { onToggleToolsExpanded: () => { toggles += 1; } });
   assert.match(text(selector), /Choose[\s\S]*navigate.*Enter select.*Escape cancel/u);
   selector.handleInput("k");
   selector.handleInput("\u000f");
@@ -1208,7 +1208,7 @@ test("extension input, editor, and selector honor public options and focus", () 
   assert.equal(toggles, 1);
 
   let finalSelection: string | undefined;
-  const lowerBound = new ExtensionSelectorComponent("Choose", ["one", "two"], (value) => { finalSelection = value; }, () => {});
+  const lowerBound = new PluginSelectorComponent("Choose", ["one", "two"], (value) => { finalSelection = value; }, () => {});
   lowerBound.handleInput("j");
   lowerBound.handleInput("j");
   lowerBound.handleInput("\n");
@@ -1224,7 +1224,7 @@ test("extension selector clamps the active host navigation bindings", () => {
     }));
 
     let unchanged: string | undefined;
-    const defaultArrow = new ExtensionSelectorComponent(
+    const defaultArrow = new PluginSelectorComponent(
       "Choose",
       ["one", "two"],
       (value) => { unchanged = value; },
@@ -1235,7 +1235,7 @@ test("extension selector clamps the active host navigation bindings", () => {
     assert.equal(unchanged, "one");
 
     let selected: string | undefined;
-    const remapped = new ExtensionSelectorComponent(
+    const remapped = new PluginSelectorComponent(
       "Choose",
       ["one", "two"],
       (value) => { selected = value; },
@@ -1256,20 +1256,20 @@ test("extension selector clamps the active host navigation bindings", () => {
 test("public modal components complete at most once", async () => {
   let inputSubmits = 0;
   let inputCancels = 0;
-  const input = new ExtensionInputComponent("Input", undefined, () => { inputSubmits += 1; }, () => { inputCancels += 1; });
+  const input = new PluginInputComponent("Input", undefined, () => { inputSubmits += 1; }, () => { inputCancels += 1; });
   input.handleInput("\n");
   input.handleInput("\n");
   input.handleInput("\u001b");
   assert.deepEqual([inputSubmits, inputCancels], [1, 0]);
 
   let editorSubmits = 0;
-  const editor = new ExtensionEditorComponent(fakeTui(), new FixtureKeybindings(() => false), "Editor", "draft", () => { editorSubmits += 1; }, () => {});
+  const editor = new PluginEditorComponent(fakeTui(), new FixtureKeybindings(() => false), "Editor", "draft", () => { editorSubmits += 1; }, () => {});
   editor.handleInput("\r");
   editor.handleInput("\r");
   assert.equal(editorSubmits, 1);
 
   let selectorSubmits = 0;
-  const selector = new ExtensionSelectorComponent("Choose", ["one"], () => { selectorSubmits += 1; }, () => {});
+  const selector = new PluginSelectorComponent("Choose", ["one"], () => { selectorSubmits += 1; }, () => {});
   selector.handleInput("\n");
   selector.handleInput("\n");
   assert.equal(selectorSubmits, 1);
@@ -1303,7 +1303,7 @@ test("disposing an active extension editor does not restart its stopped TUI", as
   const tui = new TestTui();
   const keybindings = new FixtureKeybindings((data, action) =>
     data === "open" && action === "app.editor.external");
-  const editor = new ExtensionEditorComponent(
+  const editor = new PluginEditorComponent(
     tui,
     keybindings,
     "Editor",
@@ -1329,7 +1329,7 @@ test("extension editor restores the terminal and submits an externally edited dr
     data === "open" && action === "app.editor.external");
   const fixture = new URL("../fixtures/external-editor.mjs", import.meta.url);
   const submitted: string[] = [];
-  const editor = new ExtensionEditorComponent(
+  const editor = new PluginEditorComponent(
     tui,
     keybindings,
     "Editor",

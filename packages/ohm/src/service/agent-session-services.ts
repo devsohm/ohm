@@ -10,8 +10,8 @@ import {
 } from "../core/resource-loader.js";
 import { errorMessage } from "../core/errors.js";
 import { SettingsManager, type ThinkingLevel } from "../core/settings-manager.js";
-import type { SessionStartEvent } from "../extensions/direct.js";
-import { getExtensionRuntimeHost } from "../extensions/compat.js";
+import type { SessionStartEvent } from "../plugins/direct.js";
+import { getPluginRuntimeHost } from "../plugins/compat.js";
 import { ModelRuntime } from "../providers/model-compat.js";
 import type { ProviderWireLifecycleHost } from "../providers/wire.js";
 import {
@@ -25,7 +25,7 @@ import type { AgentSessionRuntimeDiagnostic } from "./agent-session-runtime.js";
 export interface CreateAgentSessionServicesOptions {
   agentDir?: string;
   cwd: string;
-  extensionFlagValues?: ReadonlyMap<string, boolean | string>;
+  pluginFlagValues?: ReadonlyMap<string, boolean | string>;
   modelRuntime?: ModelRuntime;
   resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
   resourceLoaderRefreshOptions?: ResourceLoaderRefreshOptions;
@@ -77,18 +77,18 @@ export async function createAgentSessionServices(
   const resourceLoader = new DefaultResourceLoader(loaderConfiguration);
   await resourceLoader.refresh(options.resourceLoaderRefreshOptions);
 
-  const extensionsResult = resourceLoader.getExtensions();
-  const extensionHost = getExtensionRuntimeHost(extensionsResult.runtime);
-  const diagnostics: AgentSessionRuntimeDiagnostic[] = (extensionHost?.diagnostics() ?? []).map((entry) => ({
+  const pluginsResult = resourceLoader.getPlugins();
+  const pluginHost = getPluginRuntimeHost(pluginsResult.runtime);
+  const diagnostics: AgentSessionRuntimeDiagnostic[] = (pluginHost?.diagnostics() ?? []).map((entry) => ({
     type: "warning",
     message: entry.message,
   }));
-  if (options.extensionFlagValues !== undefined) {
-    const runtimeFlags = extensionsResult.runtime.flagValues;
-    for (const [name, value] of options.extensionFlagValues) {
+  if (options.pluginFlagValues !== undefined) {
+    const runtimeFlags = pluginsResult.runtime.flagValues;
+    for (const [name, value] of options.pluginFlagValues) {
       try {
         runtimeFlags.set(name, value);
-        extensionHost?.setFlagValue(name, value);
+        pluginHost?.setFlagValue(name, value);
       } catch (error) {
         diagnostics.push({ type: "error", message: errorMessage(error) });
       }

@@ -4,6 +4,7 @@ export { AssistantMessageEventStream, EventStream } from "./streaming.js";
 export * from "./utilities.js";
 export * from "./sampling.js";
 export * from "./model-runtime.js";
+export * from "./image-models.js";
 export * from "./catalogs.js";
 export * from "./builtin-providers.js";
 export * from "./faux.js";

@@ -112,7 +112,7 @@ import {
   canonicalAssistantDiagnostics,
 } from "./assistant-diagnostics.js";
 
-export interface AgentExtensionRunScope {
+export interface AgentPluginRunScope {
   readonly threadId: ThreadId;
   readonly runId: RunId;
   /** Exact branch when the owning host can resolve it. */
@@ -132,8 +132,8 @@ export interface AgentFinalizedAssistantReduction extends AgentFinalizedAssistan
   transformations?: AssistantResponseTransformationAudit[];
 }
 
-export interface AgentExtensionReducers {
-  beforeAgentStart?(event: AgentExtensionRunScope & {
+export interface AgentPluginReducers {
+  beforeAgentStart?(event: AgentPluginRunScope & {
     prompt: string;
     images?: ImageBlock[];
     systemPrompt: string;
@@ -142,22 +142,22 @@ export interface AgentExtensionReducers {
   context?(
     messages: readonly CanonicalMessage[],
     signal: AbortSignal,
-    scope: AgentExtensionRunScope,
+    scope: AgentPluginRunScope,
   ): Promise<CanonicalMessage[]>;
   messageStart?(
     message: CanonicalMessage,
     signal: AbortSignal,
-    scope: AgentExtensionRunScope,
+    scope: AgentPluginRunScope,
   ): Promise<void>;
   messageEnd?(
     message: CanonicalMessage,
     signal: AbortSignal,
-    scope: AgentExtensionRunScope,
+    scope: AgentPluginRunScope,
   ): Promise<CanonicalMessage>;
   finalizedAssistantEnd?(
     response: AgentFinalizedAssistantResponse,
     signal: AbortSignal,
-    scope: AgentExtensionRunScope,
+    scope: AgentPluginRunScope,
   ): Promise<AgentFinalizedAssistantReduction>;
 }
 
@@ -205,7 +205,7 @@ export interface AgentRunRequest {
   afterPromptMessages?: CanonicalMessage[];
   systemPrompt?: string;
   promptComposition?: PromptCompositionMetadata;
-  extensions?: AgentExtensionReducers;
+  pluginReducers?: AgentPluginReducers;
   contextTokenBudget?: number;
   contextTriggerTokens?: number;
   /** Current published provider ceiling for input tokens. */
@@ -1372,10 +1372,10 @@ function assertFinalizedAssistantReplacement(
 }
 
 async function reduceMessage(
-  reducers: AgentExtensionReducers | undefined,
+  reducers: AgentPluginReducers | undefined,
   value: CanonicalMessage,
   signal: AbortSignal,
-  scope: AgentExtensionRunScope,
+  scope: AgentPluginRunScope,
   emitStart = true,
 ): Promise<CanonicalMessage> {
   if (emitStart && value.role !== "system" && reducers?.messageStart !== undefined) {
@@ -1392,10 +1392,10 @@ async function reduceMessage(
 }
 
 async function reduceFinalizedAssistant(
-  reducers: AgentExtensionReducers | undefined,
+  reducers: AgentPluginReducers | undefined,
   value: AgentFinalizedAssistantResponse,
   signal: AbortSignal,
-  scope: AgentExtensionRunScope,
+  scope: AgentPluginRunScope,
 ): Promise<AgentFinalizedAssistantReduction> {
   if (reducers?.finalizedAssistantEnd === undefined) {
     return { ...value, message: await reduceMessage(reducers, value.message, signal, scope, false) };
@@ -1408,10 +1408,10 @@ async function reduceFinalizedAssistant(
 }
 
 async function reduceQueuedUserMessage(
-  reducers: AgentExtensionReducers | undefined,
+  reducers: AgentPluginReducers | undefined,
   value: QueuedRunMessage,
   signal: AbortSignal,
-  scope: AgentExtensionRunScope,
+  scope: AgentPluginRunScope,
 ): Promise<CanonicalMessage> {
   beginQueuedRunDelivery(value);
   return durableQueuedMessage(value, await reduceMessage(reducers, queuedUserMessage(value), signal, scope));
@@ -2073,7 +2073,7 @@ export class RuntimeEngine {
     const runId = suppliedRunId ?? createId("run");
     const signal = control.abortController.signal;
     const sink = this.#events(request.threadId, runId, request.branch, signal);
-    const extensionScope = (scopeStep?: number): AgentExtensionRunScope => Object.freeze({
+    const extensionScope = (scopeStep?: number): AgentPluginRunScope => Object.freeze({
       threadId: request.threadId,
       runId,
       ...optionalProperty("branch", request.branch),
@@ -2187,9 +2187,9 @@ export class RuntimeEngine {
             messages: [],
             systemPrompt: this.#continuationSystemPromptOverrides.get(control) ?? baseSystemPrompt,
           }
-        : request.extensions?.beforeAgentStart === undefined
+        : request.pluginReducers?.beforeAgentStart === undefined
           ? { messages: [], systemPrompt: baseSystemPrompt }
-          : await request.extensions.beforeAgentStart(Object.freeze({
+          : await request.pluginReducers.beforeAgentStart(Object.freeze({
               ...extensionScope(),
               prompt: request.prompt,
               ...optionalProperty("images", cloneImages(request.images)),
@@ -2238,7 +2238,7 @@ export class RuntimeEngine {
       if (request.promptQueueMessage !== undefined) beginQueuedRunDelivery(request.promptQueueMessage);
       let user: CanonicalMessage | undefined;
       if (!continueFromHistory) {
-        user = await reduceMessage(request.extensions, {
+        user = await reduceMessage(request.pluginReducers, {
           ...(request.promptQueueMessage === undefined
             ? {
                 ...message("user", [
@@ -2257,11 +2257,11 @@ export class RuntimeEngine {
       }
       const afterPrompt: CanonicalMessage[] = [];
       for (const value of request.afterPromptMessages ?? []) {
-        afterPrompt.push(await reduceMessage(request.extensions, value, signal, extensionScope()));
+        afterPrompt.push(await reduceMessage(request.pluginReducers, value, signal, extensionScope()));
       }
       const injected: CanonicalMessage[] = [];
       for (const value of beforeAgent.messages) {
-        injected.push(await reduceMessage(request.extensions, value, signal, extensionScope()));
+        injected.push(await reduceMessage(request.pluginReducers, value, signal, extensionScope()));
       }
       for (const initial of request.initialMessages ?? []) {
         await sink.emit({ type: "message_appended", message: initial });
@@ -2289,7 +2289,7 @@ export class RuntimeEngine {
       for (const queued of queuedPromptMessages) {
         await sink.emit({
           type: "message_appended",
-          message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope()),
+          message: await reduceQueuedUserMessage(request.pluginReducers, queued, signal, extensionScope()),
         });
         completeQueuedRunDelivery(queued);
       }
@@ -2299,7 +2299,7 @@ export class RuntimeEngine {
         for (const queued of followUps) {
           await sink.emit({
             type: "message_appended",
-            message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope(step)),
+            message: await reduceQueuedUserMessage(request.pluginReducers, queued, signal, extensionScope(step)),
           });
           completeQueuedRunDelivery(queued);
         }
@@ -2312,7 +2312,7 @@ export class RuntimeEngine {
         retryFinalProjection = false;
         if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
         for (const steering of control.takeSteeringMessages()) {
-          const steeringMessage = await reduceQueuedUserMessage(request.extensions, steering, signal, extensionScope(step || undefined));
+          const steeringMessage = await reduceQueuedUserMessage(request.pluginReducers, steering, signal, extensionScope(step || undefined));
           await sink.emit({ type: "message_appended", message: steeringMessage });
           completeQueuedRunDelivery(steering);
           await sink.emit({ type: "steering_queued" });
@@ -2501,8 +2501,8 @@ export class RuntimeEngine {
         }
         let requestContext = context;
         const instructionMessageId = requestContext.findLast((entry) => entry.purpose === "instructions")?.id;
-        if (request.extensions?.context !== undefined) {
-          const reduced = await request.extensions.context(requestContext, signal, extensionScope(step));
+        if (request.pluginReducers?.context !== undefined) {
+          const reduced = await request.pluginReducers.context(requestContext, signal, extensionScope(step));
           signal.throwIfAborted();
           requestContext = reduced;
         }
@@ -2869,7 +2869,7 @@ export class RuntimeEngine {
           ...optionalProperty("explanation", response.explanation),
         };
         const finalized = await reduceFinalizedAssistant(
-          request.extensions,
+          request.pluginReducers,
           originalFinalized,
           signal,
           extensionScope(step),
@@ -2954,7 +2954,7 @@ export class RuntimeEngine {
             for (const queued of steering) {
               await sink.emit({
                 type: "message_appended",
-                message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope(step)),
+                message: await reduceQueuedUserMessage(request.pluginReducers, queued, signal, extensionScope(step)),
               });
               completeQueuedRunDelivery(queued);
             }
@@ -3115,7 +3115,7 @@ export class RuntimeEngine {
         await sink.emit({
           type: "message_appended",
           message: await reduceMessage(
-            request.extensions,
+            request.pluginReducers,
             toolUsage === undefined ? toolMessage : { ...toolMessage, usage: toolUsage },
             signal,
             extensionScope(step),
@@ -3128,7 +3128,7 @@ export class RuntimeEngine {
         for (const queued of steering) {
           await sink.emit({
             type: "message_appended",
-            message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope(step)),
+            message: await reduceQueuedUserMessage(request.pluginReducers, queued, signal, extensionScope(step)),
           });
           completeQueuedRunDelivery(queued);
         }
@@ -3279,9 +3279,9 @@ export class RuntimeEngine {
       if (
         directive?.tokensBefore !== undefined &&
         (!Number.isSafeInteger(directive.tokensBefore) || directive.tokensBefore < 0)
-      ) throw new RangeError("Extension compaction tokensBefore must be a non-negative safe integer");
+      ) throw new RangeError("Plugin compaction tokensBefore must be a non-negative safe integer");
       if (directive?.usage !== undefined && !isNormalizedUsage(directive.usage)) {
-        throw new TypeError("Extension compaction usage must be valid normalized usage");
+        throw new TypeError("Plugin compaction usage must be valid normalized usage");
       }
       effectivePlan = directive?.firstKeptMessageId === undefined
         ? plan

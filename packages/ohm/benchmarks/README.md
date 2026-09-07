@@ -24,7 +24,7 @@ The gate composes focused tests from the existing high-risk suites with the offl
 
 The process receives an isolated home and an allowlisted environment, so it cannot read user credential files or inherited provider secrets. A guard rejects external HTTP, HTTPS, and socket access in the runner and its Node subprocesses. Loopback remains available for deterministic local transport fixtures. No live-provider tests are selected.
 
-The offline benchmark exercises the real `AgentSession`, durable JSONL session flow, built-in coding tools, and `SessionManager` recovery logic. Every report identifies its purpose as `harness-plumbing`. It does not call a model API, read credentials, evaluate prompts, or claim to measure model intelligence.
+The offline benchmark exercises the real `AgentSession`, durable SQLite session flow, built-in coding tools, and `SessionManager` recovery logic. Every report identifies its purpose as `harness-plumbing`. It does not call a model API, read credentials, evaluate prompts, or claim to measure model intelligence.
 
 Run it from the repository root:
 
@@ -40,7 +40,7 @@ The command prints one JSON document conforming to [`report.schema.json`](report
 - recover from an unknown tool name after confirming that the available-tool guidance reached the next provider request;
 - continue the same durable session across two harness runs, including prior user, assistant, and tool-result context;
 - compact durable multi-turn history through the normal service path;
-- reopen an interrupted JSONL session, discard the incomplete trailing fragment, and preserve every prior complete entry exactly once.
+- interrupt a child process inside an uncommitted SQLite transaction, reopen the journal, verify every prior commit survives unchanged and the uncommitted write does not, then append successfully. The child is killed on POSIX and exits abruptly without closing the database on Windows. This is a storage rollback probe; tool-effect recovery has separate release tests.
 
 The report measures outcomes instead of source size:
 
@@ -112,7 +112,7 @@ Run the managed-package authoring verifier without credentials or model calls:
 npm run benchmark:extensions --workspace ohm
 ```
 
-Its versioned report conforms to [`extension-authoring-report.schema.json`](extension-authoring-report.schema.json). Candidate packages pass through the real managed install, public discovery, runtime activation, clean close, refresh, and removal path. The corpus checks a command package, a structured-tool package that follows an intentionally invalid first attempt, and a package combining skill, prompt, theme, and runtime contributions.
+Its versioned report conforms to [`plugin-authoring-report.schema.json`](plugin-authoring-report.schema.json). Candidate packages pass through the real managed install, public discovery, runtime activation, clean close, refresh, and removal path. The corpus checks a command package, a structured-tool package that follows an intentionally invalid first attempt, and a package combining skill, prompt, theme, and runtime contributions.
 
 `passAt1` is the fraction accepted on the first candidate. `passAt3` is the fraction accepted within three candidates. This deterministic suite measures the verifier and recovery workflow, not an agent's ability to write code. Use the opt-in dogfood run below for stochastic model authoring quality.
 

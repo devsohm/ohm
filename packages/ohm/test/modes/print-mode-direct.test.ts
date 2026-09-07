@@ -10,7 +10,7 @@ import { runPrintMode } from "../../src/modes/print-mode.js";
 import type {
   AgentSession,
   AgentSessionRecoveryOptions,
-  ExtensionBindings,
+  PluginBindings,
 } from "../../src/service/agent-session.js";
 import type { AgentSessionRuntime } from "../../src/service/agent-session-runtime.js";
 import type { SessionContextMessage } from "../../src/storage/types.js";
@@ -42,7 +42,7 @@ interface PrintSessionFixture {
   };
   readonly state: { readonly messages: SessionContextMessage[] };
   readonly suspendedRun?: { readonly operationId: string } | undefined;
-  bindExtensions(value?: ExtensionBindings): Promise<void>;
+  bindPlugins(value?: PluginBindings, signal?: AbortSignal): Promise<void>;
   subscribe(listener: (event: RuntimeEvent) => void | Promise<void>): () => void;
   prompt(
     text: string,
@@ -86,35 +86,41 @@ function parseJsonLines(output: string): JsonObject[] {
   });
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 interface PrintFixture {
   runtime: AgentSessionRuntime;
   prompted: Array<{ text: string; imageCount: number }>;
   promptImages: Array<readonly unknown[]>;
   bindCount(): number;
   disposeCount(): number;
-  binding(): ExtensionBindings | undefined;
+  binding(): PluginBindings | undefined;
   calls: string[];
   triggerRebind(session?: AgentSession): Promise<void>;
 }
 
 function fixture(
   onPrompt?: (
-    emit: (event: RuntimeEvent) => void,
+    emit: (event: RuntimeEvent) => Promise<void>,
     messages: SessionContextMessage[],
   ) => void | Promise<void>,
   options: {
     blockedRecovery?: boolean;
     initialMessages?: SessionContextMessage[];
-    onBind?: (binding: ExtensionBindings | undefined) => void;
+    onBind?: (binding: PluginBindings | undefined, signal?: AbortSignal) => void;
   } = {},
 ): PrintFixture {
-  const listeners = new Set<(event: RuntimeEvent) => void>();
+  const listeners = new Set<(event: RuntimeEvent) => void | Promise<void>>();
   const messages: SessionContextMessage[] = [...(options.initialMessages ?? [])];
   const prompted: Array<{ text: string; imageCount: number }> = [];
   const promptImages: Array<readonly unknown[]> = [];
   let bound = 0;
   let disposed = 0;
-  let binding: ExtensionBindings | undefined;
+  let binding: PluginBindings | undefined;
   let rebind: ((session: AgentSession) => Promise<void>) | undefined;
   let beforeInvalidate: (() => void) | undefined;
   const calls: string[] = [];
@@ -149,12 +155,12 @@ function fixture(
           }
         : { recovered: false, blocked: [] };
     },
-    async bindExtensions(value?: ExtensionBindings) {
+    async bindPlugins(value?: PluginBindings, signal?: AbortSignal) {
       bound += 1;
       binding = value;
-      options.onBind?.(value);
+      options.onBind?.(value, signal);
     },
-    subscribe(listener: (event: RuntimeEvent) => void) {
+    subscribe(listener: (event: RuntimeEvent) => void | Promise<void>) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
@@ -167,7 +173,9 @@ function fixture(
     async prompt(text: string, options: PrintPromptOptions = {}) {
       prompted.push({ text, imageCount: options.images?.length ?? 0 });
       promptImages.push(structuredClone(options.images ?? []));
-      const emit = (event: RuntimeEvent): void => { for (const listener of listeners) listener(event); };
+      const emit = async (event: RuntimeEvent): Promise<void> => {
+        for (const listener of Array.from(listeners)) await listener(event);
+      };
       await onPrompt?.(emit, messages);
       return { sessionId: "s", results: [] };
     },
@@ -502,7 +510,7 @@ test("JSON mode ignores a stale startup bind and writes the replacement session 
         })),
       },
       get state() { return { messages }; },
-      async bindExtensions() {
+      async bindPlugins() {
         if (!waitForRelease) return;
         signalStartup();
         await startupRelease;
@@ -585,6 +593,162 @@ test("JSON mode writes the header before raw events and rebinds after replacemen
   assert.equal(value.binding()?.mode, "json");
 });
 
+test("JSON mode awaits async custom writers before advancing the event stream", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const output: string[] = [];
+  let advanced = false;
+  const value = fixture(async (emit) => {
+    await emit({ type: "warning", code: "first", message: "fixture" });
+    advanced = true;
+    await emit({ type: "warning", code: "second", message: "fixture" });
+  });
+  const running = runPrintMode(value.runtime, {
+    mode: "json",
+    initialMessage: "go",
+    async write(text) {
+      const record = parseJsonLines(text)[0]!;
+      output.push(String(record.code ?? record.type));
+      if (record.code === "first") {
+        entered.resolve();
+        await release.promise;
+      }
+    },
+  });
+  await entered.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(advanced, false);
+  assert.deepEqual(output, ["session", "first"]);
+  release.resolve();
+  assert.equal(await running, 0);
+  assert.deepEqual(output, ["session", "first", "second"]);
+  assert.equal(value.disposeCount(), 1);
+});
+
+test("JSON mode waits for default stdout write callbacks", async () => {
+  const original = process.stdout.write;
+  const forward = original.bind(process.stdout);
+  const entered = deferred();
+  let completeWrite = (): void => undefined;
+  let advanced = false;
+  const captureWrite = (chunk: string | Uint8Array, encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void), callback?: (error?: Error | null) => void): boolean => {
+    const done = Check(FUNCTION_VALUE, encodingOrCallback) ? encodingOrCallback : callback;
+    if (!String(chunk).startsWith("{")) return forward(chunk, done);
+    if (String(chunk).includes('"code":"slow"')) {
+      completeWrite = () => done?.();
+      entered.resolve();
+      return false;
+    }
+    done?.();
+    return true;
+  };
+  // SAFETY: captureWrite implements the exercised stdout overloads and preserves callback completion.
+  process.stdout.write = captureWrite as typeof process.stdout.write;
+  const value = fixture(async (emit) => {
+    await emit({ type: "warning", code: "slow", message: "fixture" });
+    advanced = true;
+  });
+  try {
+    const running = runPrintMode(value.runtime, { mode: "json", initialMessage: "go" });
+    await entered.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(advanced, false);
+    completeWrite();
+    assert.equal(await running, 0);
+    assert.equal(advanced, true);
+  } finally {
+    completeWrite();
+    process.stdout.write = original;
+  }
+});
+
+test("JSON mode drains detached extension errors before returning", async () => {
+  const entered = deferred();
+  const release = deferred();
+  let settled = false;
+  let value!: PrintFixture;
+  value = fixture(() => {
+    value.binding()?.onError?.({ extensionPath: "/extension.mjs", event: "input", error: "fixture" });
+  });
+  const running = runPrintMode(value.runtime, {
+    mode: "json",
+    initialMessage: "go",
+    async write(text) {
+      if (parseJsonLines(text)[0]?.type !== "extension_error") return;
+      entered.resolve();
+      await release.promise;
+    },
+  }).then((status) => { settled = true; return status; });
+  await entered.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  release.resolve();
+  assert.equal(await running, 0);
+});
+
+test("JSON mode reports async writer failures and still disposes", async () => {
+  const value = fixture();
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...items) => { errors.push(items.join(" ")); };
+  try {
+    assert.equal(await runPrintMode(value.runtime, {
+      mode: "json",
+      async write() { throw new Error("output disconnected"); },
+    }), 1);
+  } finally {
+    console.error = original;
+  }
+  assert.equal(value.disposeCount(), 1);
+  assert.deepEqual(errors, ["output disconnected"]);
+});
+
+test("JSON writer failure cancels pending recovery with the startup signal and disposes", { timeout: 5_000 }, async () => {
+  let bindSignal: AbortSignal | undefined;
+  let recoveryCancelled = false;
+  const value = fixture(undefined, {
+    blockedRecovery: true,
+    onBind(_binding, signal) { bindSignal = signal; },
+  });
+  value.runtime.session.recoverInterruptedRun = async (options) => {
+    const signal = options?.signal;
+    assert.ok(signal, "recovery must receive output cancellation");
+    assert.equal(signal, bindSignal, "startup and recovery must share output cancellation");
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        recoveryCancelled = true;
+        reject(signal.reason);
+      }, { once: true });
+      value.binding()?.onError?.({ extensionPath: "/recovery.mjs", event: "tool_call", error: "recovery diagnostic" });
+    });
+    throw new Error("Cancelled recovery must not continue replay");
+  };
+  const writes: string[] = [];
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...items) => { errors.push(items.join(" ")); };
+  try {
+    assert.equal(await runPrintMode(value.runtime, {
+      mode: "json",
+      initialMessage: "must not be prompted",
+      async write(text) {
+        const type = String(parseJsonLines(text)[0]?.type);
+        writes.push(type);
+        if (type === "extension_error") throw new Error("output disconnected during recovery");
+      },
+    }), 1);
+  } finally {
+    console.error = original;
+  }
+  assert.equal(recoveryCancelled, true);
+  assert.deepEqual(writes, ["session", "extension_error"]);
+  assert.deepEqual(errors, ["output disconnected during recovery"]);
+  assert.deepEqual(value.prompted, []);
+  assert.equal(value.disposeCount(), 1);
+  assert.ok(bindSignal?.aborted);
+  assert.equal(getEventListeners(bindSignal, "abort").length, 0);
+});
+
 test("print and JSON modes recover replacements or reject unresolved work before prompting", async () => {
   for (const mode of ["text", "json"] as const) {
     for (const blocked of [false, true]) {
@@ -643,7 +807,10 @@ test("print and JSON modes recover replacements or reject unresolved work before
       assert.deepEqual(order, blocked
         ? ["initial:prompt", "replacement:recover"]
         : ["initial:prompt", "replacement:recover", "replacement:prompt"]);
-      assert.deepEqual(recoveryOptions, [undefined]);
+      assert.equal(recoveryOptions.length, 1);
+      assert.ok(recoveryOptions[0]?.signal instanceof AbortSignal);
+      assert.equal(recoveryOptions[0].signal.aborted, false);
+      assert.deepEqual(Object.keys(recoveryOptions[0]), ["signal"]);
       assert.equal(value.bindCount(), 2);
       assert.equal(value.binding()?.mode, mode === "json" ? "json" : "print");
       assert.equal(value.prompted.length, blocked ? 1 : 2);

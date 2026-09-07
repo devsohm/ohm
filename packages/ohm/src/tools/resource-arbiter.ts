@@ -60,16 +60,22 @@ export class ToolResourceArbiter {
   }
 
   #pump(): void {
-    while (this.#waiters.length > 0) {
-      const waiter = this.#waiters[0]!;
+    for (let index = 0; index < this.#waiters.length;) {
+      const waiter = this.#waiters[index]!;
       if (waiter.signal.aborted) {
-        this.#waiters.shift();
+        this.#waiters.splice(index, 1);
         waiter.detach();
         waiter.reject(waiter.signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
         continue;
       }
-      if ([...this.#active].some((lease) => resourcesConflict(lease.claims, waiter.claims))) return;
-      this.#waiters.shift();
+      if (
+        [...this.#active].some((lease) => resourcesConflict(lease.claims, waiter.claims))
+        || this.#waiters.slice(0, index).some((earlier) => resourcesConflict(earlier.claims, waiter.claims))
+      ) {
+        index += 1;
+        continue;
+      }
+      this.#waiters.splice(index, 1);
       waiter.detach();
       const active: ActiveLease = { claims: waiter.claims, released: false };
       this.#active.add(active);

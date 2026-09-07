@@ -1,41 +1,13 @@
 import type { AgentSession } from "./agent-session.js";
 
-const owners = new WeakMap<AgentSession, () => void | Promise<void>>();
 const recoveryFinalizers = new WeakMap<AgentSession, {
   pending: Array<() => void | Promise<void>>;
   running?: Promise<void>;
 }>();
-const replacementCloses = new WeakSet<AgentSession>();
-const preservedSessionStores = new WeakSet<AgentSession>();
-const sharedStoreReplacementOptions = new WeakSet<object>();
 
-/** Marks internal replacement options whose session store remains owned by the active runtime. */
-export function markAgentSessionSharedStoreReplacement<T extends object>(options: T): T {
-  sharedStoreReplacementOptions.add(options);
-  return options;
-}
-
-/** Internal construction-failure policy for a replacement that shares the active session store. */
-export function isAgentSessionSharedStoreReplacement<T extends object>(options: T): boolean {
-  return sharedStoreReplacementOptions.has(options);
-}
-
-/** Internal ownership hook used by factories that allocate resources around a session. */
-export function attachAgentSessionOwner(
-  session: AgentSession,
-  dispose: () => void | Promise<void>,
-): void {
-  if (owners.has(session)) throw new Error("AgentSession already has an owner");
-  owners.set(session, dispose);
-}
-
-/** Runs an attached owner disposer at most once. */
-export async function disposeAgentSessionOwner(session: AgentSession): Promise<void> {
+/** Releases deferred recovery work when its session closes. */
+export function clearAgentSessionRecoveryFinalizers(session: AgentSession): void {
   recoveryFinalizers.delete(session);
-  const dispose = owners.get(session);
-  if (dispose === undefined) return;
-  owners.delete(session);
-  await dispose();
 }
 
 /** Queues internal work that must settle before post-recovery prompts are admitted. */
@@ -105,29 +77,4 @@ export function deferAgentSessionSelection(
       );
     }
   });
-}
-
-/** Closes a session without waiting on the command that requested replacement. */
-export async function closeAgentSessionForReplacement(
-  session: AgentSession,
-  options: { preserveSessionStore?: boolean } = {},
-): Promise<void> {
-  replacementCloses.add(session);
-  if (options.preserveSessionStore === true) preservedSessionStores.add(session);
-  try {
-    await session.close();
-  } finally {
-    replacementCloses.delete(session);
-    preservedSessionStores.delete(session);
-  }
-}
-
-/** Internal state read by AgentSession.close without changing its public signature. */
-export function isAgentSessionReplacementClose(session: AgentSession): boolean {
-  return replacementCloses.has(session);
-}
-
-/** Internal state read by AgentSession.close when a replacement shares its store. */
-export function isAgentSessionStorePreserved(session: AgentSession): boolean {
-  return preservedSessionStores.has(session);
 }

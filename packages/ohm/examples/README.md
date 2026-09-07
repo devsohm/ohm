@@ -1,22 +1,30 @@
 # ohm examples
 
-Start with [`starter`](./starter/). It is the smallest installable package, its extension entry is typechecked, and its local test invokes both registered callbacks. The other packages are focused examples: copy only the behavior your extension needs.
+Start with [`task-prompts`](./task-prompts/) when Markdown instructions are enough, or [`starter`](./starter/) for a command or tool. The starter's entry is typechecked and its local test invokes both registered callbacks. Copy only the behavior your plugin needs.
 
-Every package in this catalog is also activated through ohm's real package manager and extension runtime by the central conformance suite. `External access` documents what the example exercises; it is not a permission boundary. Direct extensions are trusted Node.js code with the authority of the ohm process.
+The central conformance suite resolves every package through the real package manager and activates packages with runtime code. Declarative packages need no activation factory. `External access` documents what the example exercises; it is not a permission boundary. Runtime plugins are trusted Node.js code with the authority of the ohm process.
+
+Prompt templates supply task text. Invoking one can lead the model to use the session's available tools.
 
 Run any package without installing it:
 
 ```text
-ohm --extension /absolute/path/to/packages/ohm/examples/PACKAGE
+ohm --plugin /absolute/path/to/packages/ohm/examples/PACKAGE
 ```
 
-For an installed copy, use `ohm install PATH`, ask the user to run `/refresh`, exercise the documented command or tool, and remove it with `ohm remove SOURCE` when finished.
+For an installed copy, use `ohm plugins install PATH`, ask the user to run `/refresh`, exercise the documented command or tool, and remove it with `ohm plugins remove SOURCE` when finished.
 
 ## Start in five minutes
 
 | Example | Outcome | Tier | Hosts | External access | Verify |
 | --- | --- | --- | --- | --- | --- |
+| [task-prompts](./task-prompts/) | Review, diagnose, or implement a scoped change using Markdown templates | `starter` | `all` | `none` | `package test` |
 | [starter](./starter/) | Register a typed command and model-callable tool | `starter` | `all` | `none` | `package test` |
+
+Choose the smallest mechanism: a prompt for a repeatable request, a skill for
+on-demand instructions with supporting files, or runtime code for a new tool,
+command handler, event hook, or UI contribution. They belong in the same plugin
+package; an optional resource does not require an empty JavaScript factory.
 
 ## Recipes by outcome
 
@@ -43,9 +51,11 @@ For an installed copy, use `ohm install PATH`, ask the user to run `/refresh`, e
 | [subagent-specialists](./subagent-specialists/) | Delegate named specialists through ordinary tools and managed child processes | `example` | `all` | `process` | `package test` |
 | [dynamic-package](./dynamic-package/) | Discover runtime-dependent skills and prompts | `example` | `all` | `filesystem-read` | `central conformance` |
 | [provider-catalog](./provider-catalog/) | Register provider, model-catalog, and OAuth contracts | `example` | `all` | `network, credentials` | `central conformance` |
-| [mcp-stdio](./mcp-stdio/) | Own an allowlisted MCP stdio bridge and publish ordinary extension tools | `example` | `all` | `process` | `package test` |
+| [mcp-stdio](./mcp-stdio/) | Own an allowlisted MCP stdio bridge and publish ordinary plugin tools | `example` | `all` | `process` | `package test` |
 | [terminal-workbench](./terminal-workbench/) | Coordinate terminal input, editor state, themes, and expansion | `example` | `tui` | `terminal-control` | `central conformance` |
 | [state-and-policy](./state-and-policy/) | Persist bounded workspace state and enforce a path policy | `example` | `all` | `filesystem-read, filesystem-write` | `central conformance` |
+| [workspace-memory](./workspace-memory/) | Remember explicit workspace notes and manage them through portable actions | `example` | `all` | `filesystem-read, filesystem-write` | `package test` |
+| [code-review](./code-review/) | Run and resume an independent review using the public RPC client | `example` | `all` | `filesystem-read, filesystem-write, process, network, credentials` | `package test` |
 
 ## Contract probes
 
@@ -58,10 +68,11 @@ For an installed copy, use `ohm install PATH`, ask the user to run `/refresh`, e
 
 ## Supporting examples
 
-- [`execution-backends`](./execution-backends/) contains standalone external tool-executor adapters rather than an installable extension package.
+- [`execution-backends`](./execution-backends/) contains standalone external tool-executor adapters rather than an installable plugin package.
 - [`sdk-composition.mjs`](./sdk-composition.mjs) composes shared services and sessions through the SDK.
+- [`serve-headless.mjs`](./serve-headless.mjs) proves public HTTP discovery, actions, cancellation and reconnect recovery with a local scripted provider. See the [walkthrough](./serve-headless.md).
 - [`embedding-runtime.mjs`](./embedding-runtime.mjs), [`embedding-in-memory.mjs`](./embedding-in-memory.mjs), and [`embedding-cancellation.mjs`](./embedding-cancellation.mjs) cover embedded runtime ownership, deterministic tests, and cancellation.
 
 ## Package workflow
 
-Use `ohm extensions author report PACKAGE` before installation. It validates the manifest and exact file set, activates and disposes a staged generation, and checks valid-candidate refresh. Before publishing, also test malformed input, cancellation, cleanup, repeated refresh, the packed archive, and the exact installed artifact. See [Extension packages](../docs/packages.md) for the complete workflow.
+Run the package's `npm test`, then `ohm plugins verify PACKAGE` before installation. Verification checks the source, builds an archive, installs it into temporary package state using cached dependencies with lifecycle scripts disabled, and activates, replaces, disposes, and removes that installed copy. It catches files missing from the archive without altering your installed packages. Plugin code still executes with your user account's authority. Package tests exercise behavior such as malformed input, cancellation, and recovery; generic verification cannot infer those workflows. See [Plugin packages](../docs/packages.md) for the edit, test, and refresh workflow.

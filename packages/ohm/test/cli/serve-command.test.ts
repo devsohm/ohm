@@ -45,6 +45,10 @@ const EXTENSION_CALL_VALUE = Type.Object({
   source: Type.Optional(Type.String()),
   text: Type.Optional(Type.String()),
 }, { additionalProperties: true });
+const INSPECTION_RESPONSE_VALUE = Type.Object({
+  sessionId: Type.String(),
+  thinkingLevel: Type.String(),
+}, { additionalProperties: true });
 const OPENED_SESSION_RESPONSE_VALUE = Type.Object({
   state: Type.Optional(Type.Object({ hasSuspendedRun: Type.Optional(Type.Boolean()) }, { additionalProperties: true })),
 }, { additionalProperties: true });
@@ -230,8 +234,20 @@ test("serve command starts offline, creates one canonical session, and stops cle
   const extensionMarker = join(root, "extension-called");
   const replacementMarker = join(root, "replacement-called");
   const lifecycleMarker = join(root, "extension-lifecycle");
+  const discoveryMarker = join(root, "plugin-discovery");
+  const refreshMarker = join(root, "session-refreshed");
   const port = await unusedLoopbackPort();
   await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
+  await Promise.all([
+    mkdir(join(agentDirectory, "extensions")),
+    mkdir(join(agentDirectory, "skills", "unrelated-serve"), { recursive: true }),
+    mkdir(join(agentDirectory, "prompts")),
+  ]);
+  await Promise.all([
+    writeFile(join(agentDirectory, "extensions", "unrelated.mjs"), 'throw new Error("no-plugins must suppress unrelated code");'),
+    writeFile(join(agentDirectory, "skills", "unrelated-serve", "SKILL.md"), "---\nname: unrelated-serve\ndescription: Unrelated serve skill\n---\nUnrelated body."),
+    writeFile(join(agentDirectory, "prompts", "unrelated-serve.md"), "Unrelated prompt."),
+  ]);
   const interruptedSessionId = createInterruptedServeSession(workspace, sessionDirectory);
   await writeFile(join(agentDirectory, "config.json"), `${JSON.stringify({
     defaultProvider: "serve-fixture",
@@ -249,12 +265,30 @@ await main(${JSON.stringify([
     "--workspace", workspace,
     "--session-dir", sessionDirectory,
     "--offline",
-    "--no-extensions",
+    "--no-plugins",
   ])}, {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "serve-fixture-provider",
-    factory(ohm) {
+    async factory(ohm) {
       const generation = ++extensionGeneration;
+      await ohm.facets.register({
+        apiVersion: 1,
+        kind: "worker",
+        name: "view",
+        setup(facet) {
+          facet.presentation.show({
+            id: "serve-generation",
+            blocks: [{ type: "text", text: "generation " + generation }],
+          });
+          ohm.registerCommand("serve-remove-view", {
+            handler() { facet.presentation.remove("serve-generation"); },
+          });
+        },
+      });
+      ohm.on("session_start", async (event) => {
+        if (event.reason === "refresh") ohm.setThinkingLevel("low");
+        appendFileSync(${JSON.stringify(discoveryMarker)}, JSON.stringify(await ohm.getDiscoveryView()) + "\\n");
+      });
       ohm.on("session_shutdown", (event) => {
         appendFileSync(${JSON.stringify(lifecycleMarker)}, generation + ":shutdown:" + event.reason + "\\n");
       });
@@ -267,6 +301,12 @@ await main(${JSON.stringify([
           appendFileSync(${JSON.stringify(replacementMarker)}, JSON.stringify(
             await context.newSession(),
           ) + "\\n");
+        },
+      });
+      ohm.registerCommand("serve-refresh", {
+        async handler(_args, context) {
+          await context.refresh();
+          appendFileSync(${JSON.stringify(refreshMarker)}, "refreshed\\n");
         },
       });
       ohm.on("input", (event, context) => {
@@ -292,7 +332,7 @@ await main(${JSON.stringify([
           thinkingLevelMap: {
             off: null,
             minimal: null,
-            low: null,
+            low: "low",
             medium: null,
             high: null,
             xhigh: "xhigh",
@@ -365,6 +405,7 @@ await main(${JSON.stringify([
   assert.equal(createdBody.state?.model?.provider, "serve-fixture");
   assert.equal(createdBody.state?.model?.id, "serve-model");
   assert.equal(createdBody.state?.thinkingLevel, "xhigh");
+  assert.doesNotMatch(await readFile(discoveryMarker, "utf8"), /unrelated-serve|ohm-dev/u);
   const sessionPath = encodeURIComponent(createdBody.sessionId ?? "");
 
   const recoveryStatus = await fetch(
@@ -452,6 +493,18 @@ await main(${JSON.stringify([
     text: "reply through the fixture provider",
   });
   assert.match(await readFile(providerMarker, "utf8"), /through direct extension/u);
+
+  let historyText = "";
+  await waitFor(async () => {
+    const history = await fetch(`http://127.0.0.1:${port}/v1/sessions/${sessionPath}/entries`, {
+      headers, signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(history.status, 200);
+    historyText = await history.text();
+    return historyText.includes("served response");
+  }, "serve durable history projection");
+  assert.match(historyText, /reply through the fixture provider through direct extension/u);
+  assert.doesNotMatch(historyText, /providerState|outputItems/u);
 
   const opened = await fetch(`http://127.0.0.1:${port}/v1/sessions/open`, {
     method: "POST",
@@ -594,6 +647,120 @@ await main(${JSON.stringify([
   );
   assert.equal(failedClosureAgain.status, 404);
 
+  const refreshEvents = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/events`,
+    { headers, signal: AbortSignal.timeout(20_000) },
+  );
+  assert.equal(refreshEvents.status, 200);
+  assert.ok(refreshEvents.body);
+  const eventReader = refreshEvents.body.getReader();
+  context.after(async () => { await eventReader.cancel().catch(() => undefined); });
+  const eventDecoder = new TextDecoder();
+  let refreshEventText = "";
+  const readRefreshEventsUntil = async (label: string, predicate: (text: string) => boolean): Promise<void> => {
+    try {
+      while (!predicate(refreshEventText)) {
+        const chunk = await eventReader.read();
+        assert.equal(chunk.done, false, "serve stream ended before refreshed events arrived");
+        refreshEventText += eventDecoder.decode(chunk.value, { stream: true });
+      }
+    } catch (cause) {
+      throw new Error(`Serve stream did not deliver ${label}: ${refreshEventText.slice(-2_048)}`, { cause });
+    }
+  };
+  await readRefreshEventsUntil("initial presentation", (text) => text.includes("generation 2"));
+  refreshEventText = "";
+  const refreshed = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/prompts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text: "/serve-refresh" }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  assert.equal(refreshed.status, 202, await refreshed.text());
+  await waitFor(async () => {
+    try {
+      return (await readFile(refreshMarker, "utf8")).includes("refreshed");
+    } catch {
+      return false;
+    }
+  }, "serve runtime refresh");
+  const refreshedSummary = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}`,
+    { headers, signal: AbortSignal.timeout(10_000) },
+  );
+  assert.equal(refreshedSummary.status, 200);
+  const refreshedSummaryBody: JsonValue = await refreshedSummary.json();
+  if (!Value.Check(CREATED_SESSION_RESPONSE_VALUE, refreshedSummaryBody)) throw new Error("Invalid refreshed session response");
+  assert.equal(refreshedSummaryBody.sessionId, interruptedSessionId);
+  assert.equal(refreshedSummaryBody.state?.thinkingLevel, "low");
+  const refreshedInspection = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/inspection`,
+    { headers, signal: AbortSignal.timeout(10_000) },
+  );
+  assert.equal(refreshedInspection.status, 200);
+  const refreshedInspectionBody: JsonValue = await refreshedInspection.json();
+  if (!Value.Check(INSPECTION_RESPONSE_VALUE, refreshedInspectionBody)) throw new Error("Invalid refreshed inspection response");
+  assert.equal(refreshedInspectionBody.sessionId, interruptedSessionId);
+  assert.equal(refreshedInspectionBody.thinkingLevel, "low");
+  await readRefreshEventsUntil("refreshed presentation", (text) => text.includes("generation 4"));
+  assert.match(refreshEventText, /"operation":"remove"/u);
+  assert.equal(refreshEventText.match(/generation 4/gu)?.length, 1);
+  const refreshedPresentations = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/presentations`,
+    { headers, signal: AbortSignal.timeout(10_000) },
+  );
+  assert.equal(refreshedPresentations.status, 200);
+  const refreshedPresentationText = await refreshedPresentations.text();
+  assert.match(refreshedPresentationText, /generation 4/u);
+  assert.doesNotMatch(refreshedPresentationText, /generation 2/u);
+  refreshEventText = "";
+
+  const refreshedPrompt = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/prompts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text: "reply after runtime refresh" }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  assert.equal(refreshedPrompt.status, 202, await refreshedPrompt.text());
+  await waitFor(async () => {
+    const history = await fetch(`http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/entries`, {
+      headers, signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(history.status, 200);
+    return (await history.text()).includes("reply after runtime refresh through direct extension");
+  }, "refreshed serve durable history projection");
+  await readRefreshEventsUntil("refreshed run", (text) => text.includes("event: run_completed"));
+  assert.match(refreshEventText, /event: run_state/u);
+  assert.match(refreshEventText, /reply after runtime refresh through direct extension/u);
+  assert.equal(refreshEventText.match(/event: text_delta/gu)?.length, 1);
+  assert.match(await readFile(providerMarker, "utf8"), /reply after runtime refresh through direct extension/u);
+  refreshEventText = "";
+  const removedView = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/prompts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text: "/serve-remove-view" }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  assert.equal(removedView.status, 202, await removedView.text());
+  await readRefreshEventsUntil("presentation removal", (text) => text.includes('"operation":"remove"'));
+  assert.equal(refreshEventText.match(/"operation":"remove"/gu)?.length, 1);
+  const removedPresentations = await fetch(
+    `http://127.0.0.1:${port}/v1/sessions/${interruptedPath}/presentations`,
+    { headers, signal: AbortSignal.timeout(10_000) },
+  );
+  assert.equal(removedPresentations.status, 200);
+  assert.deepEqual(await removedPresentations.json(), { sessionId: interruptedSessionId, presentations: [] });
+  await eventReader.cancel();
+
   assert.equal(child.kill("SIGTERM"), true);
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolveExit, reject) => {
@@ -614,8 +781,10 @@ await main(${JSON.stringify([
     "1:dispose",
     "3:shutdown:quit",
     "3:dispose",
-    "2:shutdown:quit",
+    "2:shutdown:refresh",
     "2:dispose",
+    "4:shutdown:quit",
+    "4:dispose",
   ]);
   assert.doesNotMatch(`${stdout}\n${stderr}`, new RegExp(TOKEN, "u"));
 });

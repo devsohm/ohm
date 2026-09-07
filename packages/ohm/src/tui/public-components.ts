@@ -53,7 +53,7 @@ import type {
   ToolDefinition,
   ToolRenderContext,
   ToolRenderState,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 import type { SessionInfo, SessionTreeNode } from "../storage/types.js";
 import { resolveSessionParentPaths } from "../storage/session-lineage.js";
 import type { TruncationResult } from "../tools/truncate.js";
@@ -595,7 +595,7 @@ export class CustomEditor extends Editor {
   onEscape?: () => void;
   onCtrlD?: () => void;
   onPasteImage?: () => void;
-  onExtensionShortcut?: (data: string) => boolean;
+  onPluginShortcut?: (data: string) => boolean;
 
   constructor(
     tui: TUI,
@@ -610,7 +610,7 @@ export class CustomEditor extends Editor {
   onAction(action: AppKeybinding, handler: () => void): void { this.actionHandlers.set(action, handler); }
 
   override handleInput(data: string): void {
-    if (this.onExtensionShortcut?.(data) === true) return;
+    if (this.onPluginShortcut?.(data) === true) return;
     const route = this.#route(data);
     if (route === undefined) {
       super.handleInput(data);
@@ -673,8 +673,8 @@ class Countdown {
   dispose(): void { clearInterval(this.#timer); }
 }
 
-export interface ExtensionInputOptions { tui?: TUI; timeout?: number }
-export class ExtensionInputComponent extends Container implements Focusable {
+export interface PluginInputOptions { tui?: TUI; timeout?: number }
+export class PluginInputComponent extends Container implements Focusable {
   readonly #input = new Input();
   readonly #title: Text;
   readonly #baseTitle: string;
@@ -684,7 +684,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
   #focused = false;
   #completed = false;
 
-  constructor(title: string, placeholder: string | undefined, onSubmit: (value: string) => void, onCancel: () => void, options?: ExtensionInputOptions) {
+  constructor(title: string, placeholder: string | undefined, onSubmit: (value: string) => void, onCancel: () => void, options?: PluginInputOptions) {
     super();
     this.#baseTitle = inlineLabel(title, "Input");
     this.#onSubmit = onSubmit;
@@ -729,9 +729,9 @@ export class ExtensionInputComponent extends Container implements Focusable {
   #styledTitle(value: string): string { return currentTheme().bold(currentTheme().fg("accent", value)); }
 }
 
-type ExtensionEditorState = "editing" | "external" | "completed" | "disposed";
+type PluginEditorState = "editing" | "external" | "completed" | "disposed";
 
-export class ExtensionEditorComponent extends Container implements Focusable {
+export class PluginEditorComponent extends Container implements Focusable {
   readonly #editor: Editor;
   readonly #tui: TUI;
   readonly #keybindings: KeybindingsManager;
@@ -740,7 +740,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
   readonly #externalEditorCommand: string | undefined;
   readonly #externalEditorController = new AbortController();
   #focused = false;
-  #state: ExtensionEditorState = "editing";
+  #state: PluginEditorState = "editing";
 
   constructor(
     tui: TUI,
@@ -827,15 +827,15 @@ function selection(_title: string, values: readonly string[], onSelect: (value: 
   return list;
 }
 
-export interface ExtensionSelectorOptions { tui?: TUI; timeout?: number; onToggleToolsExpanded?: () => void }
-export class ExtensionSelectorComponent extends Container {
+export interface PluginSelectorOptions { tui?: TUI; timeout?: number; onToggleToolsExpanded?: () => void }
+export class PluginSelectorComponent extends Container {
   readonly #list: SelectList;
   readonly #countdown: Countdown | undefined;
   readonly #toggle: (() => void) | undefined;
   readonly #optionCount: number;
   #selectedIndex = 0;
   #completed = false;
-  constructor(title: string, options: string[], onSelect: (value: string) => void, onCancel: () => void, config?: ExtensionSelectorOptions) {
+  constructor(title: string, options: string[], onSelect: (value: string) => void, onCancel: () => void, config?: PluginSelectorOptions) {
     super();
     const safeTitle = inlineLabel(title, "Choose");
     const styledTitle = (value: string): string => currentTheme().bold(currentTheme().fg("accent", value));
@@ -2391,7 +2391,7 @@ export class FooterComponent implements Component {
     private session: FooterSessionLike,
     private readonly footerData: {
       getGitBranch(): string | null;
-      getExtensionStatuses?(): ReadonlyMap<string, string>;
+      getPluginStatuses?(): ReadonlyMap<string, string>;
       getAvailableProviderCount?(): number;
     },
   ) {}
@@ -2491,7 +2491,7 @@ export class FooterComponent implements Component {
       : `${(this.footerData.getAvailableProviderCount?.() ?? 0) > 1 && model.provider !== undefined
         ? `(${model.provider}) `
         : ""}${model.id}${thinking === undefined ? "" : ` · ${thinking}`}`;
-    const status = [...(this.footerData.getExtensionStatuses?.() ?? new Map<string, string>()).entries()]
+    const status = [...(this.footerData.getPluginStatuses?.() ?? new Map<string, string>()).entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([, value]) => value.replaceAll(/[\r\n\t]+/gu, " ").trim())
       .filter(Boolean)

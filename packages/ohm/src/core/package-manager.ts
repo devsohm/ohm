@@ -1,4 +1,5 @@
 import { optionalProperties } from "./optional-properties.js";
+import { isPluginSourcePath, PLUGIN_ENTRY_NAMES } from "./plugin-source.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	accessSync,
@@ -23,7 +24,7 @@ import { maxSatisfying, satisfies, valid, validRange } from "semver";
 import { Value } from "typebox/value";
 
 import { inspectPortablePlugin, type PortablePluginDiagnostic } from "./portable-plugin.js";
-import { legacyManifestResources, parseLegacyExtensionManifest } from "../extensions/legacy-manifest.js";
+import { legacyManifestResources, parseLegacyPluginManifest } from "../plugins/legacy-manifest.js";
 import type { PackageSource, PackageSourceOptions, SettingsManager } from "./settings-manager.js";
 import { OHM_VERSION } from "../version.js";
 import { isLocalPath, portableLocalPackageSource, resolvePath } from "../utils/paths.js";
@@ -111,7 +112,7 @@ export interface PackageManager {
 	removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean>;
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean;
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
-	resolveExtensionSources(sources: readonly PackageSource[], options?: { local?: boolean; temporary?: boolean }): Promise<ResolvedPaths>;
+	resolvePluginSources(sources: readonly PackageSource[], options?: { local?: boolean; temporary?: boolean }): Promise<ResolvedPaths>;
 	setProgressCallback(callback: ProgressCallback | undefined): void;
 	update(source?: string, options?: PackageUpdateOptions): Promise<void>;
 }
@@ -136,8 +137,6 @@ const PACKAGE_INVENTORY_MAX_PATH_BYTES = 4 * 1024 * 1024;
 const SKILL_CONVENTION_MAX_ENTRIES = 10_000;
 const SKILL_CONVENTION_MAX_DEPTH = 64;
 const SKILL_CONVENTION_MAX_PATH_BYTES = 4 * 1024 * 1024;
-const DIRECT_SUFFIXES = new Set([".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx"]);
-const ENTRY_NAMES = ["index.ts", "index.tsx", "index.js", "index.mjs", "index.cjs", "index.mts", "index.cts"];
 const TYPES = ["extensions", "skills", "prompts", "themes"] as const;
 
 type ParsedSource =
@@ -199,7 +198,13 @@ function parseSource(source: string): ParsedSource {
 }
 
 function packageEntry(value: PackageSource): PackageSourceOptions {
-	return Value.Check(STRING_VALUE, value) ? { source: value } : { ...value };
+	const entry = Value.Check(STRING_VALUE, value) ? { source: value } : { ...value };
+	if (entry.entrypoints !== undefined) {
+		if (entry.extensions !== undefined) throw new Error("Plugin entrypoints filter is ambiguous");
+		entry.extensions = entry.entrypoints;
+		delete entry.entrypoints;
+	}
+	return entry;
 }
 
 function finalDeclarations(entries: readonly PackageSource[], base: string): PackageSource[] {
@@ -683,11 +688,11 @@ function directConvention(root: string): string[] {
 	const output: string[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 		const path = join(root, entry.name);
-		if (entry.isFile() && DIRECT_SUFFIXES.has(entry.name.slice(entry.name.lastIndexOf(".")))) {
+		if (entry.isFile() && isPluginSourcePath(entry.name)) {
 			const selected = regularInside(root, path);
 			if (selected !== undefined) output.push(selected);
 		} else if (entry.isDirectory()) {
-			for (const name of ENTRY_NAMES) {
+			for (const name of PLUGIN_ENTRY_NAMES) {
 				const selected = regularInside(root, join(path, name));
 				if (selected !== undefined) { output.push(selected); break; }
 			}
@@ -789,11 +794,12 @@ function declarationSelection(
 	type: ResourceType,
 	patterns: readonly string[] | undefined,
 	inventoryValue: Inventory,
+	preserveOrder = false,
 ): string[] {
 	if (patterns === undefined) return convention(join(root, type), type);
 	const eligible = inventoryValue.files.filter((path) => {
 		const name = inventoryValue.relative.get(path)!;
-		if (type === "extensions") return DIRECT_SUFFIXES.has(name.slice(name.lastIndexOf(".")));
+		if (type === "extensions") return isPluginSourcePath(name);
 		if (type === "skills") return basename(path) === "SKILL.md";
 		return name.toLowerCase().endsWith(type === "prompts" ? ".md" : ".json");
 	});
@@ -813,7 +819,7 @@ function declarationSelection(
 		if (marker === "!" || marker === "-") for (const path of candidates) selected.delete(path);
 		else for (const path of candidates) selected.add(path);
 	}
-	return [...selected].sort();
+	return preserveOrder ? [...selected] : [...selected].sort();
 }
 
 function filtered(
@@ -823,8 +829,9 @@ function filtered(
 	autoload: boolean,
 ): Array<{ path: string; enabled: boolean }> {
 	if (rules === undefined) return autoload ? resources.map((path) => ({ path, enabled: true })) : [];
-	const result = resources.map((path) => ({ path, enabled: autoload }));
 	const ordinary = rules.filter((rule) => !rule.startsWith("+") && !rule.startsWith("-"));
+	const enabled = autoload && rules.length > 0 && !ordinary.some((rule) => !rule.startsWith("!"));
+	const result = resources.map((path) => ({ path, enabled }));
 	if (ordinary.length > 0) {
 		for (const item of result) {
 			const name = relative(root, item.path).split(sep).join("/");
@@ -850,20 +857,20 @@ function filtered(
 	});
 }
 
-interface PackageView { resources: ResolvedPaths; diagnostics: PackageDiagnostic[]; rejected?: boolean }
+interface PackageView { resources: ResolvedPaths; diagnostics: PackageDiagnostic[]; rejected?: boolean; conventional?: boolean }
 
-function packageResources(rootInput: string, entry: PackageSourceOptions, scope: PackageScope): PackageView {
+function packageResources(rootInput: string, entry: PackageSourceOptions, scope: PackageScope, preserveEntryOrder = false): PackageView {
 	const root = realpathSync(rootInput);
 	if (!statSync(root).isDirectory()) {
 		const path = root;
 		return {
 			resources: {
 				...EMPTY(),
-				extensions: DIRECT_SUFFIXES.has(path.slice(path.lastIndexOf("."))) ? [{
-					path,
-					enabled: true,
-					metadata: { baseDir: dirname(path), origin: "top-level", scope, source: entry.source },
-				}] : [],
+				extensions: isPluginSourcePath(path)
+					? filtered([path], dirname(path), entry.extensions, entry.autoload !== false).map((resource) => ({
+						...resource,
+						metadata: { baseDir: dirname(path), origin: "top-level", scope, source: entry.source },
+					})) : [],
 			},
 			diagnostics: [],
 		};
@@ -874,11 +881,11 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 	let snapshot = inventory(root);
 	let declarations: Partial<Record<ResourceType, string[]>> = {};
 	let authoritative = false;
-	let legacyManifest: ReturnType<typeof parseLegacyExtensionManifest> | undefined;
+	let legacyManifest: ReturnType<typeof parseLegacyPluginManifest> | undefined;
 	const legacyPath = join(root, "extension.json");
 	if (existsSync(legacyPath)) {
 		try {
-			const legacy = parseLegacyExtensionManifest(readJson(legacyPath, "Legacy extension manifest"));
+			const legacy = parseLegacyPluginManifest(readJson(legacyPath, "Legacy extension manifest"));
 			legacyManifest = legacy;
 			let integrityValid = true;
 			for (const [name, digest] of legacy.integrity) {
@@ -899,19 +906,21 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 	}
 	const packageJson = join(root, "package.json");
 	if (!authoritative && existsSync(packageJson)) {
-		let manifest: JsonObject | undefined;
-		try { manifest = readJson(packageJson, "Package manifest"); }
-		catch { declarations.extensions = snapshot.files.filter((path) => DIRECT_SUFFIXES.has(path.slice(path.lastIndexOf(".")))).map((path) => snapshot.relative.get(path)!); }
-		const ohm = manifest?.["ohm"];
-			if (ohm !== undefined) {
-				if (!isJsonObject(ohm)) throw new Error(`Package ohm declaration must be an object: ${packageJson}`);
-				authoritative = true;
-				for (const type of TYPES) {
-					const value = ohm[type];
-					if (value !== undefined && (!Array.isArray(value) || value.some((item) => !Value.Check(STRING_VALUE, item)))) {
-						throw new Error(`Package ${type} declaration must be an array of strings: ${packageJson}`);
-					}
-					if (Array.isArray(value)) declarations[type] = value.filter((item): item is string => Value.Check(STRING_VALUE, item));
+		const manifest = readJson(packageJson, "Plugin manifest");
+		const ohm = manifest["ohm"];
+		if (ohm !== undefined) {
+			if (!isJsonObject(ohm)) throw new Error(`Package ohm declaration must be an object: ${packageJson}`);
+			if (ohm.entrypoints !== undefined && ohm.extensions !== undefined) {
+				throw new Error(`Plugin entrypoints declaration is ambiguous: ${packageJson}`);
+			}
+			authoritative = true;
+			for (const type of TYPES) {
+				const field = type === "extensions" ? "entrypoints" : type;
+				const value = ohm[field] !== undefined ? ohm[field] : ohm[type];
+				if (value !== undefined && (!Array.isArray(value) || value.some((item) => !Value.Check(STRING_VALUE, item)))) {
+					throw new Error(`Plugin ${field} declaration must be an array of strings: ${packageJson}`);
+				}
+				if (Array.isArray(value)) declarations[type] = value.filter((item): item is string => Value.Check(STRING_VALUE, item));
 			}
 		}
 	}
@@ -936,7 +945,7 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 				.filter((path) => {
 					const name = snapshot.relative.get(path)!;
 					if (!name.startsWith(`${type}/`)) return false;
-					if (type === "extensions") return DIRECT_SUFFIXES.has(name.slice(name.lastIndexOf(".")));
+					if (type === "extensions") return isPluginSourcePath(name);
 					if (type === "skills") return basename(path) === "SKILL.md";
 					return name.toLowerCase().endsWith(suffix!);
 				})
@@ -945,7 +954,7 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 	}
 	const resources = EMPTY();
 	for (const type of TYPES) {
-		const declared = declarationSelection(root, type, declarations[type], snapshot);
+		const declared = declarationSelection(root, type, declarations[type], snapshot, preserveEntryOrder);
 		const selected = filtered(declared, root, entry[type], entry.autoload !== false);
 		resources[type] = selected.map(({ path, enabled }) => ({
 			path,
@@ -990,7 +999,14 @@ function packageResources(rootInput: string, entry: PackageSourceOptions, scope:
 			},
 		}));
 	}
-	return { resources, diagnostics };
+	return { resources, diagnostics, conventional: !authoritative };
+}
+
+/** Internal compatibility bridge: only a validated undeclared package permits index fallback. */
+export function resolvePackagePluginEntries(directory: string): string[] | undefined {
+	const view = packageResources(directory, { source: directory }, "temporary", true);
+	if (view.rejected === true) throw new Error(view.diagnostics.map(({ message }) => message).join("; "));
+	return view.conventional === true ? undefined : view.resources.extensions.filter((entry) => entry.enabled).map((entry) => entry.path);
 }
 
 function merge(target: ResolvedPaths, source: ResolvedPaths): void {
@@ -1011,15 +1027,22 @@ function deduplicate(value: ResolvedPaths): ResolvedPaths {
 	return result;
 }
 
-function extensionRootPackages(root: string, scope: PackageScope): ResolvedPaths {
+function extensionRootPackages(root: string, scope: PackageScope, rules?: readonly string[]): ResolvedPaths {
 	const result = EMPTY();
 	let entries;
 	try { entries = readdirSync(root, { withFileTypes: true }); } catch { return result; }
 	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-		if (!entry.isDirectory()) continue;
+		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 		const packageRoot = join(root, entry.name);
-		if (!existsSync(join(packageRoot, "package.json")) && !existsSync(join(packageRoot, "plugin.json"))) continue;
-		merge(result, packageResources(packageRoot, { source: packageRoot }, scope).resources);
+		try { if (!statSync(packageRoot).isDirectory()) continue; }
+		catch { continue; }
+		if (!["package.json", "plugin.json", "extension.json"].some((name) => existsSync(join(packageRoot, name)))) continue;
+		const resources = packageResources(packageRoot, { source: packageRoot }, scope).resources;
+		if (rules !== undefined) {
+			const selected = filtered(resources.extensions.map(({ path }) => path), dirname(root), rules, true);
+			resources.extensions.forEach((resource, index) => { resource.enabled &&= selected[index]!.enabled; });
+		}
+		merge(result, resources);
 	}
 	return result;
 }
@@ -1034,9 +1057,12 @@ function topLevel(root: string, type: ResourceType, scope: PackageScope, rules?:
 			try { target = realpathSync(join(root, entry.name)); } catch { continue; }
 			let info;
 			try { info = statSync(target); } catch { continue; }
-			if (info.isFile() && DIRECT_SUFFIXES.has(target.slice(target.lastIndexOf(".")))) output.push(target);
+			if (info.isFile() && isPluginSourcePath(target)) output.push(target);
 			else if (info.isDirectory()) {
-				for (const name of ENTRY_NAMES) {
+				if (existsSync(join(target, "plugin.json")) || existsSync(join(target, "extension.json"))) continue;
+				const packageJson = join(target, "package.json");
+				if (existsSync(packageJson) && readJson(packageJson, "Plugin manifest")["ohm"] !== undefined) continue;
+				for (const name of PLUGIN_ENTRY_NAMES) {
 					try {
 						const path = realpathSync(join(target, name));
 						if (statSync(path).isFile()) { output.push(path); break; }
@@ -1054,8 +1080,9 @@ function topLevel(root: string, type: ResourceType, scope: PackageScope, rules?:
 	}));
 }
 
-function resourceRules(entries: readonly string[]): string[] {
-	return entries.filter((entry) => entry.startsWith("!") || entry.startsWith("+") || entry.startsWith("-"));
+function resourceRules(entries: readonly string[]): string[] | undefined {
+	const rules = entries.filter((entry) => entry.startsWith("!") || entry.startsWith("+") || entry.startsWith("-"));
+	return rules.length === 0 ? undefined : rules;
 }
 
 function configuredResources(
@@ -1137,7 +1164,7 @@ async function run(
 	});
 }
 
-export function getExtensionTempFolder(agentDirectory: string): string {
+export function getPluginTempFolder(agentDirectory: string): string {
 	const root = join(resolve(agentDirectory), "tmp", "extensions");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	try { accessSync(root, constants.W_OK | constants.X_OK); } catch { throw new Error(`Temporary extension directory is not writable: ${root}`); }
@@ -1196,7 +1223,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	#entries(scope: "user" | "project"): PackageSource[] {
 		const settings = scope === "user" ? this.#settings.getGlobalSettings() : this.#settings.getProjectSettings();
-		return settings.packages ?? [];
+		return settings.plugins ?? [];
 	}
 
 	#writeEntries(scope: "user" | "project", entries: PackageSource[]): void {
@@ -1325,7 +1352,7 @@ export class DefaultPackageManager implements PackageManager {
 			workspace: this.#cwd,
 			projectTrusted: this.#settings.isProjectTrusted(),
 			resources: view.resources,
-			dataRoot: getExtensionTempFolder(this.#agentDir),
+			dataRoot: getPluginTempFolder(this.#agentDir),
 			...optionalProperties(signal === undefined ? undefined : { signal }),
 		});
 		return view.resources;
@@ -1668,31 +1695,25 @@ export class DefaultPackageManager implements PackageManager {
 		merge(result, await this.#resolveEntries(projectEntries, "project", onMissing));
 		merge(result, await this.#resolveEntries(userEntries.filter((raw) => !projectIdentities.has(sourceIdentity(packageEntry(raw).source, this.#scopeBase("user")))), "user", onMissing));
 
-		if (this.#settings.isProjectTrusted()) {
-			const projectSettings = this.#settings.getProjectSettings();
-			const projectBase = join(this.#cwd, ".ohm");
+		for (const scope of ["project", "user"] as const) {
+			if (scope === "project" && !this.#settings.isProjectTrusted()) continue;
+			const settings = scope === "project" ? this.#settings.getProjectSettings() : this.#settings.getGlobalSettings();
+			const base = this.#scopeBase(scope);
 			for (const type of TYPES) {
-				const entries = projectSettings[type] ?? [];
-				result[type].push(...configuredResources(entries, projectBase, type, "project"));
-				result[type].push(...topLevel(
-					join(projectBase, type), type, "project", resourceRules(entries),
-				));
+				const entries = settings[type] ?? [];
+				const rules = resourceRules(entries);
+				result[type].push(...configuredResources(entries, base, type, scope));
+				for (const directory of type === "extensions" ? ["plugins", "extensions"] : [type]) {
+					const root = join(base, directory);
+					result[type].push(...topLevel(root, type, scope, rules));
+					if (type === "extensions") merge(result, extensionRootPackages(root, scope, rules));
+				}
 			}
-			merge(result, extensionRootPackages(join(this.#cwd, ".ohm", "extensions"), "project"));
 		}
-		const globalSettings = this.#settings.getGlobalSettings();
-		for (const type of TYPES) {
-			const entries = globalSettings[type] ?? [];
-			result[type].push(...configuredResources(entries, this.#agentDir, type, "user"));
-			result[type].push(...topLevel(
-				join(this.#agentDir, type), type, "user", resourceRules(entries),
-			));
-		}
-		merge(result, extensionRootPackages(join(this.#agentDir, "extensions"), "user"));
 		return deduplicate(result);
 	}
 
-	async resolveExtensionSources(sources: readonly PackageSource[], options: { local?: boolean; temporary?: boolean } = {}): Promise<ResolvedPaths> {
+	async resolvePluginSources(sources: readonly PackageSource[], options: { local?: boolean; temporary?: boolean } = {}): Promise<ResolvedPaths> {
 		const scope: PackageScope = options.temporary === true ? "temporary" : options.local === true ? "project" : "user";
 		if (scope === "project") this.#assertProject();
 		const result = EMPTY();
@@ -1708,18 +1729,20 @@ export class DefaultPackageManager implements PackageManager {
 				if (!existsSync(path)) throw new Error(`Path does not exist: ${path}`);
 				const info = statSync(path);
 				if (info.isDirectory() && !existsSync(join(path, "package.json")) && !existsSync(join(path, "plugin.json"))) {
-					const extensions = directConvention(path).map((extension) => ({
-						path: extension,
-						enabled: true,
-						metadata: { baseDir: path, origin: "package" as const, scope, source: entry.source },
-					}));
-					if (extensions.length > 0) { result.extensions.push(...extensions); continue; }
+					const paths = directConvention(path);
+					if (paths.length > 0) {
+						result.extensions.push(...filtered(paths, path, entry.extensions, entry.autoload !== false).map((resource) => ({
+							...resource,
+							metadata: { baseDir: path, origin: "package" as const, scope, source: entry.source },
+						})));
+						continue;
+					}
 				}
 				include(packageResources(path, entry, scope));
 				continue;
 			}
 			if (scope === "temporary" && parsed.kind === "npm") {
-				const root = join(getExtensionTempFolder(this.#agentDir), "npm", sha(entry.source).slice(0, 8));
+				const root = join(getPluginTempFolder(this.#agentDir), "npm", sha(entry.source).slice(0, 8));
 				const packagePath = join(root, "node_modules", parsed.name);
 				if (!existsSync(packagePath)) {
 					await mkdir(root, { recursive: true, mode: 0o700 });
@@ -1813,7 +1836,7 @@ export class DefaultPackageManager implements PackageManager {
 			if (firstMoving !== undefined) throw new Error(`cannot resolve ${firstMoving.source} while offline${moving.length > 1 ? ` (${moving.length - 1} more selected network source)` : ""}`);
 			return;
 		}
-		const backupRoot = await mkdtemp(join(getExtensionTempFolder(this.#agentDir), "package-update-backup-"));
+		const backupRoot = await mkdtemp(join(getPluginTempFolder(this.#agentDir), "package-update-backup-"));
 		const backups: Array<{ entry: ConfiguredPackage; original?: string; backup?: string }> = [];
 		const restoreReceipts: Array<() => Promise<void>> = [];
 		try {

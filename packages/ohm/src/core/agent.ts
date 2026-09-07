@@ -29,8 +29,8 @@ export {
 } from "@ohm/kernel/runtime/core/agent";
 export type {
   AgentCompactionDirective,
-  AgentExtensionReducers,
-  AgentExtensionRunScope,
+  AgentPluginReducers,
+  AgentPluginRunScope,
   AgentFinalizedAssistantReduction,
   AgentFinalizedAssistantResponse,
   AgentLifecycleObserver,

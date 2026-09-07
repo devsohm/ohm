@@ -184,7 +184,7 @@ function resourceDiagnosticMessage(
   severity: "error" | "warning",
 ): string {
   return RESOURCE_DIAGNOSTIC_MESSAGES.get(code)
-    ?? `${resource === "extension" ? "Extension resource discovery" : "Skill discovery"} reported ${severity === "error" ? "an error" : "a warning"}`;
+    ?? `${resource === "extension" ? "Plugin resource discovery" : "Skill discovery"} reported ${severity === "error" ? "an error" : "a warning"}`;
 }
 
 async function inspectPath(path: string, workspace: string, homeDirectory: string): Promise<PathSummary> {
@@ -341,7 +341,7 @@ export async function createDiagnosticBundle(options: DiagnosticBundleOptions = 
     auth: paths.auth,
     sessions: paths.sessions,
     modelCatalog: paths.modelCatalog,
-    userExtensions: paths.userExtensions,
+    userPlugins: paths.userPlugins,
     userSkills: paths.userSkills,
     logs: paths.logs,
     diagnostics: paths.diagnostics,
@@ -389,11 +389,12 @@ export async function createDiagnosticBundle(options: DiagnosticBundleOptions = 
     packageDiagnostics = manager.getDiagnostics();
     return resolved;
   }, undefined);
+  const userPluginRoots = new Set([resolve(paths.userPlugins), resolve(paths.agentDirectory, "extensions")]);
   const extensions = (resolvedResources?.extensions ?? []).slice(0, DIAGNOSTIC_RECORDS).map((entry) => ({
     id: sanitizeDiagnosticText(
 		entry.metadata.extensionId ?? (entry.metadata.origin === "package"
 		&& entry.metadata.baseDir !== undefined
-		&& resolve(dirname(entry.metadata.baseDir)) === resolve(paths.userExtensions)
+		&& userPluginRoots.has(resolve(dirname(entry.metadata.baseDir)))
         ? basename(entry.metadata.baseDir)
 			: entry.metadata.source),
       workspace,

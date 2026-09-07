@@ -6,7 +6,7 @@ preserves the host's bounded, workspace-aware file behavior and adds tool-call
 and tool-result renderers from `ohm/tui`.
 
 ```text
-ohm install ./packages/ohm/examples/tool-rendering
+ohm plugins install ./packages/ohm/examples/tool-rendering
 ```
 
 Use it to learn safe built-in composition and replacement precedence. Removing

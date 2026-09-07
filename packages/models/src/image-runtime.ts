@@ -9,31 +9,28 @@ import type {
   StreamOptions,
 } from "./contracts.js";
 import { fetchJson, type HttpStreamRequest } from "./http-engine.js";
+import { createImageModels } from "./image-models.js";
 
-const providers = new Map<string, ImageProvider>();
+const providers = createImageModels();
 
 export function registerImageProvider(provider: ImageProvider): void {
-  if (!provider.id.trim()) throw new TypeError("Image provider id must not be empty");
-  providers.set(provider.id, provider);
+  providers.setProvider(provider);
 }
 
 export function unregisterImageProvider(providerId: string): boolean {
-  return providers.delete(providerId);
+  return providers.deleteProvider(providerId);
 }
 
 export function getImageProviders(): readonly ImageProvider[] {
-  return [...providers.values()];
+  return providers.getProviders();
 }
 
 export function getImageModels(providerId?: string): readonly ImageModel[] {
-  if (providerId) return providers.get(providerId)?.models ?? [];
-  return [...providers.values()].flatMap((provider) => provider.models);
+  return providers.getModels(providerId);
 }
 
 export async function generateImage(model: ImageModel, request: ImageRequest): Promise<ImageResult> {
-  const provider = providers.get(model.provider);
-  if (!provider) throw new Error(`Unknown image provider: ${model.provider}`);
-  return provider.generate(model, request);
+  return providers.generateImage(model, request);
 }
 
 export const openrouterImageModels: readonly ImageModel[] = Object.freeze([
@@ -69,8 +66,16 @@ export function openrouterImagesProvider(options: OpenRouterImageProviderOptions
     id: "openrouter",
     name: "OpenRouter",
     models,
-    async generate(model, request) {
-      const key = options.apiKey ?? globalThis.process?.env.OPENROUTER_API_KEY;
+    auth: { apiKey: {
+      name: "OpenRouter API key",
+      async resolve({ ctx, credential }) {
+        const apiKey = credential?.key ?? options.apiKey ?? await ctx.env("OPENROUTER_API_KEY");
+        return apiKey === undefined ? undefined : { auth: { apiKey } };
+      },
+    } },
+    async generate(model, request, invocation) {
+      const key = invocation?.apiKey ?? options.apiKey
+        ?? (invocation === undefined ? globalThis.process?.env.OPENROUTER_API_KEY : undefined);
       if (!key) throw new Error("OpenRouter image generation requires an API key");
       if (!request.prompt.trim()) throw new TypeError("Image prompt must not be empty");
       const count = request.count ?? 1;
@@ -83,14 +88,16 @@ export function openrouterImagesProvider(options: OpenRouterImageProviderOptions
       if (request.size !== undefined) body.image_config = { aspect_ratio: aspectRatio(request.size) };
       const streamOptions: StreamOptions = {};
       if (request.signal !== undefined) streamOptions.signal = request.signal;
-      if (options.fetch !== undefined) streamOptions.fetch = options.fetch;
+      const fetch = invocation?.fetch ?? options.fetch;
+      if (fetch !== undefined) streamOptions.fetch = fetch;
       const httpRequest: HttpStreamRequest = {
-        url: `${model.baseUrl.replace(/\/+$/u, "")}/chat/completions`,
+        url: `${(invocation?.baseUrl ?? model.baseUrl).replace(/\/+$/u, "")}/chat/completions`,
         body,
         authorization: { value: key },
         options: streamOptions,
       };
       if (options.headers !== undefined) httpRequest.defaultHeaders = options.headers;
+      if (invocation?.headers !== undefined) httpRequest.headers = invocation.headers;
       const value = await fetchJson(httpRequest);
       const images = parseOpenRouterImages(value).slice(0, count);
       if (images.length === 0) throw new Error("OpenRouter response did not contain an image");

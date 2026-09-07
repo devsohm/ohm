@@ -115,10 +115,10 @@ await main([
   "--provider", "refresh-network-probe",
   "--model", "cached-model",
   "--approve",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "refresh-network-probe",
     factory(ohm) {
       ohm.registerProvider("refresh-network-probe", {
@@ -206,7 +206,7 @@ await main([
   await waitFor(
     () => {
       const output = stripAnsi(rendered.slice(refreshOutputStart));
-      return output.includes("Refreshed keyboard mappings") && output.includes("instruction files");
+      return output.includes("Refreshed plugins, keyboard mappings") && output.includes("instruction files");
     },
     () => `CLI refresh did not finish:\n${rendered}`,
   );

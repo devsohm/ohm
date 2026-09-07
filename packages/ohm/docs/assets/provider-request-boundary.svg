@@ -130,5 +130,5 @@
 
   <rect class="card" x="56" y="900" width="1488" height="52"/>
   <text class="detail" x="80" y="922">Secrets stay inside trusted auth and transport boundaries.</text>
-  <text class="detail" x="80" y="944">Extensions are trusted code; exported diagnostics stay allowlisted and redacted.</text>
+  <text class="detail" x="80" y="944">Plugins are trusted code; exported diagnostics stay allowlisted and redacted.</text>
 </svg>

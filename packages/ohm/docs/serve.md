@@ -8,10 +8,39 @@ or session store.
 
 The service is for one local operator. It is not a public, multi-tenant server.
 
+## Embed the HTTP host
+
+Use `createServeSessionRuntime(() => session)` from `ohm/serve` to adapt an existing
+`AgentSession` for `startServeServer`. The CLI uses this same adapter. It forwards
+history, inspection, events, actions, services, prompts and cancellation; it does
+not create a session or another execution engine.
+
+The getter resolves the current session on each call, so a host that refreshes
+its session object can pass `() => runtime.session`. The replacement must retain
+the registered session ID. By default, event subscriptions belong to the session
+on which they were registered. A replacement-capable host can supply `onEvent`
+and `onPortablePresentation` callbacks that own and rebind those subscriptions.
+The CLI does this during `/refresh`, including removal and resynchronization of
+portable views whose plugin-generation revisions restart.
+
+The adapter leaves startup to the host. By default, recovery calls
+`session.recoverInterruptedRun()` and closing calls `session.close()`. A second
+argument can supply `start(signal)`, `recoverInterruptedRun(options)` and
+`close()` callbacks when the host also owns plugin activation or shared services.
+An override replaces that operation; its owner must perform the required session
+work and cleanup. Errors propagate to the HTTP server. Registered sessions must
+keep their identity: use a separate runtime to switch to another session.
+
+The summary is bounded on the wire, but computing its message count still reads
+the session's current context. The adapter does not make long-session loading
+constant-time or change journal validation.
+
+## CLI session ownership
+
 Each registered HTTP session keeps one immutable service identity. A direct
-extension command cannot replace that identity: `newSession`, `fork`, and
+plugin command cannot replace that identity: `newSession`, `fork`, and
 `switchSession` return `{ cancelled: true }` in this host. Use `POST
-/v1/sessions` or `POST /v1/sessions/open` to register another session. Extension
+/v1/sessions` or `POST /v1/sessions/open` to register another session. Plugin
 commands can still navigate the current session tree and refresh resources.
 
 The command-line service does not synthesize per-tool approval prompts. A Node.js host invoking `main(["serve", ...], { toolAuthorizationHandler })` can install the same host-owned authorization callback used by the SDK; it is forwarded to every created or opened service session. Omission preserves allow behavior. See [SDK composition](sdk.md#host-owned-tool-authorization).
@@ -40,8 +69,8 @@ ohm serve --host 127.0.0.1 --port 4317 \
 ```
 
 Use `--approve` or `--no-approve` to make the project-resource trust decision
-for this invocation. Use `--offline`, `--no-extensions`, or repeat
-`--extension PATH` to control runtime resources.
+for this invocation. Use `--offline`, `--no-plugins`, or repeat
+`--plugin PATH` to control runtime resources.
 
 Run `ohm serve --help` for the installed command summary.
 
@@ -76,6 +105,8 @@ Send `Content-Type: application/json` with each JSON request.
 | `POST /v1/sessions` | Create and register a session. |
 | `POST /v1/sessions/open` | Open and register an existing durable session. |
 | `GET /v1/sessions/:id` | Read a bounded session-state summary. |
+| `GET /v1/sessions/:id/entries` | Page committed public history for transcript recovery. |
+| `GET /v1/sessions/:id/inspection` | Read runtime metadata, context provenance, tool ownership, current authorization/gate configuration, and recent activity with recognized terminal categories. No transcript, tool bodies, or free-form error details. Gate presence is not a permission decision or sandbox claim; see [shared inspection semantics](sdk.md#createagentsession). |
 | `DELETE /v1/sessions/:id` | Close the session runtime and release its service resources. |
 | `POST /v1/sessions/:id/prompts` | Accept a prompt for the session. |
 | `POST /v1/sessions/:id/cancel` | Cancel active work for the session. |
@@ -83,8 +114,8 @@ Send `Content-Type: application/json` with each JSON request.
 | `POST /v1/sessions/:id/recovery` | Attempt safe recovery or submit explicit effect resolutions. |
 | `GET /v1/sessions/:id/presentations` | Read current portable presentation snapshots. |
 | `POST /v1/sessions/:id/presentation-actions` | Invoke one versioned portable presentation action. |
-| `GET /v1/sessions/:id/wire-services` | Discover versioned extension services and their JSON schemas and limits. |
-| `POST /v1/sessions/:id/wire-services` | Invoke a versioned extension service. |
+| `GET /v1/sessions/:id/wire-services` | Discover versioned plugin services and their JSON schemas and limits. |
+| `POST /v1/sessions/:id/wire-services` | Invoke a versioned plugin service. |
 | `GET /v1/sessions/:id/events` | Stream session events with SSE. |
 
 URL-encode the session ID when you put it in a path.
@@ -234,7 +265,7 @@ The service ends the session's SSE streams, cancels active work, closes the
 runtime, and releases the open-session slot. It does not delete the durable V4
 journal. Use the open endpoint to open that journal again.
 
-### Portable presentations and extension wire services
+### Portable presentations and plugin wire services
 
 Portable presentation snapshots are available through `GET
 /v1/sessions/:id/presentations`. The event stream also carries
@@ -244,11 +275,11 @@ Revision tracking suppresses an identical event observed by both the
 subscription and snapshot pass, so a late client can use the snapshot endpoint
 after an SSE replay gap without duplicating the initial view. Post an exact
 `PortablePresentationActionRequest` to `presentation-actions`; rejected or
-stale actions return `409` without exposing extension exception text.
+stale actions return `409` without exposing plugin exception text.
 
 The wire-service `GET` result contains owner, name, version, detached request
 and response schemas, and byte limits. Post an exact
-`ExtensionWireServiceRequest` to the same path to invoke it. Request disconnect
+`PluginWireServiceRequest` to the same path to invoke it. Request disconnect
 and service shutdown propagate cancellation to the handler. Missing services
 return `404`; handler failures remain a versioned response with a generic
 message. The shared catalog/schema/payload limits are documented in
@@ -269,19 +300,29 @@ Each normal SSE record has:
 - an `event` name that matches the ohm event type;
 - a `data` value that contains one JSON `EventEnvelope`.
 
-Save the last received ID. Send it in `Last-Event-ID` after a connection
-failure:
+Save the response's `X-Ohm-Stream-ID` header together with the last received
+numeric ID. Send both headers after a connection failure:
 
 ```sh
 curl -N http://127.0.0.1:4317/v1/sessions/SESSION_ID/events \
   -H "Authorization: Bearer $OHM_SERVE_TOKEN" \
-  -H "Last-Event-ID: 42"
+  -H "Last-Event-ID: 42" \
+  -H "X-Ohm-Stream-ID: SAVED_STREAM_ID"
 ```
+
+The stream identity changes whenever a session runtime closes and reopens,
+including after service restart. A mismatched identity returns `409` before
+replaying events; recover committed history and use its new cursor and stream
+identity. This prevents a coincidentally valid numeric cursor from skipping
+events in a different runtime. Malformed identities return `400`. Older clients
+may omit the identity header, but must reset their numeric cursor on reopening;
+numeric IDs alone cannot detect every runtime replacement.
 
 The service replays retained events after that ID. Replay storage is bounded
 and exists only in memory. The service sends a `replay_gap` event when the
-requested records are no longer available. Read the current session state
-after a replay gap.
+requested records are no longer available. The state endpoint only contains
+counts and runtime status; recover missing conversation content with the
+entries endpoint below.
 
 A `replay_gap` record has its own `id`. Save that ID as the new cursor. This
 rule also applies when the replay buffer contains no normal event. A later
@@ -296,6 +337,58 @@ ID. The service then replays the events that are still in its bounded buffer.
 The durable V4 journal stores session execution state. It does not store the
 HTTP replay buffer. After a service restart, call the open endpoint and start a
 new event stream.
+
+### Recovering committed history
+
+Request `GET /v1/sessions/:id/entries?limit=100`. The response contains:
+
+```json
+{
+  "sessionId": "SESSION_ID",
+  "entries": [],
+  "leafId": null,
+  "sequenceStart": 0,
+  "nextSequence": 0,
+  "hasMore": false,
+  "totalEntries": 0,
+  "snapshot": "OPAQUE_SNAPSHOT_TOKEN",
+  "eventCursor": 0,
+  "streamId": "OPAQUE_STREAM_ID"
+}
+```
+
+The entry shape matches RPC's public session entries, including stable IDs and
+parent IDs across branches. `leafId` identifies the selected branch tip. This
+HTTP display projection omits assistant provider continuation state and opaque
+text/thinking/tool-call signatures. Visible reasoning remains visible, and
+registered secrets are redacted. Fields inside user-owned tool arguments or
+custom data are not removed merely because they share a provider field name.
+Stored sessions are unchanged; this endpoint is not a lossless session export.
+
+For the next page, send `afterSequence=NEXT_SEQUENCE&snapshot=SNAPSHOT_TOKEN`
+and optionally `limit`. `afterSequence` is an offset in the public entry
+projection, **not** a native journal commit number or SSE event ID. The default
+page size is 100, with a maximum of 500 entries and a 2 MiB total response cap.
+Entries are read individually, not by cloning the entire transcript. A single
+entry that cannot fit safely returns `413`; it is never silently truncated or
+skipped. Per-entry JSON admission also limits values and containers to 10,000,
+and nesting to 63 levels, within the shared redactor's limits. The storage projection may clone one
+storage-bounded entry before these smaller HTTP limits are applied.
+
+Pages are consistency-checked, not transactionally frozen. Appends, branch or
+metadata changes, and closing/reopening the session invalidate the token.
+On `409`, discard the partial page assembly and restart from the first page.
+Malformed queries return `400`. Custom library runtimes that omit the optional
+`getEntriesPage` adapter return `501`.
+
+After a replay gap or reopen, rebuild committed rows from these pages. Save the
+first page's `eventCursor` and `streamId`, then subscribe with those values as
+`Last-Event-ID` and `X-Ohm-Stream-ID` while paging;
+buffer live updates until the committed history is assembled. Treat committed
+entry IDs as row identities when reconciling updates. If SSE reports another
+gap, restart history recovery. The live SSE stream keeps its existing
+`EventEnvelope` format; paging does not recreate missed transient deltas or
+tool-progress updates.
 
 ## Default limits
 
@@ -322,7 +415,7 @@ The service has these deliberate limits:
 - The CLI binds only to loopback.
 - It does not provide TLS or CORS.
 - It does not provide users, roles, tenants, or permission scopes.
-- It does not use SQLite. Durable sessions remain V4 JSONL journals.
+- Durable sessions use the same SQLite-backed V4 journal as the other modes; JSONL is the import/export format.
 
 For access from another machine, keep the CLI loopback binding and use a
 reviewed encrypted tunnel. A browser client needs a trusted same-origin bridge

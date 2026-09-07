@@ -1,4 +1,4 @@
-import { byteTruncate, sanitizeTerminalText, splitGraphemes } from "./internal-unicode.js";
+import { byteTruncate, graphemeWidth, sanitizeTerminalText, splitGraphemes } from "./internal-unicode.js";
 import { findWordBackward, findWordForward } from "./word-navigation.js";
 import { wordWrapLine } from "./word-wrap.js";
 
@@ -719,6 +719,11 @@ export class MultilineEditor implements TuiEditorImplementation {
           });
         }
       }
+      const last = result.at(-1);
+      if (this.#cursor === logicalEnd && last !== undefined && last.end > last.start
+        && this.#visualColumn(last.start, last.end) === width) {
+        result.push({ start: logicalEnd, end: logicalEnd, logicalStart, logicalEnd });
+      }
       if (logicalEnd >= this.#graphemes.length) break;
       logicalStart = logicalEnd + 1;
     }
@@ -741,32 +746,21 @@ export class MultilineEditor implements TuiEditorImplementation {
     let currentColumn: number;
     if (this.#snappedFromCursor !== undefined) {
       const resolved = lines[this.#findVisualLine(lines, this.#snappedFromCursor)] ?? current;
-      currentColumn = this.#snappedFromCursor - resolved.start;
-    } else currentColumn = this.#cursor - current.start;
+      currentColumn = this.#visualColumn(resolved.start, this.#snappedFromCursor);
+    } else currentColumn = this.#visualColumn(current.start, this.#cursor);
 
-    const sourceLast = lines[currentIndex + 1]?.logicalStart !== current.logicalStart;
     const targetLast = lines[targetIndex + 1]?.logicalStart !== target.logicalStart;
-    const sourceMaximum = sourceLast ? current.end - current.start : Math.max(0, current.end - current.start - 1);
-    const targetMaximum = targetLast ? target.end - target.start : Math.max(0, target.end - target.start - 1);
-    const hasPreferred = this.#preferredColumn !== undefined;
-    const cursorInMiddle = currentColumn < sourceMaximum;
-    const targetTooShort = targetMaximum < currentColumn;
-    let selectedColumn: number;
-    if (!hasPreferred || cursorInMiddle) {
-      if (targetTooShort) {
-        this.#preferredColumn = currentColumn;
-        selectedColumn = targetMaximum;
-      } else {
-        this.#preferredColumn = undefined;
-        selectedColumn = currentColumn;
-      }
-    } else if (targetTooShort || targetMaximum < this.#preferredColumn!) selectedColumn = targetMaximum;
-    else {
-      selectedColumn = this.#preferredColumn!;
-      this.#preferredColumn = undefined;
+    const targetEnd = targetLast ? target.end : Math.max(target.start, target.end - 1);
+    const preferredColumn = this.#preferredColumn ?? currentColumn;
+    this.#preferredColumn = preferredColumn;
+    let selected = target.start;
+    let cells = 0;
+    while (selected < targetEnd) {
+      const width = graphemeWidth(this.#graphemes[selected]!);
+      if (cells + width > preferredColumn) break;
+      cells += width;
+      selected += 1;
     }
-
-    const selected = Math.min(target.end, target.start + selectedColumn);
     const paste = this.#pasteAt(selected);
     if (paste !== undefined && selected > paste.start) {
       const continuation = paste.start < target.start;
@@ -785,6 +779,12 @@ export class MultilineEditor implements TuiEditorImplementation {
     this.#cursor = selected;
     this.#snappedFromCursor = undefined;
     return changed;
+  }
+
+  #visualColumn(start: number, end: number): number {
+    let cells = 0;
+    for (let index = start; index < end; index += 1) cells += graphemeWidth(this.#graphemes[index]!);
+    return cells;
   }
 
   #unitBefore(position: number): { start: number; end: number; classification: string } | undefined {

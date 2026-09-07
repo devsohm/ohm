@@ -120,13 +120,13 @@ test("managed provider callbacks refresh, project models, and follow runtime gen
       workspace,
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
-      extensions: true,
-      extensionRuntime: true,
+      pluginCode: true,
+      pluginRuntime: true,
       skills: false,
       promptTemplates: false,
       themes: false,
     });
-    assert.deepEqual(runtime.runtimeExtensions.diagnostics(), []);
+    assert.deepEqual(runtime.runtimePlugins.diagnostics(), []);
     const firstModelRegistry = runtime.modelRegistry;
     const firstProviders = runtime.providers;
     const firstSignal = runtime.generationSignal;
@@ -185,7 +185,7 @@ test("managed provider callbacks refresh, project models, and follow runtime gen
     assert.equal(secondProviders.has(providerId), false);
     assert.equal(runtime.modelRegistry.getProvider(providerId)?.getModels()[0]?.name, "Managed generation-three");
     assert.equal(runtime.providers.has(providerId), true);
-    assert.deepEqual(runtime.runtimeExtensions.diagnostics(), []);
+    assert.deepEqual(runtime.runtimePlugins.diagnostics(), []);
 
     await runtime.close();
     assert.equal(runtime.modelRegistry.getProvider(providerId), undefined);

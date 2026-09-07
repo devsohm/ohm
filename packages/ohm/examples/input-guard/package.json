@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "description": "Input transformation and tool permission guard example for ohm",
-  "ohm": { "extensions": ["extensions/index.mjs"] }
+  "ohm": { "entrypoints": ["src/index.mjs"] }
 }

@@ -1,21 +1,21 @@
 import { hasObjectType, isFunctionValue, isStringValue } from "./value-guards.js";
 import {
-  EXTENSION_UI_SLOT_PATHS,
-  type ExtensionUISlotContribution,
-  type ExtensionUISlotPath,
-  type ExtensionUISlotPlacement,
-} from "../extensions/capabilities/ui-slots.js";
+  PLUGIN_UI_SLOT_PATHS,
+  type PluginUISlotContribution,
+  type PluginUISlotPath,
+  type PluginUISlotPlacement,
+} from "../plugins/capabilities/ui-slots.js";
 import { sanitizeTerminalText } from "./unicode.js";
 
-export const MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS = 64;
-export const MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS_PER_PATH = 16;
-export const MAX_EXTENSION_UI_SLOT_LINES = 4;
-export const MAX_EXTENSION_UI_SLOT_CONTRIBUTION_BYTES = 16 * 1024;
-export const MAX_EXTENSION_UI_SLOT_BYTES = 64 * 1024;
-export const MAX_EXTENSION_UI_SLOT_ORDER = 1_000_000;
+export const MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS = 64;
+export const MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS_PER_PATH = 16;
+export const MAX_PLUGIN_UI_SLOT_LINES = 4;
+export const MAX_PLUGIN_UI_SLOT_CONTRIBUTION_BYTES = 16 * 1024;
+export const MAX_PLUGIN_UI_SLOT_BYTES = 64 * 1024;
+export const MAX_PLUGIN_UI_SLOT_ORDER = 1_000_000;
 
-const pathSet = new Set<string>(EXTENSION_UI_SLOT_PATHS);
-const REPLACEABLE_PATHS = new Set<ExtensionUISlotPath>([
+const pathSet = new Set<string>(PLUGIN_UI_SLOT_PATHS);
+const REPLACEABLE_PATHS = new Set<PluginUISlotPath>([
   "session.header",
   "session.footer",
 ]);
@@ -23,81 +23,81 @@ const KEY_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9:._-]{0,127}$/u;
 
 interface NormalizedContribution {
   readonly lines: readonly string[];
-  readonly placement: ExtensionUISlotPlacement;
+  readonly placement: PluginUISlotPlacement;
   readonly order: number;
   readonly bytes: number;
 }
 
-export interface ExtensionUISlotToken {
+export interface PluginUISlotToken {
   toString(): string;
 }
 
 interface SlotRecord extends NormalizedContribution {
   readonly ownerKey: string;
-  readonly path: ExtensionUISlotPath;
+  readonly path: PluginUISlotPath;
   readonly key: string;
-  readonly token: ExtensionUISlotToken;
+  readonly token: PluginUISlotToken;
   readonly ownerOrder: number;
   readonly registrationOrder: number;
 }
 
-export interface ExtensionUISlotProjection {
-  readonly path: ExtensionUISlotPath;
+export interface PluginUISlotProjection {
+  readonly path: PluginUISlotPath;
   readonly lines: readonly string[];
   readonly replacement: boolean;
 }
 
-export function extensionUiSlotPath(value: ExtensionUISlotPath): ExtensionUISlotPath {
+export function extensionUiSlotPath(value: PluginUISlotPath): PluginUISlotPath {
   if (!isStringValue(value) || !pathSet.has(value)) {
-    throw new TypeError("Extension UI slot path is invalid");
+    throw new TypeError("Plugin UI slot path is invalid");
   }
   return value;
 }
 
 export function extensionUiSlotKey(value: string): string {
   if (!isStringValue(value) || !KEY_PATTERN.test(value)) {
-    throw new TypeError("Extension UI slot keys must be 1-128 identifier characters");
+    throw new TypeError("Plugin UI slot keys must be 1-128 identifier characters");
   }
   return value;
 }
 
 function ownerKey(value: string): string {
   if (!isStringValue(value) || value.length === 0 || Buffer.byteLength(value, "utf8") > 1_024) {
-    throw new TypeError("Extension UI slot owner keys must contain 1-1024 bytes");
+    throw new TypeError("Plugin UI slot owner keys must contain 1-1024 bytes");
   }
   return value;
 }
 
 function contribution(
-  path: ExtensionUISlotPath,
-  value: ExtensionUISlotContribution,
+  path: PluginUISlotPath,
+  value: PluginUISlotContribution,
 ): NormalizedContribution {
   if (value === null || !hasObjectType(value) || Array.isArray(value)) {
-    throw new TypeError("Extension UI slot contribution must be an object");
+    throw new TypeError("Plugin UI slot contribution must be an object");
   }
-  if (!Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > MAX_EXTENSION_UI_SLOT_LINES) {
-    throw new RangeError(`Extension UI slot contributions require 1-${MAX_EXTENSION_UI_SLOT_LINES} lines`);
+  if (!Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > MAX_PLUGIN_UI_SLOT_LINES) {
+    throw new RangeError(`Plugin UI slot contributions require 1-${MAX_PLUGIN_UI_SLOT_LINES} lines`);
   }
   const lines = value.lines.map((line, index) => {
     if (!isStringValue(line) || line.includes("\n") || line.includes("\r") || sanitizeTerminalText(line) !== line) {
-      throw new TypeError(`Extension UI slot line ${index} must be plain terminal-safe text`);
+      throw new TypeError(`Plugin UI slot line ${index} must be plain terminal-safe text`);
     }
     return line;
   });
   const bytes = lines.reduce((total, line) => total + Buffer.byteLength(line, "utf8"), 0);
-  if (bytes > MAX_EXTENSION_UI_SLOT_CONTRIBUTION_BYTES) {
-    throw new RangeError(`Extension UI slot contributions are limited to ${MAX_EXTENSION_UI_SLOT_CONTRIBUTION_BYTES} bytes`);
+  if (bytes > MAX_PLUGIN_UI_SLOT_CONTRIBUTION_BYTES) {
+    throw new RangeError(`Plugin UI slot contributions are limited to ${MAX_PLUGIN_UI_SLOT_CONTRIBUTION_BYTES} bytes`);
   }
   const placement = value.placement ?? "append";
   if (placement !== "prepend" && placement !== "append" && placement !== "replace") {
-    throw new TypeError("Extension UI slot placement must be prepend, append, or replace");
+    throw new TypeError("Plugin UI slot placement must be prepend, append, or replace");
   }
   if (placement === "replace" && !REPLACEABLE_PATHS.has(path)) {
     throw new Error("Only session.header and session.footer support replacement");
   }
   const order = value.order ?? 0;
-  if (!Number.isSafeInteger(order) || Math.abs(order) > MAX_EXTENSION_UI_SLOT_ORDER) {
-    throw new RangeError(`Extension UI slot order must be an integer from -${MAX_EXTENSION_UI_SLOT_ORDER} through ${MAX_EXTENSION_UI_SLOT_ORDER}`);
+  if (!Number.isSafeInteger(order) || Math.abs(order) > MAX_PLUGIN_UI_SLOT_ORDER) {
+    throw new RangeError(`Plugin UI slot order must be an integer from -${MAX_PLUGIN_UI_SLOT_ORDER} through ${MAX_PLUGIN_UI_SLOT_ORDER}`);
   }
   return Object.freeze({
     lines: Object.freeze(lines),
@@ -107,10 +107,10 @@ function contribution(
   });
 }
 
-export function validateExtensionUISlotContribution(
-  pathValue: ExtensionUISlotPath,
-  value: ExtensionUISlotContribution,
-): ExtensionUISlotContribution {
+export function validatePluginUISlotContribution(
+  pathValue: PluginUISlotPath,
+  value: PluginUISlotContribution,
+): PluginUISlotContribution {
   const path = extensionUiSlotPath(pathValue);
   const normalized = contribution(path, value);
   return Object.freeze({
@@ -120,7 +120,7 @@ export function validateExtensionUISlotContribution(
   });
 }
 
-function recordId(owner: string, path: ExtensionUISlotPath, key: string): string {
+function recordId(owner: string, path: PluginUISlotPath, key: string): string {
   return JSON.stringify([owner, path, key]);
 }
 
@@ -131,10 +131,10 @@ function compare(left: SlotRecord, right: SlotRecord): number {
 }
 
 /** Bounded deterministic state store used by the rich TUI's existing slots. */
-export class ExtensionUISlotCompositor {
+export class PluginUISlotCompositor {
   readonly #records = new Map<string, SlotRecord>();
   readonly #ownerOrders = new Map<string, number>();
-  readonly #projections = new Map<ExtensionUISlotPath, ExtensionUISlotProjection>();
+  readonly #projections = new Map<PluginUISlotPath, PluginUISlotProjection>();
   #nextOwnerOrder = 0;
   #nextRegistrationOrder = 0;
   #bytes = 0;
@@ -142,34 +142,34 @@ export class ExtensionUISlotCompositor {
 
   set(
     owner: string,
-    pathValue: ExtensionUISlotPath,
+    pathValue: PluginUISlotPath,
     keyValue: string,
-    value: ExtensionUISlotContribution,
-    token: ExtensionUISlotToken,
+    value: PluginUISlotContribution,
+    token: PluginUISlotToken,
   ): () => void {
     const selectedOwner = ownerKey(owner);
     const path = extensionUiSlotPath(pathValue);
     const key = extensionUiSlotKey(keyValue);
     if ((!hasObjectType(token) && !isFunctionValue(token)) || token === null) {
-      throw new TypeError("Extension UI slot registration token must be an object");
+      throw new TypeError("Plugin UI slot registration token must be an object");
     }
     const normalized = contribution(path, value);
     const id = recordId(selectedOwner, path, key);
     const previous = this.#records.get(id);
     const sameRegistration = previous?.token === token;
-    if (previous === undefined && this.#records.size >= MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS) {
-      throw new RangeError(`Extension UI slots are limited to ${MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS} contributions`);
+    if (previous === undefined && this.#records.size >= MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS) {
+      throw new RangeError(`Plugin UI slots are limited to ${MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS} contributions`);
     }
     if (
       previous === undefined
       && [...this.#records.values()].filter((record) => record.path === path).length
-        >= MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS_PER_PATH
+        >= MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS_PER_PATH
     ) {
-      throw new RangeError(`Extension UI slot ${path} is limited to ${MAX_EXTENSION_UI_SLOT_CONTRIBUTIONS_PER_PATH} contributions`);
+      throw new RangeError(`Plugin UI slot ${path} is limited to ${MAX_PLUGIN_UI_SLOT_CONTRIBUTIONS_PER_PATH} contributions`);
     }
     const nextBytes = this.#bytes - (previous?.bytes ?? 0) + normalized.bytes;
-    if (nextBytes > MAX_EXTENSION_UI_SLOT_BYTES) {
-      throw new RangeError(`Extension UI slots are limited to ${MAX_EXTENSION_UI_SLOT_BYTES} bytes`);
+    if (nextBytes > MAX_PLUGIN_UI_SLOT_BYTES) {
+      throw new RangeError(`Plugin UI slots are limited to ${MAX_PLUGIN_UI_SLOT_BYTES} bytes`);
     }
     const previousOwnerOrder = this.#ownerOrders.get(selectedOwner);
     const previousNextOwnerOrder = this.#nextOwnerOrder;
@@ -211,7 +211,7 @@ export class ExtensionUISlotCompositor {
     };
   }
 
-  remove(owner: string, pathValue: ExtensionUISlotPath, keyValue: string, token?: ExtensionUISlotToken): boolean {
+  remove(owner: string, pathValue: PluginUISlotPath, keyValue: string, token?: PluginUISlotToken): boolean {
     const selectedOwner = ownerKey(owner);
     const path = extensionUiSlotPath(pathValue);
     const key = extensionUiSlotKey(keyValue);
@@ -237,14 +237,14 @@ export class ExtensionUISlotCompositor {
     this.#version += 1;
   }
 
-  owns(owner: string, pathValue: ExtensionUISlotPath, keyValue: string, token: ExtensionUISlotToken): boolean {
+  owns(owner: string, pathValue: PluginUISlotPath, keyValue: string, token: PluginUISlotToken): boolean {
     const selectedOwner = ownerKey(owner);
     const path = extensionUiSlotPath(pathValue);
     const key = extensionUiSlotKey(keyValue);
     return this.#records.get(recordId(selectedOwner, path, key))?.token === token;
   }
 
-  project(pathValue: ExtensionUISlotPath): ExtensionUISlotProjection {
+  project(pathValue: PluginUISlotPath): PluginUISlotProjection {
     const path = extensionUiSlotPath(pathValue);
     const cached = this.#projections.get(path);
     if (cached !== undefined) return cached;

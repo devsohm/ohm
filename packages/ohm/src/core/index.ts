@@ -1,5 +1,26 @@
 export * from "./agent.js";
-export * from "./package-manager.js";
+export {
+  DefaultPackageManager,
+  getPluginTempFolder,
+  type ConfiguredPackage,
+  type DeclaredResourceMetadata,
+  type MissingSourceAction,
+  type PackageActivationCallback,
+  type PackageActivationCandidate,
+  type PackageDiagnostic,
+  type PackageInstallOptions,
+  type PackageManager,
+  type PackageManagerOptions,
+  type PackageScope,
+  type PackageUpdate,
+  type PackageUpdateOptions,
+  type PathMetadata,
+  type ProgressCallback,
+  type ProgressEvent,
+  type ResolvedPaths,
+  type ResolvedResource,
+  type ResourceType,
+} from "./package-manager.js";
 export * from "./public-assistant-content.js";
 export * from "./prompt-templates.js";
 export * from "./resource-loader.js";

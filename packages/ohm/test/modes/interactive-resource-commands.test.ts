@@ -17,7 +17,7 @@ interface PromptCall {
 function sessionFixture() {
   const prompts: PromptCall[] = [];
   const session: InteractiveResourceSession = {
-    extensionRunner: {
+    pluginRunner: {
       getRuntimeHost() {
         return { hasCommand(name: string) { return name === "extension" || name === "copy:1"; } };
       },

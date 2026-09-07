@@ -27,9 +27,7 @@ import {
 } from "@ohm/models";
 
 import { createDefaultCredentialStore } from "../auth/default-store.js";
-import { assertRedactableSecret, defaultSecretRedactor } from "../auth/redaction.js";
 import {
-  assertCredentialId,
   isMutableCredentialStore,
   type CredentialStore as HostCredentialStore,
 } from "../auth/types.js";
@@ -37,29 +35,26 @@ import { getAgentDir, getAuthPath } from "../config/paths.js";
 import { errorMessage } from "../core/errors.js";
 import { STRING_VALUE, FUNCTION_VALUE } from "../core/value-schemas.js";
 import {
-  extensionModelRegistry,
-  type ExtensionProviderConfig,
-  type ExtensionProviderModelConfig,
-} from "../extensions/model-boundary.js";
+  pluginModelRegistry,
+  type PluginProviderConfig,
+} from "../plugins/model-boundary.js";
 import { ProviderCredentialStoreAdapter } from "./auth-store-adapter.js";
 import { protectProviderAuth, protectProviderEnvironment } from "./auth-protection.js";
 import { builtinModels } from "./all.js";
 import { ModelRegistry } from "./model-registry.js";
 import {
   loadRuntimeModelConfiguration,
-  type RuntimeModelDefinition,
-  type RuntimeProviderDefinition,
+  runtimeProviderConfiguration,
 } from "./model-runtime-config.js";
 import { providerConfigValueUsesCommand } from "./provider-config-value.js";
 import type {
   MutableModels,
-  ProviderCredential,
-  ProviderCredentialInfo,
   ProviderCredentialStore,
   ProviderRefreshResult,
 } from "./models.js";
 import { FileProviderModelsStore, type ProviderModelsStore } from "./models-store.js";
 import { withRemoteCatalog } from "./remote-catalog.js";
+import { RuntimeCredentialStore } from "./runtime-credential-store.js";
 import { MODEL_REASONING_EFFORTS, type ModelReasoningEffort } from "./registry.js";
 import {
   installModelRuntimeFactory,
@@ -102,66 +97,6 @@ interface CompatibilityRequestConfig {
   authHeader: boolean;
 }
 
-/** Non-persistent API-key overlay used only by one ModelRuntime instance. */
-class RuntimeCredentialStore implements ProviderCredentialStore {
-  readonly #store: ProviderCredentialStore;
-  readonly #apiKeys = new Map<string, string>();
-
-  constructor(store: ProviderCredentialStore) {
-    this.#store = store;
-  }
-
-  setApiKey(provider: string, apiKey: string): void {
-    assertCredentialId(provider);
-    if (apiKey.trim() === "" || apiKey.includes("\0") || Buffer.byteLength(apiKey, "utf8") > 64 * 1024) {
-      throw new TypeError("Runtime API key must be a non-empty value no larger than 64 KiB");
-    }
-    assertRedactableSecret(apiKey, "Runtime API key");
-    defaultSecretRedactor.register(apiKey);
-    this.#apiKeys.set(provider, apiKey);
-  }
-
-  removeApiKey(provider: string): void {
-    assertCredentialId(provider);
-    this.#apiKeys.delete(provider);
-  }
-
-  hasRuntimeApiKey(provider: string): boolean {
-    return this.#apiKeys.has(provider);
-  }
-
-  async read(provider: string): Promise<ProviderCredential | undefined> {
-    const apiKey = this.#apiKeys.get(provider);
-    if (apiKey === undefined) return await this.#store.read(provider);
-    const stored = await this.#store.read(provider);
-    return {
-      type: "api_key",
-      key: apiKey,
-      ...optionalProperties(stored?.type !== "api_key" || stored.env === undefined ? undefined : { env: stored.env }),
-    };
-  }
-
-  async list(): Promise<readonly ProviderCredentialInfo[]> {
-    const entries = new Map((await this.#store.list()).map((entry) => [entry.providerId, entry]));
-    for (const providerId of this.#apiKeys.keys()) entries.set(providerId, { providerId, type: "api_key" });
-    return [...entries.values()];
-  }
-
-  modify(
-    provider: string,
-    operation: (current: ProviderCredential | undefined) => Promise<ProviderCredential | undefined>,
-    signal?: AbortSignal,
-  ): Promise<ProviderCredential | undefined> {
-    return this.#store.modify(provider, operation, signal);
-  }
-
-  async delete(provider: string): Promise<void> {
-    this.#apiKeys.delete(provider);
-    await this.#store.delete(provider);
-  }
-
-}
-
 function providerCredentials(store: PublicCredentialStore | HostCredentialStore): ProviderCredentialStore {
   if (!("write" in store)) return store;
   if (
@@ -172,111 +107,6 @@ function providerCredentials(store: PublicCredentialStore | HostCredentialStore)
   return new ProviderCredentialStoreAdapter(store);
 }
 
-function mergedCompatibility(
-  base: Model<Api>["compat"],
-  override: Model<Api>["compat"],
-): Model<Api>["compat"] {
-  if (override === undefined) return base;
-  if (base === undefined) return structuredClone(override);
-  return { ...base, ...override };
-}
-
-function configuredModel(
-  provider: string,
-  definition: RuntimeModelDefinition,
-  providerDefinition: RuntimeProviderDefinition,
-  fallback: Model<Api> | undefined,
-): Model<Api> {
-  const api = definition.api ?? providerDefinition.api ?? fallback?.api;
-  if (api === undefined) throw new Error(`Provider ${provider}, model ${definition.id}: API is required`);
-  const baseUrl = definition.baseUrl ?? providerDefinition.baseUrl ?? fallback?.baseUrl;
-  if (baseUrl === undefined) throw new Error(`Provider ${provider}, model ${definition.id}: base URL is required`);
-  return {
-    id: definition.id,
-    name: definition.name ?? fallback?.name ?? definition.id,
-    api,
-    provider,
-    baseUrl,
-    reasoning: definition.reasoning ?? fallback?.reasoning ?? false,
-    ...(() => {
-      const map = definition.thinkingLevelMap ?? fallback?.thinkingLevelMap;
-      return map === undefined ? {} : { thinkingLevelMap: { ...map } };
-    })(),
-    input: [...(definition.input ?? fallback?.input ?? ["text"])],
-    cost: {
-      ...(fallback?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-      ...definition.cost,
-    },
-    contextWindow: definition.contextWindow ?? fallback?.contextWindow ?? 128_000,
-    ...(() => {
-      const selected = definition.maxInputTokens ?? fallback?.maxInputTokens;
-      return selected === undefined ? {} : { maxInputTokens: selected };
-    })(),
-    maxTokens: definition.maxTokens ?? fallback?.maxTokens ?? 16_384,
-    ...(() => {
-      const selected = definition.headers ?? fallback?.headers;
-      return selected === undefined ? {} : { headers: { ...selected } };
-    })(),
-    ...(() => {
-      const compat = mergedCompatibility(
-        mergedCompatibility(fallback?.compat, providerDefinition.compat),
-        definition.compat,
-      );
-      return compat === undefined ? {} : { compat };
-    })(),
-  };
-}
-
-function providerConfiguration(
-  runtime: ModelRegistry,
-  provider: string,
-  definition: RuntimeProviderDefinition,
-): ExtensionProviderConfig {
-  const publicModels = extensionModelRegistry(runtime);
-  const existing = publicModels.getAll().filter((model) => model.provider === provider);
-  let models: Model<Api>[] | undefined;
-  if ((definition.models?.length ?? 0) > 0 || definition.compat !== undefined) {
-    models = existing.map((model) => ({
-      ...model,
-      ...optionalProperties(definition.baseUrl === undefined ? undefined : { baseUrl: definition.baseUrl }),
-      ...(() => {
-        const compat = mergedCompatibility(model.compat, definition.compat);
-        return compat === undefined ? {} : { compat };
-      })(),
-    }));
-    for (const entry of definition.models ?? []) {
-      const index = models.findIndex((model) => model.id === entry.id);
-      const fallback = index < 0 ? existing[0] : models[index];
-      const selected = configuredModel(provider, entry, definition, fallback);
-      if (index < 0) models.push(selected);
-      else models[index] = selected;
-    }
-  }
-  const configuredModels: ExtensionProviderModelConfig[] | undefined = models?.map((model) => ({
-    id: model.id,
-    name: model.name,
-    api: model.api,
-    baseUrl: model.baseUrl,
-    reasoning: model.reasoning,
-    ...optionalProperties(model.thinkingLevelMap === undefined ? undefined : { thinkingLevelMap: { ...model.thinkingLevelMap } }),
-    input: [...model.input],
-    cost: { ...model.cost },
-    contextWindow: model.contextWindow,
-    ...optionalProperties(model.maxInputTokens === undefined ? undefined : { maxInputTokens: model.maxInputTokens }),
-    maxTokens: model.maxTokens,
-    ...optionalProperties(model.headers === undefined ? undefined : { headers: { ...model.headers } }),
-    ...optionalProperties(model.compat === undefined ? undefined : { compat: model.compat }),
-  }));
-  return {
-    ...optionalProperties(definition.name === undefined ? undefined : { name: definition.name }),
-    ...optionalProperties(definition.baseUrl === undefined ? undefined : { baseUrl: definition.baseUrl }),
-    ...optionalProperties(definition.apiKey === undefined ? undefined : { apiKey: definition.apiKey }),
-    ...optionalProperties(definition.api === undefined ? undefined : { api: definition.api }),
-    ...optionalProperties(definition.headers === undefined ? undefined : { headers: { ...definition.headers } }),
-    ...optionalProperties(definition.authHeader === undefined ? undefined : { authHeader: definition.authHeader }),
-    ...optionalProperties(configuredModels === undefined ? undefined : { models: configuredModels }),
-  };
-}
 
 function mergeHeaders(
   base: ProviderHeaders | undefined,
@@ -318,7 +148,7 @@ export class ModelRuntime implements Models {
     }));
   }
   readonly #registry: ModelRegistry;
-  readonly #publicModels: ReturnType<typeof extensionModelRegistry>;
+  readonly #publicModels: ReturnType<typeof pluginModelRegistry>;
   readonly #runtimeCredentials: RuntimeCredentialStore | undefined;
   readonly #modelsPath: string | undefined;
   readonly #configuredProviderIds = new Set<string>();
@@ -339,7 +169,7 @@ export class ModelRuntime implements Models {
     closeModels?: () => Promise<void>;
   }) {
     this.#registry = options.registry;
-    this.#publicModels = extensionModelRegistry(options.registry);
+    this.#publicModels = pluginModelRegistry(options.registry);
     this.#runtimeCredentials = options.runtimeCredentials;
     this.#modelsPath = options.modelsPath;
     this.#modelNetworkEnabled = options.modelNetworkEnabled;
@@ -413,7 +243,7 @@ export class ModelRuntime implements Models {
     this.#configurationError = configuration.error;
     for (const [provider, definition] of configuration.providers) {
       try {
-        this.#publicModels.registerProvider(provider, providerConfiguration(this.#registry, provider, definition));
+        this.#publicModels.registerProvider(provider, runtimeProviderConfiguration(provider, definition, this.#publicModels.getAll()));
         this.#configuredProviderIds.add(provider);
       } catch (error) {
         const message = `Provider ${provider}: ${error instanceof Error ? error.message : String(error)}`;
@@ -494,7 +324,7 @@ export class ModelRuntime implements Models {
       .join("\n\n") || undefined;
   }
 
-  getRegisteredProviderConfig(providerId: string): ExtensionProviderConfig | undefined {
+  getRegisteredProviderConfig(providerId: string): PluginProviderConfig | undefined {
     return this.#publicModels.getRegisteredProviderConfig(providerId);
   }
 
@@ -732,7 +562,7 @@ export class ModelRuntime implements Models {
     void this.refresh({ allowNetwork: false });
   }
 
-  registerProvider(providerId: string, config: ExtensionProviderConfig): void {
+  registerProvider(providerId: string, config: PluginProviderConfig): void {
     this.#publicModels.registerProvider(providerId, config);
     void this.refresh({ allowNetwork: false });
   }

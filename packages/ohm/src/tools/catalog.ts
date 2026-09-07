@@ -1,4 +1,4 @@
-import type { ToolDefinition } from "../extensions/direct.js";
+import type { ToolDefinition } from "../plugins/direct.js";
 import {
   createBashTool,
   createBashToolDefinition,

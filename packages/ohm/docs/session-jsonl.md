@@ -1,8 +1,10 @@
 # Session JSONL format
 
-ohm stores each durable session as one strict V4 JSON Lines journal. The
-journal is the source of truth for conversation history, selected state,
-accepted runs, queues, checkpoints, and tool-effect recovery.
+JSONL is ohm's portable V4 journal format and the format of legacy saved sessions.
+New saved sessions store the same V4 header and commits in SQLite. The journal
+is the source of truth for conversation history, selected state, accepted runs,
+queues, checkpoints, and tool-effect recovery. See [Sessions](sessions.md) for
+preserved-source copy-on-resume and SQLite writer ownership.
 
 ![ohm session tree and compaction boundary](assets/session-tree.svg)
 
@@ -53,9 +55,9 @@ interface SessionV4Header {
 ```
 
 `parent` records provenance for a linked child or fork. It does not load or
-execute the parent session. An extension-launched worker or delegated agent does
-not receive this relationship automatically; extension-owned process state is
-outside the current V4 journal unless the extension records bounded custom
+execute the parent session. A plugin-launched worker or delegated agent does
+not receive this relationship automatically; plugin-owned process state is
+outside the current V4 journal unless the plugin records bounded custom
 state explicitly.
 
 ## Commits
@@ -105,11 +107,11 @@ nodes.
 | `tools_change` | active tool names and their fingerprint |
 | `compaction` | summary and retained node IDs |
 | `branch_summary` | summarized source range and summary |
-| `extension_context` | extension-owned content that may enter model context |
-| `extension_state` | extension-owned durable state that does not enter model context |
+| `extension_context` | plugin-owned content that may enter model context |
+| `extension_state` | plugin-owned durable state that does not enter model context |
 | `shell` | command, working directory, and result |
 
-Custom extension state and context keep provenance inside their existing
+Custom plugin state and context keep provenance inside their existing
 `state` or `context` payload rather than adding another journal node. When the
 host can identify the loaded source, the optional envelope has
 `schemaVersion: 1`, `extensionId`, and `sourceSha256`. Integrity-resolved package
@@ -187,18 +189,22 @@ and SDK hosts expose that decision without editing the journal by hand.
 
 ## Replay and crash boundaries
 
-Only LF-terminated records are committed. On open:
+Only LF-terminated JSONL records are committed. When reading a transfer or legacy file:
 
 - a trailing unterminated fragment is ignored;
-- a writable open truncates that fragment before the next append;
 - malformed or invalid LF-terminated data fails with its line number;
 - a missing or invalid header fails;
 - invalid sequence, ancestry, ownership, queue, operation, or tool-effect
   transitions fail.
 
-The writer validates the transition, appends the complete line, synchronizes
-the file, then publishes the new in-memory state. Session creation also
-synchronizes the parent directory when the platform supports it.
+Product resume validates and copies committed JSONL records into SQLite; it
+never truncates, appends to, or deletes the original JSONL file. The SQLite
+writer commits each validated transition before publishing new in-memory state.
+
+The lower-level `@ohm/kernel/session-v4` JSONL writer remains available separately.
+Its writable open truncates an incomplete trailing fragment before the next append.
+It appends and synchronizes complete lines before publishing state, and synchronizes
+the parent directory on creation when the platform supports it.
 
 The product owns a writer lease. A second live writer for the same session is
 rejected. A read-only snapshot can inspect the file without taking that lease.
@@ -211,7 +217,7 @@ The reducer first reconstructs the complete state. Product projection then:
 2. applies the latest reachable model, thinking, and tool selections;
 3. starts compacted context at the recorded retained boundary;
 4. keeps valid user, assistant, tool-call, and tool-result order;
-5. includes extension context and omits extension state.
+5. includes plugin context and omits plugin state.
 
 Provider conversion happens after this canonical context exists. Provider
 continuation state is reused only across a compatible provider, protocol,
@@ -220,7 +226,7 @@ model, and tool-definition boundary.
 ## Public projection
 
 `SessionManager` returns product-facing `SessionHeader` and `SessionEntry`
-objects for navigation, extension callbacks, RPC, and presentation. Those
+objects for navigation, plugin callbacks, RPC, and presentation. Those
 objects are a projection of reduced V4 state. They are not raw journal rows.
 
 Use `@ohm/kernel/session-v4` for the raw schema, reader, writers, validation,
@@ -240,4 +246,4 @@ IDs and references while removing recognized secrets from payload fields.
 
 Do not edit a live journal behind its manager. Session data can contain source
 code, prompts, model output, tool input and output, local paths, images, and
-extension data. Inspect a redacted copy before sharing it.
+plugin data. Inspect a redacted copy before sharing it.

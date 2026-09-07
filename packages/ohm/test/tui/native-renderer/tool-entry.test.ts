@@ -6,6 +6,7 @@ import { cellWidth, stripAnsi } from "@ohm/terminal";
 import {
   normalizeOhmTuiSnapshot,
   projectOhmNativeFrame,
+  projectOhmNativeTranscriptEntries,
   projectOhmTuiToolEntry,
   type OhmTuiSnapshot,
   type OhmTuiToolEntry,
@@ -38,6 +39,85 @@ function projected(entry: TranscriptEntry): OhmTuiToolEntry {
   assert.ok(selected);
   return selected;
 }
+
+test("collapsed failures prefer the completed summary and preserve output details on expansion", () => {
+  const source = tool("bash", { command: "npm test" }, {
+    status: "failed",
+    toolData: {
+      input: { command: "npm test" },
+      progress: {
+        output: "stale streamed output",
+        stdout: "stale streamed output",
+        stderr: "stale streamed warning",
+        stdoutBytes: 21,
+        stderrBytes: 22,
+        elapsedMs: 50,
+        truncated: false,
+      },
+      result: {
+        content: `${Array.from({ length: 174 }, (_, index) => `diagnostic ${index}`).join("\n")}\n\n\nShell command ended with status 1`,
+        summary: "Tool failed: X overlap (2.389295ms)",
+        isError: true,
+        metadata: { exitCode: 1, durationMs: 80, fullOutputPath: "/tmp/full-output.log" },
+      },
+    },
+  });
+  const selected = projected(source);
+  assert.equal(selected.details?.find((detail) => detail.label === "Error")?.value, source.toolData?.result?.content);
+  for (const summary of [" \t", "assertion failed"]) {
+    const outputOnly = projected({
+      ...source,
+      toolData: { ...source.toolData, result: { content: "assertion failed", summary, isError: true } },
+    });
+    assert.deepEqual(outputOnly.details?.filter((detail) => detail.preview).map((detail) => detail.value), ["assertion failed"]);
+  }
+  for (const content of ["", " \n"]) {
+    const emptyFinal = projected({
+      ...source,
+      toolData: { ...source.toolData, result: { content, summary: " \t", isError: true } },
+    });
+    assert.deepEqual(emptyFinal.details?.filter((detail) => detail.preview).map((detail) => detail.label), [
+      "stdout · 21 bytes", "stderr · 22 bytes",
+    ]);
+    if (content !== "") assert.equal(emptyFinal.details?.find((detail) => detail.label === "Error")?.value, content);
+    const summaryOnly = projected({
+      ...source,
+      toolData: { ...source.toolData, result: { content, summary: "failure summary", isError: true } },
+    });
+    assert.deepEqual(summaryOnly.details?.filter((detail) => detail.preview).map((detail) => detail.value), ["failure summary"]);
+  }
+  for (const columns of [24, 80]) {
+    for (const color of [false, true]) {
+      const render = (expanded: boolean): string[] => projectOhmNativeTranscriptEntries({
+        snapshot: {
+          transcript: [{ ...selected, expanded }],
+          queuedMessages: [],
+          composer: { value: "" },
+          status: { connection: "connected" },
+          telemetry: {},
+        },
+        columns,
+        theme: createTheme("signal", { color, unicode: true }),
+      })![0]!.map(stripAnsi);
+      const collapsed = render(false);
+      assert.ok(collapsed.every((line) => cellWidth(line) <= columns));
+      assert.match(collapsed.join("\n"), /failed · exit 1/u);
+      assert.match(collapsed.map((line) => line.trim()).join(" "), /Tool failed: X overlap/u);
+      assert.match(collapsed.join("\n"), /Ctrl\+O details/u);
+      assert.doesNotMatch(collapsed.join("\n"), /↳ (?:Error|Result|stdout|stderr)|stale streamed|rows hidden|Shell command ended/u);
+      const expanded = render(true);
+      assert.ok(expanded.every((line) => cellWidth(line) <= columns));
+      const expandedText = expanded.map((line) => line.trim()).join(" ");
+      assert.match(expandedText, /diagnostic 173/u);
+      assert.match(expandedText, /Tool failed: X overlap/u);
+      assert.match(expandedText, /Shell command ended with status 1/u);
+      assert.match(expandedText, /stale streamed output/u);
+      assert.match(expandedText, /stale streamed warning/u);
+      assert.match(expanded.join("\n"), /↳ Error/u);
+      assert.match(expanded.join("\n"), /↳ Full output/u);
+    }
+  }
+});
 
 test("projects every built-in into a compact semantic native headline", () => {
   const fixtures = [
@@ -174,7 +254,7 @@ function snapshot(entries: readonly OhmTuiToolEntry[]): OhmTuiSnapshot {
   };
 }
 
-test("native cards omit the left rail, keep Ctrl+O final, and obey per-call expansion", () => {
+test("native tool ledgers stay compact and obey per-call expansion", () => {
   const base = projected(tool("read", { path: "src/a.ts", offset: 1, limit: 2 }, {
     text: "first\nsecond",
     toolData: {
@@ -183,8 +263,8 @@ test("native cards omit the left rail, keep Ctrl+O final, and obey per-call expa
     },
   }));
   const collapsed = stripAnsi(projectOhmNativeFrame({ snapshot: snapshot([base]), columns: 48 }).text);
-  assert.match(collapsed, /✓ read · done\n  ↳ src\/a\.ts · lines 1-2/u);
-  assert.match(collapsed, /↳ Output\n    first\n    second\n  … Ctrl\+O details/u);
+  assert.match(collapsed, /✓ read  src\/a\.ts · lines 1-2  done/u);
+  assert.doesNotMatch(collapsed, /Output|first|second|Ctrl\+O/u);
   assert.ok(collapsed.split("\n").every((line) => !line.startsWith("│")));
 
   const expanded = stripAnsi(projectOhmNativeFrame({
@@ -192,7 +272,8 @@ test("native cards omit the left rail, keep Ctrl+O final, and obey per-call expa
     columns: 48,
     toolDetailsExpanded: false,
   }).text);
-  assert.match(expanded, /↳ Metadata[\s\S]*shownLines[\s\S]*… Ctrl\+O collapse/u);
+  assert.match(expanded, /↳ Output\n    first\n    second/u);
+  assert.match(expanded, /↳ Metadata[\s\S]*shownLines/u);
 
   const perCallCollapsed = stripAnsi(projectOhmNativeFrame({
     snapshot: snapshot([{ ...base, expanded: false }]),
@@ -200,10 +281,10 @@ test("native cards omit the left rail, keep Ctrl+O final, and obey per-call expa
     toolDetailsExpanded: true,
   }).text);
   assert.doesNotMatch(perCallCollapsed, /Metadata/u);
-  assert.match(perCallCollapsed, /Ctrl\+O details/u);
+  assert.doesNotMatch(perCallCollapsed, /Output|first|second/u);
 });
 
-test("native cards show the expansion hint only when expansion changes visible content", () => {
+test("native tool ledgers omit repeated shortcuts and keep details available on expansion", () => {
   const shortPreview: OhmTuiToolEntry = {
     id: "short",
     kind: "tool",
@@ -221,6 +302,8 @@ test("native cards show the expansion hint only when expansion changes visible c
   }).text);
   assert.doesNotMatch(shortCollapsed, /Ctrl\+O/u);
   assert.doesNotMatch(shortExpanded, /Ctrl\+O/u);
+  assert.doesNotMatch(shortCollapsed, /\bone\b|\btwo\b/u);
+  assert.match(shortExpanded, /Output\n    one\n    two/u);
 
   const longPreview = stripAnsi(projectOhmNativeFrame({
     snapshot: snapshot([{
@@ -235,7 +318,7 @@ test("native cards show the expansion hint only when expansion changes visible c
     }]),
     columns: 40,
   }).text);
-  assert.match(longPreview, /Ctrl\+O details/u);
+  assert.doesNotMatch(longPreview, /line [0-7]|Ctrl\+O/u);
 
   const hiddenDetail = stripAnsi(projectOhmNativeFrame({
     snapshot: snapshot([{
@@ -248,7 +331,7 @@ test("native cards show the expansion hint only when expansion changes visible c
     }]),
     columns: 40,
   }).text);
-  assert.match(hiddenDetail, /Ctrl\+O details/u);
+  assert.doesNotMatch(hiddenDetail, /Metadata|hidden|Ctrl\+O/u);
 });
 
 test("native cards stay width-bounded and honor no-color ASCII presentation", () => {
@@ -275,7 +358,8 @@ test("native cards stay width-bounded and honor no-color ASCII presentation", ()
   assert.equal(frame, stripAnsi(frame));
   assert.doesNotMatch(frame, /[✓×●○↳…│]/u);
   assert.match(frame, /> \$ printf/u);
-  assert.match(frame, /\. Ctrl\+O details/u);
+  assert.match(frame, /Progress[\s\S]*界/u);
+  assert.doesNotMatch(frame, /Ctrl\+O/u);
   for (const line of frame.split("\n")) assert.ok(cellWidth(line) <= 18, line);
 });
 

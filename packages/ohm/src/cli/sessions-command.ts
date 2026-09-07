@@ -41,7 +41,7 @@ export async function inspectSessionFiles(input: {
 export async function runSessionsCommand(argumentsValue: ParsedArguments): Promise<void> {
   const action = argumentsValue.positionals[0] ?? "doctor";
   if (action !== "doctor") {
-    throw new Error("JSONL sessions do not use database indexes; only `ohm sessions doctor` is supported");
+    throw new Error("Unknown sessions action; use `ohm sessions doctor` to validate SQLite and legacy JSONL journals");
   }
   const workspace = resolve(flagString(argumentsValue, "workspace") ?? process.cwd());
   const requestedDirectory = flagString(argumentsValue, "session-dir");

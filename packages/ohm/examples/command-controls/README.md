@@ -9,7 +9,7 @@ This example registers three controls:
 Install it from the ohm source checkout:
 
 ```text
-ohm install ./packages/ohm/examples/command-controls
+ohm plugins install ./packages/ohm/examples/command-controls
 ```
 
 Run `/example-controls` after `/refresh`. Start ohm with

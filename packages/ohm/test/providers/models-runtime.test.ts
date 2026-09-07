@@ -1676,7 +1676,7 @@ test("extension model registry replaces built-ins, merges re-registration, and r
     apiKey: "configured-key",
     models: [{
       id: "extension-model",
-      name: "Extension model",
+      name: "Plugin model",
       api: "openai-responses",
       reasoning: true,
       input: ["text"],

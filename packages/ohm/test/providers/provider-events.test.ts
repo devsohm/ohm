@@ -4,6 +4,7 @@ import test from "node:test";
 import { ASSISTANT_CONTENT_LIMITS } from "@ohm/kernel/runtime/core/assistant-content-limits";
 
 import type { JsonObject } from "../../src/core/json.js";
+import { OHM_VERSION } from "../../src/version.js";
 import { optionalProperties } from "../../src/core/optional-properties.js";
 import { AnthropicAdapter } from "../../src/providers/anthropic.js";
 import { GeminiAdapter, VertexAdapter } from "../../src/providers/gemini.js";
@@ -1193,7 +1194,7 @@ test("approved Anthropic OAuth credentials use the provider compatibility contra
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("anthropic-dangerous-direct-browser-access"), "true");
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "ohm/0.1.1");
+  assert.equal(headers?.get("user-agent"), `ohm/${OHM_VERSION}`);
   assert.deepEqual(jsonObjects(posted?.tools).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");
   assert.equal(tool?.type === "tool_call_end" ? tool.name : undefined, "read");

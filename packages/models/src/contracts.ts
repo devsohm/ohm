@@ -105,6 +105,8 @@ export type {
 export type {
   GeneratedImage,
   ImageModel,
+  ImageGenerationOptions,
+  ImageModelsRefreshContext,
   ImageProvider,
   ImageRequest,
   ImageResult,

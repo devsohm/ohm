@@ -24,7 +24,7 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
   assert.match(report, /programmable agent harness/u);
   assert.match(report, /^ctrl\+X interrupt · ctrl\+C clear\/exit · ctrl\+D exit · \/ commands$/mu);
   assert.match(report, /^Workspace: \/workspace$/mu);
-  assert.match(report, /^Loaded: 1 extensions · 1 skills · 2 prompts$/mu);
+  assert.match(report, /^Loaded: 1 plugins · 1 skills · 2 prompts$/mu);
 
   const compact = formatCompactStartupReport(inventory, "/workspace", keybindings);
   assert.equal(compact.split("\n", 1)[0], `ohm ${OHM_VERSION} · ready`);

@@ -8,7 +8,7 @@ import { Value } from "typebox/value";
 
 import { loadRuntime } from "../../src/cli/runtime.js";
 import type { JsonValue } from "../../src/core/json.js";
-import type { RuntimeCommandUi } from "../../src/extensions/runtime.js";
+import type { RuntimeCommandUi } from "../../src/plugins/runtime.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
 
 const MODEL_CATALOG_VALUE = Type.Object({
@@ -116,8 +116,8 @@ export default function activate(api) {
       workspace,
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
-      extensions: true,
-      extensionRuntime: true,
+      pluginCode: true,
+      pluginRuntime: true,
       skills: false,
       promptTemplates: false,
       themes: false,
@@ -139,7 +139,7 @@ export default function activate(api) {
         info: initialModel,
       });
       assert.equal(runtime.session.nativeModel?.info?.capabilities.reasoning.value, "unsupported");
-      await runtime.session.bindExtensions({ mode: "print" });
+      await runtime.session.bindPlugins({ mode: "print" });
       const commandInput = {
         args: "",
         threadId: runtime.session.sessionId,
@@ -147,14 +147,14 @@ export default function activate(api) {
         signal: new AbortController().signal,
         ui: commandUi(),
       };
-      assert.deepEqual(await runtime.runtimeExtensions.runCommand("overlay-unregister", commandInput), { handled: true });
+      assert.deepEqual(await runtime.runtimePlugins.runCommand("overlay-unregister", commandInput), { handled: true });
       assert.equal(runtime.auth.binding("ollama").displayName, "Ollama");
       assert.equal(runtime.modelRegistry.find("ollama", "overlay-model"), undefined);
       assert.equal(runtime.modelRegistry.find("ollama", "builtin-model")?.id, "builtin-model");
       await runtime.providers.refreshModels("ollama", new AbortController().signal);
       assert.equal(runtime.providers.getModels("ollama").some((model) => model.id === "overlay-model"), false);
       assert.equal(runtime.providers.getModels("ollama").some((model) => model.id === "builtin-model"), true);
-      assert.deepEqual(await runtime.runtimeExtensions.runCommand("overlay-register", commandInput), { handled: true });
+      assert.deepEqual(await runtime.runtimePlugins.runCommand("overlay-register", commandInput), { handled: true });
       assert.equal(runtime.auth.binding("ollama").displayName, "Local Overlay");
       assert.equal(runtime.modelRegistry.find("ollama", "overlay-model")?.id, "overlay-model");
       await runtime.providers.refreshModels("ollama", new AbortController().signal);
@@ -163,7 +163,7 @@ export default function activate(api) {
       assert.match(activeCatalog, /overlay-model/u);
       await assert.rejects(
         runtime.refresh({
-          prepareExtensions() {
+          preparePlugins() {
             throw new Error("candidate rejected");
           },
         }),

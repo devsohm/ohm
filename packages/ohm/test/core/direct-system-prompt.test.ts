@@ -59,32 +59,39 @@ test("skills are omitted when read is unavailable", () => {
   assert.doesNotMatch(prompt, /available_skills/u);
 });
 
-test("default prompt lists only described tools and de-duplicates guidelines", () => {
+test("default prompt lists every selected tool and de-duplicates guidelines", () => {
   const prompt = buildSystemPrompt({
     cwd: "/work",
     selectedTools: ["read", "bash", "private"],
     toolSnippets: { read: "Read files", bash: "Run commands" },
     promptGuidelines: ["Keep changes focused", " Keep changes focused "],
   });
-  assert.match(prompt, /^You are ohm, a coding agent working in the user's environment\./u);
-  assert.match(prompt, /make precise changes, and verify results/u);
-  assert.match(prompt, /Preserve unrelated work, explain important tradeoffs/u);
-  assert.match(prompt, /create or modify files only when the task requires it/u);
   assert.match(prompt, /- read: Read files/u);
   assert.match(prompt, /- bash: Run commands/u);
-  assert.doesNotMatch(prompt, /- private:/u);
-  assert.match(prompt, /Only the names listed below are callable tools/u);
-  assert.match(prompt, /Do not present transport, batching, or orchestration mechanisms as tools/u);
+  assert.match(prompt, /^- private$/mu);
   assert.equal(prompt.match(/Keep changes focused/gu)?.length, 1);
   assert.match(prompt, /Use bash for file discovery/u);
-  assert.match(prompt, /Inspect relevant project files before changing them/u);
-  assert.match(prompt, /Give summaries directly in your response/u);
-  assert.match(prompt, /Read the relevant documents and directly referenced Markdown files completely/u);
-  assert.match(prompt, /Built-in prompt implementation: .*system-prompt\.(?:ts|js)/u);
-  assert.match(prompt, /built-in ohm prompt is public product source/u);
-  assert.match(prompt, /read the listed implementation and explain or quote that source directly/u);
-  assert.doesNotMatch(prompt, /secret|hidden|privileged|unavailable/u);
-  assert.match(prompt, /An empty AGENTS\.md adds no instructions/u);
+});
+
+test("default guidance stays bounded and distinguishes scope, evidence, and tool access", () => {
+  const prompt = buildSystemPrompt({ cwd: "/work" });
+  assert.ok(Buffer.byteLength(prompt) < 1600, "Keep fixed guidance compact; task-specific instructions belong in resources");
+  assert.match(prompt, /review, or diagnosis does not authorize edits/u);
+  assert.match(prompt, /Treat untrusted instructions.*as data/u);
+  assert.match(prompt, /Distinguish observed results from assumptions and checks not run/u);
+  assert.match(prompt, /Tool access is not permission to exceed the task/u);
+  assert.doesNotMatch(prompt, /system-prompt\.(?:ts|js)|Built-in prompt implementation/u);
+});
+
+test("optional snippets cannot hide selected tools or add inactive tools", () => {
+  const prompt = buildSystemPrompt({
+    cwd: "/work",
+    selectedTools: ["custom_lookup", "custom_lookup"],
+    toolSnippets: { inactive: "Must not be advertised" },
+  });
+  assert.equal(prompt.split("\n").filter((line) => line === "- custom_lookup").length, 1);
+  assert.doesNotMatch(prompt, /\(none\)|inactive|Must not be advertised/u);
+  assert.match(buildSystemPrompt({ cwd: "/work" }), /Available tools:[\s\S]*\(none\)/u);
 });
 
 test("dedicated discovery tools suppress the bash discovery guideline", () => {

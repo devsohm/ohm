@@ -14,7 +14,7 @@ export interface Args {
   messages: string[];
   positionals: string[];
   fileArgs: string[];
-  extensions: string[];
+  pluginPaths: string[];
   skills: string[];
   promptTemplates: string[];
   themes: string[];
@@ -34,6 +34,7 @@ export interface Args {
   systemPrompt?: string;
   name?: string;
   noSession?: boolean;
+  noPlugins?: boolean;
   session?: string;
   sessionId?: string;
   fork?: string;
@@ -48,7 +49,7 @@ export interface Args {
   noBrowser?: boolean;
   maxSteps?: number;
   maxOutputTokens?: number;
-  noExtensions?: boolean;
+  noPluginCode?: boolean;
   noSkills?: boolean;
   noPromptTemplates?: boolean;
   noThemes?: boolean;
@@ -101,7 +102,7 @@ export function parseArgs(argv: readonly string[]): Args {
     messages: [],
     positionals: [],
     fileArgs: [],
-    extensions: [],
+    pluginPaths: [],
     skills: [],
     promptTemplates: [],
     themes: [],
@@ -184,7 +185,8 @@ function apply(option: CliOptionMetadata, value: string | undefined, result: Arg
       break;
     case "redact": result.redact = true; break;
     case "no-browser": result.noBrowser = true; break;
-    case "no-extensions": result.noExtensions = true; break;
+    case "no-plugins": result.noPlugins = true; break;
+    case "no-plugin-code": result.noPluginCode = true; break;
     case "no-skills": result.noSkills = true; break;
     case "no-prompt-templates": result.noPromptTemplates = true; break;
     case "no-themes": result.noThemes = true; break;
@@ -213,7 +215,7 @@ function apply(option: CliOptionMetadata, value: string | undefined, result: Arg
       break;
     case "tools": result.tools = commaList(value!); break;
     case "exclude-tools": result.excludeTools = commaList(value!); break;
-    case "extension": result.extensions.push(value!); break;
+    case "plugin": result.pluginPaths.push(value!); break;
     case "skill": result.skills.push(value!); break;
     case "prompt-template": result.promptTemplates.push(value!); break;
     case "theme": result.themes.push(value!); break;

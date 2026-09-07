@@ -1,9 +1,87 @@
 # Sessions and context
 
-Each durable ohm session is one append-only V4 JSONL journal. There is no
-required session database or background memory service.
-The journal is the durable agent run history, often called a trajectory, and
-is separate from metadata-only operational telemetry.
+Every saved ohm session uses one SQLite database containing the append-only V4
+journal. CLI, TUI, print, JSON, RPC, serve and SDK share this storage path; there
+is no optional durable-backend selector. The journal is the durable agent run
+history, often called a trajectory, separate from metadata-only operational telemetry.
+
+JSONL remains the portable import/export format. Existing JSONL sessions are
+discoverable and readable without modification. Explicitly resuming one validates
+its complete committed history, creates a SQLite copy, and leaves the original
+bytes untouched. Startup and listing do not migrate sessions. A subsequent resume
+reuses that SQLite copy only if its header and committed prefix match the original;
+a conflicting same-ID copy is rejected, never overwritten. Listing hides a legacy
+source only after proving its history survives in the SQLite copy. Divergent
+copies remain visible with a diagnostic.
+
+```ts
+import { SessionManager } from "ohm/storage";
+
+const manager = SessionManager.create(process.cwd(), "/private/app/sessions");
+const file = manager.getSessionFile();
+manager.closeV4Store();
+const reopened = SessionManager.open(file!);
+reopened.closeV4Store();
+```
+
+Pass a manager to `createAgentSession({ sessionManager: manager })`, or use the SDK
+default to create a saved session. `SessionManager.inMemory(cwd)` is for no-save
+sessions, ephemeral embedding and tests. `cloneInMemory()` produces an isolated
+volatile snapshot, never another writer to the saved source. New sessions and
+forks remain in memory when the owning runtime is no-save.
+
+`SessionManager.open(path, undefined, undefined, { readOnly: true })` captures an
+immutable snapshot alongside a writer, without creating a session database or
+modifying its records. SQLite may create or rebuild `-wal` and `-shm` coordination
+sidecars during read-only inspection; read-only does not promise an unchanged
+directory. Readers use normal WAL coordination so committed concurrent writes
+remain visible when a new snapshot opens. Runtime `importFromJsonl` validates a transfer file and preserves its
+exact header, commit identities, recovery state and opaque provider data. It
+publishes only a successfully copied candidate; cancellation removes that candidate,
+not the source. Duplicate identities are rejected rather than renamed or overwritten.
+Saved owners keep validated historical payloads in connection-private,
+file-backed SQLite temporary tables. Decoded records have fixed caches totaling
+8 MiB of serialized weight and 128 records across nodes, commits, operations,
+checkpoints, queue entries and tool effects. Oversized records are read
+transiently without entering the cache. This is not an exact JavaScript heap
+limit: identity/ancestry metadata still grows with history, and requested
+context, full snapshots and exports allocate their output. Memory sessions and
+detached read-only snapshots keep plain in-memory Maps. Node's built-in
+`node:sqlite` is required for saved sessions.
+
+Every open still parses and validates the entire committed journal before use.
+Temporary records come only from that validated reducer, never from unchecked
+journal rows on a cache miss. They are discarded on close and rebuilt on reopen.
+An uncertain temporary-record failure faults the owner until reopened. The
+temporary backing adds disk use and replay work; it does not shrink the durable
+journal or guarantee faster startup. Model context is still materialized in
+memory.
+
+`getHistoryPage({ from, before, after, edge: "oldest", limit, maxBytes })` retrieves
+bounded chronological lineage pages; cursor options and `edge` are alternatives.
+`from` fixes the lineage tip, otherwise the current tip is used. A single entry
+larger than the byte budget is returned alone so paging always progresses; hosts
+must retain their rendering/output limits. Saved-session owners lazily derive a
+temporary SQLite metadata index from validated commits when deeper navigation,
+tree pages, ordinals or search need it. Initial model/thinking restoration and
+newest pages do not build the index; they use metadata-only and bounded ancestor
+walks. Once built, selection and history can reuse the index and one indexed
+lineage. The index catches up after accepted appends
+and is discarded with its owning connection. It is not another durable store,
+does not duplicate message payloads, and does not skip journal validation.
+Its first build still costs work proportional to history, and switching to a
+different branch can rebuild the temporary lineage. Memory sessions and detached
+read-only snapshots retain their connection-free in-memory navigation path.
+`searchHistory(text, { from, before,
+after, limit, signal })` searches visible durable text with cancellation and stable
+entry cursors. Without `from`, search includes all branches. It does not search
+hidden provider state or private plugin metadata. Saved-session searches read
+bounded metadata batches without copying every history ID into JavaScript.
+Each scan fixes its starting history range, excludes later appends, and rejects
+if the manager replaces its session owner during a yield. A no-match search still
+examines all eligible visible payloads. Paging and the decoded-record cache
+bound ordinary presentation batches and cached payloads, not all runtime state
+or the time required for a full search.
 
 ![ohm journal branches and compaction boundary](assets/session-tree.svg)
 
@@ -30,7 +108,7 @@ Related startup options include `--continue`, `--resume`, `--session`,
 `--session-id`, `--fork`, `--session-dir`, and `--no-session`.
 
 A session reference can be an exact ID, an unambiguous ID prefix, an exact
-name, or an explicit `.jsonl` path. Ambiguous references fail.
+name, or an explicit `.sqlite` or legacy `.jsonl` path. Ambiguous references fail.
 
 Session Atlas is the active journal's lineage tree. It shows the selected path
 and alternate branches without mixing in unrelated saved sessions. Selecting a
@@ -48,13 +126,16 @@ Deleting a session from the picker first asks the operating system to recycle
 the file. ohm uses `gio trash` on Linux, Finder on macOS, and the Recycle
 Bin through Windows PowerShell. If recycling fails, ohm deletes the file
 permanently and reports which action completed.
+Before moving a SQLite file, ohm checkpoints its committed WAL while retaining
+writer ownership. If an active database reader prevents that checkpoint,
+deletion fails without moving or removing the session; close the reader and retry.
 
 `/new` does not copy facts from unrelated sessions. Cross-session memory is an
-extension concern and must be visible to the user.
+plugin concern and must be visible to the user.
 
-A worker or delegated agent launched through an extension-owned managed process
+A worker or delegated agent launched through a plugin-owned managed process
 is not a branch or child of the current journal. The parent records only the
-ordinary extension tool call and result. The extension owns any external
+ordinary plugin tool call and result. The plugin owns any external
 session files, correlation metadata, retention, and cleanup it chooses to add.
 
 ## Storage layout
@@ -73,7 +154,8 @@ On POSIX systems, managed session roots and writer-lock directories use mode
 mode `0600`. On Windows, the current account's filesystem ACLs provide the
 access boundary because POSIX mode bits do not apply.
 
-The first record is the strict V4 header:
+Each database has an immutable header row and a sequence-ordered commit table.
+JSONL transfers encode the same records as lines. The first record is the strict V4 header:
 
 ```json
 {"record":"session","version":4,"sessionId":"...","createdAt":"...","workspace":"/work/project","cwd":"/work/project"}
@@ -83,7 +165,7 @@ Later records are ordered commits. A commit can atomically add conversation
 nodes, select the active head, accept or finish a run, update a durable queue,
 write a checkpoint, or move a tool effect through its recovery lifecycle.
 
-A journal is bounded to 256 MiB, each JSONL record to 16 MiB, and its
+A journal is bounded to 256 MiB of logical serialized records, each record to 16 MiB, and its
 conversation tree to 100,000 nodes. A write that would cross a limit is
 rejected before the journal changes. These are storage safety limits;
 compaction bounds model context but intentionally does not erase the durable
@@ -108,10 +190,22 @@ not observe commits made after the snapshot opened. Open a new snapshot for a
 fresh view. Mutator methods are absent from the returned public type, and
 runtime commit attempts still fail closed if a caller bypasses that type.
 
+Native `SessionManager` instances and their read-only snapshots expose
+`getPersistedSelection()` for model/thinking restoration without projecting
+message payloads. Its `model` and `thinkingLevel` match `buildSessionContext()`
+on the active lineage, including selections before compaction; absent selections
+produce `null` and `"off"`. `hasPersistedThinking` reports a thinking entry anywhere
+in the journal, preserving restoration defaults when switching branches. The
+returned model object is detached. This query reads validated metadata, reusing
+an existing owned index when available; it does not eliminate journal replay or
+make model context disk-backed.
+The plugin session-manager facade remains unchanged; this method belongs to
+the native storage API used by hosts.
+
 Listing:
 
 - reads no more than ten files at once;
-- stats every candidate but reparses only new or changed journals;
+- stats every candidate, including a live SQLite WAL, but reparses only new or changed journals;
 - reuses names, previews, searchable text, timestamps, and message counts from
   a private versioned catalog snapshot;
 - uses a stable path tie-breaker when activity times match;
@@ -132,12 +226,25 @@ committed records.
 
 ## Crash and writer behavior
 
-Only a complete JSON object followed by LF is committed.
+SQLite commits are atomic transactions using WAL and full synchronization. Only
+one product writer may own a session database. Read-only snapshots include
+committed WAL records without claiming the writer slot. Close the owning session
+before copying or moving a database manually; a live database may depend on its
+adjacent WAL file.
+A live rename or replacement is unsupported. The writer checks its original
+file identity before and after committing and faults instead of acknowledging
+further writes through a moved path. If a live main file was moved accidentally,
+keep its original WAL with it and restore the original path before closing the
+owner. Do not delete either file or treat the moved main file alone as a complete
+backup. Explicit symlink paths resolve to the canonical file and share its writer
+lease; directory discovery does not follow symlink entries.
+
+For legacy JSONL input, only a complete JSON object followed by LF is committed.
 
 - A trailing unterminated fragment is ignored during read.
-- A writable open truncates that fragment before another append.
+- Explicit resume excludes that fragment from the SQLite copy and preserves the original file.
 - Invalid LF-terminated data fails with a line diagnostic.
-- A second live writer for the same file is rejected.
+- Resume rejects a legacy source owned by another live writer.
 
 The writer validates each state transition, writes and synchronizes the commit,
 then publishes it to live readers. A crash cannot publish state that was not
@@ -189,7 +296,7 @@ conversation:
 2. apply the latest reachable model, thinking, and tool selections;
 3. start compacted context at the retained boundary;
 4. keep valid user, assistant, tool-call, and tool-result order;
-5. include extension context and omit extension state.
+5. include plugin context and omit plugin state.
 
 Provider conversion happens after canonical context exists. Provider
 continuation state is reused only across a compatible provider, protocol,
@@ -257,14 +364,14 @@ being left before selecting another head.
 See [Context compaction](compaction.md) and
 [Session JSONL format](session-jsonl.md).
 
-## Extension state
+## Plugin state
 
-Trusted extensions can store:
+Trusted plugins can store:
 
 - `extension_state`, for durable data that does not enter model context;
-- `extension_context`, for extension-authored model context.
+- `extension_context`, for plugin-authored model context.
 
-Product-facing extension APIs project these as typed session entries.
+Product-facing plugin APIs project these as typed session entries.
 Registrations remain generation-bound, so `/refresh` does not duplicate or
 rewrite durable data. Do not retain a callback-scoped session view after
 refresh or session replacement.
@@ -280,6 +387,6 @@ export of a durable session embeds the exact source journal. A redacted export
 regenerates a settled V4 journal with known secrets removed.
 
 Exports may contain prompts, model output, tool arguments and results, local
-paths, images, and extension content. Inspect a redacted copy before sharing.
+paths, images, and plugin content. Inspect a redacted copy before sharing.
 
 See [Session export](session-export.md).

@@ -9,13 +9,13 @@ import {
   environmentCredentialVariables,
 } from "../../src/auth/broker.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
-import type { ExtensionMode } from "../../src/extensions/capabilities/host.js";
+import type { PluginMode } from "../../src/plugins/capabilities/host.js";
 import { builtinProviders } from "../../src/providers/all.js";
 import { canonicalProviderId } from "../../src/providers/builtins.js";
 import { providerLoginMethods } from "../../src/providers/login-path.js";
 import { InMemoryCredentialStore } from "../helpers/credential-store.js";
 
-const MODES = ["tui", "print", "json", "rpc", "serve", "sdk"] as const satisfies readonly ExtensionMode[];
+const MODES = ["tui", "print", "json", "rpc", "serve", "sdk"] as const satisfies readonly PluginMode[];
 const PROVIDERS = [
   "anthropic",
   "deepseek",
@@ -85,8 +85,8 @@ test("/login and direct provider identities stay aligned in every mode with empt
           credentialStore: new InMemoryCredentialStore(),
           projectTrusted: false,
           ephemeral: true,
-          extensions: false,
-          extensionRuntime: true,
+          pluginCode: false,
+          pluginRuntime: true,
           skills: false,
           promptTemplates: false,
           themes: false,
@@ -95,7 +95,7 @@ test("/login and direct provider identities stay aligned in every mode with empt
         });
         let closed = false;
         try {
-          await runtime.session.bindExtensions({ mode });
+          await runtime.session.bindPlugins({ mode });
           const legacyIds = sorted(runtime.auth.providers().map((entry) => canonicalProviderId(entry.providerId)));
           const runtimeDirectIds = sorted(runtime.modelRegistry.models().getProviders()
             .map((entry) => canonicalProviderId(entry.id)));

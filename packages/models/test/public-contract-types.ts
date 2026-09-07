@@ -1,5 +1,7 @@
 import {
   createAssistantMessageEventStream,
+  createImageModels,
+  type CreateImageModelsOptions,
   type AgentMessage,
   type Api,
   type ApiKeyAuth,
@@ -33,7 +35,11 @@ import {
   type GrammarSamplingConfig,
   type GrammarSyntax,
   type ImageContent,
+  type ImageGenerationOptions,
   type ImageModel,
+  type ImageModels,
+  type ImageModelsRefreshContext,
+  type ImageModelsRefreshResult,
   type ImageProvider,
   type ImageRequest,
   type ImageResult,
@@ -53,6 +59,7 @@ import {
   type ModelsSimpleStreamOptions,
   type ModelsStreamTransforms,
   type MutableModels,
+  type MutableImageModels,
   type OAuthAuth,
   type OAuthCredential,
   type OAuthCredentials,
@@ -188,6 +195,12 @@ export interface PublicContractTypeInventory {
   imagesAndRetry: {
     GeneratedImage: GeneratedImage;
     ImageModel: ImageModel;
+    CreateImageModelsOptions: CreateImageModelsOptions;
+    ImageGenerationOptions: ImageGenerationOptions;
+    ImageModels: ImageModels;
+    ImageModelsRefreshContext: ImageModelsRefreshContext;
+    ImageModelsRefreshResult: ImageModelsRefreshResult;
+    MutableImageModels: MutableImageModels;
     ImageProvider: ImageProvider;
     ImageRequest: ImageRequest;
     ImageResult: ImageResult;
@@ -438,6 +451,16 @@ const imageProvider: ImageProvider = {
   },
 };
 void imageProvider.generate(imageModel, imageRequest);
+const imageCollection: MutableImageModels = createImageModels({ providers: [imageProvider], env: {} });
+const imageReader: ImageModels = imageCollection;
+void imageReader.generateImage(imageModel, imageRequest, { apiKey: "request-key", headers: { "x-remove": null } });
+void imageReader.refresh({ provider: "images", allowNetwork: false });
+void imageReader.getAuth("images");
+// @ts-expect-error Read-only image collections cannot replace providers.
+imageReader.setProvider(imageProvider);
+// @ts-expect-error Generation options do not expose refresh credentials.
+const imageRefreshSecret: ImageGenerationOptions = { refresh: "private" };
+void imageRefreshSecret;
 // @ts-expect-error Image requests require a prompt.
 const imageRequestWithoutPrompt: ImageRequest = { size: "1024x1024" };
 // @ts-expect-error Image backgrounds use the documented closed vocabulary.

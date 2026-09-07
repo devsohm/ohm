@@ -9,7 +9,7 @@ import {
   createEmbeddingHarnessFromRuntime,
 } from "../../src/embedding/index.js";
 import type { EventEnvelope } from "../../src/core/events.js";
-import { defineTool } from "../../src/extensions/direct.js";
+import { defineTool } from "../../src/plugins/direct.js";
 import type { HarnessRuntime } from "../../src/public-runtime.js";
 import { createHarnessRuntime } from "../../src/public-runtime.js";
 import {
@@ -403,7 +403,7 @@ test("configured embedding startup and refresh apply persistent tool settings", 
     workspace,
     ephemeral: true,
     projectTrusted: false,
-    extensions: false,
+    pluginCode: false,
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -479,8 +479,8 @@ test("configured public runtimes bind direct extensions once and preserve the li
     workspace,
     projectTrusted: true,
     ephemeral: true,
-    extensions: false,
-    extensionPaths: [extensionPath],
+    pluginCode: false,
+    pluginPaths: [extensionPath],
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -559,8 +559,8 @@ test("configured public runtime creation rejects a startup extension shutdown wi
     workspace,
     projectTrusted: true,
     ephemeral: true,
-    extensions: false,
-    extensionPaths: [extensionPath],
+    pluginCode: false,
+    pluginPaths: [extensionPath],
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -584,12 +584,12 @@ test("configured public runtime creation cleans up when extension binding fails"
   };\n`);
   const previousAgentDirectory = process.env.OHM_HOME;
   process.env.OHM_HOME = agentDirectory;
-  const bindExtensions = AgentSession.prototype.bindExtensions;
-  AgentSession.prototype.bindExtensions = async () => {
+  const bindPlugins = AgentSession.prototype.bindPlugins;
+  AgentSession.prototype.bindPlugins = async () => {
     throw new Error("embedding bind fixture");
   };
   context.after(async () => {
-    AgentSession.prototype.bindExtensions = bindExtensions;
+    AgentSession.prototype.bindPlugins = bindPlugins;
     if (previousAgentDirectory === undefined) delete process.env.OHM_HOME;
     else process.env.OHM_HOME = previousAgentDirectory;
     globalThis.__ohmEmbeddingBindFailure = undefined;
@@ -600,8 +600,8 @@ test("configured public runtime creation cleans up when extension binding fails"
     workspace,
     projectTrusted: true,
     ephemeral: true,
-    extensions: false,
-    extensionPaths: [extensionPath],
+    pluginCode: false,
+    pluginPaths: [extensionPath],
     skills: false,
     promptTemplates: false,
     themes: false,

@@ -31,7 +31,7 @@ async function runInstalledRpc(
     "--mode", "rpc",
     "--workspace", workspace,
     "--offline",
-    "--no-extensions",
+    "--no-plugin-code",
     "--no-session",
     "--approve",
   ], {

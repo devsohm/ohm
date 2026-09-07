@@ -7,7 +7,7 @@ The index is a directory of claims. It is not an allowlist, security endorsement
 The machine-readable schema is [`resources/schemas/package-gallery-v1.json`](../resources/schemas/package-gallery-v1.json). It is a portable structural preflight, not the authoritative validator. JSON Schema cannot express every UTF-8 byte limit, semantic-version range, cross-field equality, canonical URL and timestamp rule, or duplicate package-ID check in this contract. Always validate and normalize an index with:
 
 ```sh
-ohm extensions author index ./gallery.json --json
+ohm plugins index ./gallery.json --json
 ```
 
 The parser rejects unknown keys, duplicate IDs, moving npm selectors, short or named Git refs, credential-bearing URLs, malformed timestamps, and unbounded record collections.
@@ -29,7 +29,7 @@ Each package record contains:
 
 An npm record installs through the ordinary `npm:NAME@VERSION` source. A Git record installs through the immutable `git:URL#REVISION` source.
 
-A gallery consumer must check the record's host-version range before offering installation. `extensionGalleryInstallSource()` converts the source; it does not perform that policy check.
+A gallery consumer must check the record's host-version range before offering installation. `pluginGalleryInstallSource()` converts the source; it does not perform that policy check.
 
 The normal package manager still stages privately, validates resource paths, disables lifecycle scripts by default, records provenance, and uses recoverable directory swaps. Gallery metadata never bypasses those controls.
 
@@ -51,7 +51,7 @@ A Git-backed package must live at the repository root and use a full lowercase c
 }
 ```
 
-`extensionGalleryInstallSource()` converts that source to:
+`pluginGalleryInstallSource()` converts that source to:
 
 ```text
 git:https://code.example/acme/ohm-memory.git#0123456789abcdef0123456789abcdef01234567
@@ -66,21 +66,21 @@ The managed lock records the resolved immutable identity. Updating means selecti
 From the package root:
 
 ```sh
-ohm extensions author validate .
-ohm extensions author inspect .
-ohm extensions author smoke .
-ohm extensions author refresh .
-ohm extensions author report .
-ohm extensions author pack . ./artifacts
+ohm plugins validate .
+ohm plugins inspect .
+ohm plugins smoke .
+ohm plugins refresh .
+ohm plugins report .
+ohm plugins pack . ../artifacts
 ```
 
 | Command | Result |
 | --- | --- |
-| `validate` | Resolve a temporary managed copy without importing its runtime. |
+| `validate` | Resolve the local package and validate its declarations without importing runtime code. |
 | `inspect` | Report the exact `npm pack --dry-run` file set for its required `package.json`. |
-| `smoke` | Activate and dispose a temporary copy through the direct runtime loader. |
+| `smoke` | Activate and dispose the source package through the plugin runtime loader. |
 | `refresh` | Activate a candidate generation before disposing the first generation. |
-| `report` | Run the four non-mutating checks and return deterministic `status`, `summary`, `nextActions`, `artifacts`, and per-check details. |
-| `pack` | Create a durable artifact at an explicit destination without overwriting an existing filename, then resolve those exact bytes through the normal package validator. |
+| `report` | Run the four source checks and return `status`, `summary`, `nextActions`, `artifacts`, and per-check details. |
+| `pack` | Create an archive at an explicit destination without overwriting an existing filename. Use `verify` to test the installed archive. |
 
-The npm subprocess receives a private empty npm configuration, no registry credentials, disabled lifecycle scripts, bounded output, and a timeout. It is packaging, not an operating-system sandbox. Extension runtime entries execute as trusted in-process Node.js modules during smoke and refresh checks.
+The npm subprocess receives a private empty npm configuration, no registry credentials, disabled lifecycle scripts, bounded output, and a timeout. It is packaging, not an operating-system sandbox. Plugin runtime entries execute as trusted in-process Node.js modules during smoke and refresh checks.

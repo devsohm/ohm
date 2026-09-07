@@ -1,0 +1,12 @@
+{
+  "name": "@ohm/example-workspace-memory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Explicit workspace notes with portable actions and bounded prompt context",
+  "files": ["src", "README.md"],
+  "scripts": { "test": "node --test checks/runtime.test.mjs" },
+  "dependencies": { "typebox": "1.3.17" },
+  "peerDependencies": { "ohm": ">=0.2.0 <0.3.0" },
+  "ohm": { "entrypoints": ["src/index.mjs"] }
+}

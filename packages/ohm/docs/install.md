@@ -17,13 +17,13 @@ include PowerShell, `Get-FileHash`, and `tar.exe`.
 On Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.ps1 | iex
 ```
 
 For a portable manual copy, download `ohm-v<version>-<platform>-<arch>.tar.gz` and `SHA256SUMS` from the same
@@ -237,12 +237,12 @@ ohm --version
 ohm --help
 ohm config path
 ohm diagnostics
-ohm extensions doctor
+ohm plugins doctor
 ```
 
 If `ohm` is missing, invoke the launcher by its full path and correct `PATH`. If a provider is missing from
-`/model`, connect it with `/login` and let the live model catalog refresh. If an extension is blocked, inspect trust
-and run `extensions doctor`. Do not bypass an integrity or ownership error.
+`/model`, connect it with `/login` and let the live model catalog refresh. If a plugin is blocked, inspect trust
+and run `ohm plugins doctor`. Do not bypass an integrity or ownership error.
 
 To fully remove either managed installation form:
 

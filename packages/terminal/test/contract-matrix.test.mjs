@@ -44,7 +44,7 @@ const runtimeExports = [
   "dispatchViewportPointer", "fitViewportRows", "getWebpDimensions", "graphemeWidth", "hyperlink", "imageFallback", "isFocusable", "isImageLine", "isKeyRelease", "isKeyRepeat", "isKittyProtocolActive", "isOsc11BackgroundColorResponse", "isViewportComponent", "isViewportPointerTarget", "isViewportTUI", "isViewportWindowSource",
   "matchesKey", "normalizeTerminalOutput", "padCells", "parseKey", "parseOsc11BackgroundColor", "parseTerminalColorSchemeReport", "renderImage", "renderLatex", "renderViewport", "resetCapabilitiesCache", "sanitizeTerminalText",
   "setCapabilities", "setCapabilityOverrides", "setCellDimensions", "setKeybindings", "setKittyProtocolActive", "sliceByColumn", "splitGraphemes", "stripAnsi", "stripTerminalSequences", "truncateCells", "truncateToWidth",
-  "visibleWidth", "wrapCells", "wrapTextWithAnsi",
+  "visibleWidth", "wordWrapLine", "wrapCells", "wrapTextWithAnsi",
 ].sort();
 
 const plainSelectTheme = {

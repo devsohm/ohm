@@ -29,6 +29,7 @@ const PROJECT_CONFIG_FILES = [
 ] as const;
 
 const PROJECT_CONFIG_DIRECTORIES = [
+  "plugins",
   "extensions",
   "packages",
   "skills",

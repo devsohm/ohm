@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
-import { readSessionV4FileSync } from "@ohm/kernel/session-v4";
+import { SessionManager } from "../../src/storage/session-manager.js";
 
 type Scenario = "accepted" | "prepared" | "settled" | "never_repeat" | "repeatable" | "reconcile";
 type Mode = "start" | "recover-crash" | "inspect-resolve";
@@ -259,11 +259,17 @@ async function recoverBoundary(
 }
 
 function assertJournalEffect(sessionFile: string, status: string, dispatchCount: number): void {
-  const state = readSessionV4FileSync(sessionFile).state;
+  const state = readJournalState(sessionFile);
   const effects = [...state.toolEffects.values()];
   assert.equal(effects.length, 1);
   assert.equal(effects[0]?.status, status);
   assert.equal(effects[0]?.dispatchIds.length, dispatchCount);
+}
+
+function readJournalState(path: string) {
+  const snapshot = SessionManager.open(path, undefined, undefined, { readOnly: true });
+  try { return snapshot.getV4State(); }
+  finally { snapshot.closeV4Store(); }
 }
 
 function assertInspection(
@@ -308,7 +314,7 @@ test("a kill immediately after durable operation acceptance recovers the prompt 
     "accepted",
     "operation-accepted-boundary",
   );
-  let state = readSessionV4FileSync(crashed.sessionFile).state;
+  let state = readJournalState(crashed.sessionFile);
   const operation = [...state.operations.values()].at(-1);
   assert.ok(operation);
   assert.equal(operation.status, "accepted");
@@ -318,7 +324,7 @@ test("a kill immediately after durable operation acceptance recovers the prompt 
   assert.equal(state.toolEffects.size, 0);
 
   assertBoundaryRecovery(await recoverBoundary(context, paths, "accepted", crashed.sessionFile));
-  state = readSessionV4FileSync(crashed.sessionFile).state;
+  state = readJournalState(crashed.sessionFile);
   assert.equal(state.operations.get(operation.id)?.status, "cancelled");
   assert.equal(state.branches.get(state.primaryBranchId)?.openOperationId, null);
   const prompt = state.nodes.get(operation.promptNodeId);
@@ -343,7 +349,7 @@ test("a kill after tool preparation but before dispatch never executes the tool"
     "prepared",
     "tool-effect-prepared-boundary",
   );
-  let state = readSessionV4FileSync(crashed.sessionFile).state;
+  let state = readJournalState(crashed.sessionFile);
   const operation = [...state.operations.values()].at(-1);
   const effect = [...state.toolEffects.values()].at(-1);
   assert.ok(operation);
@@ -355,7 +361,7 @@ test("a kill after tool preparation but before dispatch never executes the tool"
   assert.equal(state.nodes.has(effect.resultNodeId), false);
 
   assertBoundaryRecovery(await recoverBoundary(context, paths, "prepared", crashed.sessionFile));
-  state = readSessionV4FileSync(crashed.sessionFile).state;
+  state = readJournalState(crashed.sessionFile);
   assert.equal(state.operations.get(operation.id)?.status, "cancelled");
   assert.equal(state.branches.get(state.primaryBranchId)?.openOperationId, null);
   assert.equal(state.toolEffects.get(effect.id)?.status, "not_applied");
@@ -376,7 +382,7 @@ test("a kill after durable tool settlement materializes its result without re-ex
     "settled",
     "tool-effect-settled-boundary",
   );
-  let state = readSessionV4FileSync(crashed.sessionFile).state;
+  let state = readJournalState(crashed.sessionFile);
   const operation = [...state.operations.values()].at(-1);
   const effect = [...state.toolEffects.values()].at(-1);
   assert.ok(operation);
@@ -396,7 +402,7 @@ test("a kill after durable tool settlement materializes its result without re-ex
   }), true);
 
   assertBoundaryRecovery(await recoverBoundary(context, paths, "settled", crashed.sessionFile));
-  state = readSessionV4FileSync(crashed.sessionFile).state;
+  state = readJournalState(crashed.sessionFile);
   assert.equal(state.operations.get(operation.id)?.status, "cancelled");
   assert.equal(state.branches.get(state.primaryBranchId)?.openOperationId, null);
   assert.equal(state.toolEffects.get(effect.id)?.status, "succeeded");

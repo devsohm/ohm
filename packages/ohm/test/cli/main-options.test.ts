@@ -218,7 +218,7 @@ await main([
   "--mode", "text",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-compose",
@@ -227,7 +227,7 @@ await main([
   "first prompt",
   "second prompt",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-prompt-composition",
     factory(ohm) {
       ohm.registerProvider("inline-compose", {
@@ -310,14 +310,14 @@ for (const stopReason of ["error", "aborted"]) {
     "--mode", "text",
     "--workspace", ${JSON.stringify(workspace)},
     "--offline",
-    "--no-extensions",
+    "--no-plugin-code",
     "--no-session",
     "--approve",
     "--provider", "inline-history",
     "--model", "inline-model",
     "/handled-without-output",
   ], {
-    extensionFactories: [{
+    pluginFactories: [{
       name: "inline-history",
       factory(ohm) {
         ohm.registerProvider("inline-history", {
@@ -392,7 +392,7 @@ await main([
   "--mode", "text",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-final-no-output",
@@ -400,7 +400,7 @@ await main([
   "first prompt",
   "second prompt",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-final-no-output",
     factory(ohm) {
       ohm.registerProvider("inline-final-no-output", {
@@ -450,14 +450,14 @@ await main([
   "--mode", "text",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-text-mode",
   "--model", "inline-model",
   "hello",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-text-mode",
     factory(ohm) {
       ohm.registerProvider("inline-text-mode", {
@@ -496,7 +496,7 @@ await main([
     timeout: 30_000,
   });
   assert.equal(result.stdout, "");
-  assert.match(result.stderr, /Extension error \(inline-inline-text-mode, .*session_start\): Runtime session_start handler failed: text startup failure sentinel/u);
+  assert.match(result.stderr, /Plugin error \(inline-inline-text-mode, .*session_start\): Runtime session_start handler failed: text startup failure sentinel/u);
   assert.equal(await readFile(observed, "utf8"), "print");
 });
 
@@ -637,7 +637,7 @@ await main([
   "--no-session",
   "--approve",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "active-command-provider-fixture",
     factory(ohm) {
       ohm.registerProvider("active-command-provider", {
@@ -767,7 +767,7 @@ await main([
   "--no-session",
   "--approve",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "active-handler-fixture",
     factory(ohm) {
       ohm.registerProvider("active-handler-provider", {
@@ -931,7 +931,7 @@ await main([
   "--no-session",
   "--approve",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "cancel-preparation-provider-fixture",
     factory(ohm) {
       ohm.registerProvider("cancel-preparation-provider", {
@@ -1076,7 +1076,7 @@ await main([
   "--no-session",
   "--approve",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "active-login-provider-fixture",
     factory(ohm) {
       ohm.registerProvider("active-login-provider", {
@@ -1182,7 +1182,7 @@ await main([
   "--print",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-thinking",
@@ -1192,7 +1192,7 @@ await main([
     : ["--thinking", process.env.OHM_TEST_THINKING]),
   "hello",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-thinking-provider",
     factory(ohm) {
       ohm.registerProvider("inline-thinking", {
@@ -1365,10 +1365,10 @@ import { main } from ${JSON.stringify(mainModule)};
 await main([
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--list-models", "inline-main",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-main-factory",
     factory(ohm) {
       ohm.registerProvider("inline-main", {
@@ -1405,7 +1405,7 @@ await main([
   assert.equal(result.stderr, "");
 });
 
-test("extension inspection commands include supplied extension factories", async (context) => {
+test("plugin inspection commands include supplied plugin factories", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-main-inline-inspection-"));
   const workspace = join(root, "workspace");
   const agentDir = join(root, "agent");
@@ -1417,11 +1417,11 @@ test("extension inspection commands include supplied extension factories", async
 import { main } from ${JSON.stringify(mainModule)};
 
 await main([
-  "extensions", "commands",
+  "plugins", "commands",
   "--json",
   "--workspace", ${JSON.stringify(workspace)},
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-inspection-factory",
     factory(ohm) {
       ohm.registerCommand("inline-inspection", {
@@ -1465,10 +1465,10 @@ await main([
   "--mode", "rpc",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-rpc-factory",
     factory(ohm) {
       ohm.on("project_trust", () => {
@@ -1543,13 +1543,13 @@ await main([
   "--mode", "rpc",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-owner",
   "--model", "inline-model",
 ], {
-  extensionFactories: [${replacementFactory(marker)}],
+  pluginFactories: [${replacementFactory(marker)}],
 });
 `);
 
@@ -1622,14 +1622,12 @@ await main([
   ...${JSON.stringify(modeArguments)},
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
-  "--provider", "inline-owner",
-  "--model", "inline-model",
   "/replace-runtime",
 ], {
-  extensionFactories: [${replacementFactory(marker)}],
+  pluginFactories: [${replacementFactory(marker)}],
 });
 `);
     const result = await executeWithClosedStdin(process.execPath, ["--import", "tsx", entrypoint], {
@@ -1658,6 +1656,61 @@ await main([
   }
 });
 
+test("text and JSON dispatch unconfigured local plugin commands without a model", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-main-local-command-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+
+  for (const mode of ["text", "json"] as const) {
+    const workspace = join(root, `workspace-${mode}`);
+    const entrypoint = join(root, `entrypoint-${mode}.mjs`);
+    await mkdir(workspace);
+    await writeFile(entrypoint, `
+import assert from "node:assert/strict";
+import { main } from ${JSON.stringify(mainModule)};
+
+let commands = 0;
+globalThis.fetch = async () => assert.fail("This fixture must not make a network request");
+const options = {
+  pluginFactories: [{
+    name: "local-command",
+    factory(ohm) {
+      ohm.registerCommand("local-status", {
+        handler(args) {
+          commands += 1;
+          ohm.appendEntry("local-status", { args });
+          if (args === "continue") return { prompt: "hello" };
+        },
+      });
+    },
+  }],
+};
+const args = [
+  "--mode", ${JSON.stringify(mode)},
+  "--workspace", ${JSON.stringify(workspace)},
+  "--offline", "--no-plugins", "--no-context-files", "--no-session", "--approve",
+];
+await main([...args, "/local-status", "/local-status"], options);
+await assert.rejects(main([...args, "hello"], options), /No model is selected/);
+await assert.rejects(main([...args, "/local-status continue"], options), /No model is selected/);
+await assert.rejects(
+  main([...args, "--model", "openai-codex/gpt-5.6-luna", "/local-status"], options),
+  /No API key/,
+);
+assert.equal(commands, 3);
+`);
+    const result = await executeWithClosedStdin(process.execPath, ["--import", "tsx", entrypoint], {
+      cwd: repositoryRoot,
+      env: { PATH: process.env.PATH, OHM_HOME: join(root, `agent-${mode}`), OHM_OFFLINE: "1" },
+      timeout: 30_000,
+    });
+    assert.equal(result.stderr, "", `${mode}: ${result.stderr}`);
+    if (mode === "json") {
+      const records = result.stdout.trim().split("\n").map((line) => parseJson(SESSION_EVENT_VALUE, line));
+      assert.equal(records.filter((record) => record.entry?.customType === "local-status").length, 3);
+    } else assert.equal(result.stdout, "");
+  }
+});
+
 test("installed JSON mode emits the public session event contract", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-main-json-events-"));
   const workspace = join(root, "workspace");
@@ -1673,14 +1726,14 @@ await main([
   "--mode", "json",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
   "--approve",
   "--provider", "inline-json",
   "--model", "inline-model",
   "hello",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-json-provider",
     factory(ohm) {
       ohm.registerProvider("inline-json", {
@@ -1776,7 +1829,7 @@ export default function activate(ohm) {
     "--workspace", workspace,
     "--offline",
     "--approve",
-    "--extension", extension,
+    "--plugin", extension,
     "--list-models", "json-failure",
   ], {
     cwd: repositoryRoot,
@@ -1800,7 +1853,7 @@ export default function activate(ohm) {
     "--offline",
     "--no-session",
     "--approve",
-    "--extension", extension,
+    "--plugin", extension,
     "--provider", "json-failure",
     "--model", "inline-model",
     "hello",
@@ -1885,14 +1938,14 @@ await main([
   "--session-dir", ${JSON.stringify(sessionDirectory)},
   "--session", sessionFile,
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-tools",
   "--approve",
   "--provider", "inline-recovery",
   "--model", "inline-model",
   "new prompt",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-recovery-provider",
     factory(ohm) {
       ohm.registerProvider("inline-recovery", {
@@ -2111,12 +2164,12 @@ await main([
   "--session-dir", scenarioSessionDirectory,
   ...(scenario === "resume" ? ["--no-session"] : ["--session", sessionFile]),
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--approve",
   "--provider", "inline-recovery",
   "--model", "requested-model",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-recovery-provider",
     factory(ohm) {
       ohm.registerProvider("inline-recovery", {
@@ -2303,10 +2356,10 @@ await main([
   "--mode", "rpc",
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-rpc-startup-failure",
     factory(ohm) {
       ohm.on("session_start", () => {
@@ -2370,10 +2423,10 @@ let trustCalls = 0;
 await main([
   "--workspace", ${JSON.stringify(workspace)},
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--list-models", "inline-trust-model",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-trust-factory",
     factory(ohm) {
       ohm.on("project_trust", (event) => {
@@ -2441,7 +2494,7 @@ import { main } from ${JSON.stringify(mainModule)};
 let trustCalls = 0;
 let disposals = 0;
 const options = {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "inline-package-trust-factory",
     factory(ohm) {
       ohm.on("project_trust", () => {

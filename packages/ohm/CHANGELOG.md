@@ -2,6 +2,133 @@
 
 ## Unreleased
 
+## [0.2.0] - 2026-09-06
+
+### Breaking
+
+- Plugin CLI commands and flags now use only `plugins`, `--plugin`, and
+  `--no-plugin-code`. Removed the older extension command and flag aliases;
+  `--no-plugins` still disables automatic discovery of every plugin resource.
+  Existing configuration and session readers are unchanged. See the
+  [0.2 migration steps](docs/releasing.md#migrating-to-02).
+- Plugin source imports now use `ohm/plugins`, with `PluginAPI`, `PluginFactory`,
+  and the corresponding `Plugin*` contracts. Removed the `ohm/extensions`
+  compatibility subpath and duplicate authoring aliases. SDK results use
+  `pluginsResult`; resource loaders expose `getPlugins()` and plugin runners
+  expose `getPluginPaths()`. Existing saved
+  sessions, plugin data directories, and historical configuration inputs keep
+  their original identities. See the [0.2 migration steps](docs/releasing.md#migrating-to-02).
+- Saved sessions now use one SQLite database per session. JSONL remains a
+  readable transfer format. Explicitly resuming a legacy JSONL session creates
+  a validated SQLite copy without modifying its source; read-only discovery
+  never migrates data. Consumers must not parse `sessionFile` as text: use
+  `SessionManager.openSnapshot()` or the JSONL export API instead. See the
+  [0.2 migration steps](docs/releasing.md#migrating-to-02).
+- JSON and RPC streaming updates carry incremental deltas instead of repeating
+  the entire partial message. SDK subscribers retain full in-memory snapshots.
+- Removed the host-owned `childSessions` service and `ExtensionChildSession*`
+  types. Plugins own delegation using the public SDK, RPC client, or managed
+  processes. Generic background jobs remain available; existing saved sessions
+  are not deleted.
+
+### Changed
+
+- Plugin discovery shares supported source formats and index precedence across
+  package, direct-runtime, and public loaders. Public discovery checks canonical
+  `plugins` directories before legacy `extensions` directories in each scope.
+- User messages again use padded, theme-owned cards with light text and a grey
+  default background, without a speaker label. Lowercase `ohm` labels use a
+  contrasting information color, while thinking blocks omit the duplicate
+  assistant label and keep their own heading.
+- The terminal status ribbon distinguishes model, thinking, activity, context,
+  cache, tokens and cost through semantic theme colors and readable labels.
+  Narrow and no-color terminals retain compact text and custom footer ownership.
+- Session selection restoration reads model/thinking metadata without projecting
+  message history. SQLite replay validates each record once and avoids deep
+  cloning private snapshot history. Saved owners retain validated payloads in
+  private temporary tables with a bounded decoded-record cache; full snapshots,
+  exports and model context still materialize their requested data. Replay
+  reuses the exact accepted commit byte count instead of serializing it twice.
+  Newest-history pages walk only the requested tail plus one ancestor.
+- `createServeSessionRuntime()` provides the shared HTTP adapter for hosts of
+  an existing session. A public-import, offline example demonstrates discovery,
+  actions, cancellation and committed-history recovery.
+- `ohm plugins` is the canonical install, inspect, and authoring workflow.
+  `ohm/plugins` exposes the same runtime contracts with `PluginAPI` and related
+  authoring names. One `plugins` configuration list loads executable
+  `entrypoints`, skills, prompts, and themes through the existing runtime.
+  Help, shell completion, defaults, and author examples use this single workflow.
+- The terminal uses labeled conversation turns, compact tool rows, and a
+  single-boundary composer. Custom plugin UI remains available. Transcript
+  history navigation and search load bounded presentation pages.
+- Core guidance distinguishes read-only requests from implementation, preserves
+  task scope, and requires evidence for completion claims. Built-in tools share
+  one parameter-schema source with clearer pagination, replacement, timeout,
+  and output-limit descriptions. Optional task prompts and review examples show
+  scoped requests without requiring another runtime abstraction.
+
+### Fixed
+
+- Independent tool operations no longer wait behind unrelated resource
+  conflicts. Conflicting operations keep their order, and cancellation settles
+  all started effects before releasing batch ownership. Exact edits avoid
+  Unicode-normalization work; paged reads avoid splitting the entire file into
+  line objects.
+- Legacy JSONL conversion batches durable writes only inside its private staged
+  database, then validates the complete journal before publishing it. Ordinary
+  session appends retain their per-commit durability.
+- Long conversation hooks use bounded per-message validation and one aggregate
+  byte budget instead of exhausting one small-object budget across all messages.
+  Source-mode plugins reuse host module identities while their own code and
+  relative helpers still refresh with each generation.
+- Plugin filters honor empty selections and explicit include patterns, including
+  single-file plugins. The resource selector preserves canonical filters when
+  toggling contributions. Malformed manifests fail instead of loading nearby
+  code; duplicate package paths activate only once. Configuration writes update
+  the schema metadata without rewriting files during read-only discovery.
+- Auto-discovered package entrypoints honor existing disable filters. Local
+  plugin commands can run without selecting a model; explicit model selection
+  and commands that request a model turn still validate their requirements.
+- Context hooks and SDK preparation retain message ownership through filtering,
+  reordering, and edits without borrowing another message's provider state.
+  Temporary context identities do not enter saved messages or ordinary history.
+- SQLite replay preserves the original failure when the database has already
+  rolled back automatically, while successful replay still requires a commit.
+- Historical tool calls without a displayed result no longer appear queued or
+  running. Active host questions show that input is required, while custom
+  plugin activity indicators retain their ownership.
+- Plugin starter instructions install the complete released package graph.
+  Author inspection and verification reuse package resolution instead of
+  carrying an unreachable fallback or resolving the same input twice.
+- Plugin-enabled model calls normalize tool schemas across the public provider
+  boundary, so internal TypeBox metadata does not reject valid tool definitions.
+- CLI plugin tools use the session-owned context while an active run advances
+  the journal, avoiding false stale-branch errors during tool execution.
+- Transcript loading and tool expansion no longer construct editor/status rows
+  that were immediately discarded for every history item.
+- Inspection tracks the final accepted plugin system-prompt replacement,
+  including its size and owner, without exposing instruction text.
+  It also identifies configured authorization gates and recognized terminal
+  reasons without predicting permissions or exposing stored error bodies.
+- HTTP plugin refresh retains live run and presentation subscriptions. Clients
+  can fence reconnect cursors with the stream identity to detect reopened sessions.
+- Standalone tool replacement preserves executable and rendering metadata
+  without requiring a plugin host. Manual compaction releases its busy
+  state before completion listeners run.
+- Corrected real-terminal header validation and composer cursor width, and
+  rejected malformed model-configuration comments instead of silently repairing
+  invalid JSON tokens.
+- Selected custom tools remain in the system prompt when their optional prompt
+  snippet is absent. Plugin-author refresh checks now report candidate disposal
+  failures instead of returning a successful cleanup result.
+- Reused SDK tool definitions execute with the receiving session's workspace,
+  runner, and thread identity. Standalone callbacks keep their explicit source
+  binding; plugin-owned callbacks retain their original generation guard.
+- HTTP clients can recover committed history after an event replay gap or
+  reopening a saved session through bounded, snapshot-checked entry pages.
+  Display responses omit opaque provider continuation fields and redact secrets
+  without modifying stored session data.
+
 ## [0.1.1] - 2026-09-02
 
 ### Added
@@ -108,11 +235,11 @@
 - Durable custom entries and messages written by path-loaded extensions retain
   their owning generation's source identity, plus package provenance when it is
   known, without changing the V4 journal node vocabulary.
-- Extension registrations return one callable, idempotent disposal handle with
+- Plugin registrations return one callable, idempotent disposal handle with
   exact-registration ownership and automatic generation teardown.
 - RPC extension UI distinguishes cursor-relative `paste_editor_text` from
   whole-draft `set_editor_text` requests.
-- Extension UI contexts expose a frozen per-host capability map so packages can
+- Plugin UI contexts expose a frozen per-host capability map so packages can
   negotiate dialogs, editor controls, terminal components, overlays, and other
   presentation surfaces without probing no-op fallbacks.
 - The extension examples have an outcome-oriented catalog, a typed and locally
@@ -125,9 +252,9 @@
   idle/recovery checks use bounded recovery metadata instead of cloning the
   complete durable session state.
 - Rich session-picker searches coalesce short typing bursts while line and
-  accessibility interaction remains immediate. Extension authoring guidance
+  accessibility interaction remains immediate. Plugin authoring guidance
   asks the user to run `/refresh` after ordinary resource changes.
-- Extension tool schemas accept valid TypeBox optional and readonly metadata.
+- Plugin tool schemas accept valid TypeBox optional and readonly metadata.
 - RPC extension paste requests remain cursor-relative without claiming that the
   bridge can read client-owned editor state.
 
@@ -198,11 +325,11 @@
   renderers, themes, skills, prompt templates, lifecycle hooks, shared events,
   managed processes, resource discovery, and rich UI components through public
   package exports.
-- Extension activation is transactional: candidate listeners, shared-event
+- Plugin activation is transactional: candidate listeners, shared-event
   emissions, tools, UI ownership, processes, and disposers remain private until
   commit. Rollback publishes nothing; successful publication is deterministic;
   refresh and shutdown dispose only the owning generation.
-- Extension JSON boundaries use detached, descriptor-safe, pre-bounded
+- Plugin JSON boundaries use detached, descriptor-safe, pre-bounded
   snapshots. Proxies, accessors, custom prototypes, cycles, sparse arrays,
   inherited serializers, and structurally oversized graphs fail without
   executing owner-controlled code. Live local and supplied-bus payloads use the
@@ -272,7 +399,7 @@
   secrets from human diagnostics and structured dispatcher failures without
   changing their public severity, event, command, identifier, or response
   fields.
-- Extension package archives and HTML or JSONL session exports create complete
+- Plugin package archives and HTML or JSONL session exports create complete
   private files exclusively and refuse existing paths, links, or partial
   publication. Bare `npm:file:` archives retain a validated source-to-package
   identity, recover compatible pre-receipt installs, and remain discoverable

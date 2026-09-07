@@ -16,9 +16,9 @@ V4 session state. They do not have identical UI, event projection, or lifecycle
 ownership.
 
 Protocol bridges and delegated-agent packages do not add another mode or agent
-engine. They register ordinary extension tools in every supported host and use
+engine. They register ordinary plugin tools in every supported host and use
 generation-owned managed processes when they need an external transport or an
-ephemeral JSON-mode agent process. The extension owns those process protocols;
+ephemeral JSON-mode agent process. The plugin owns those process protocols;
 the current `AgentSession` continues to observe one normal tool call and result.
 
 ![ohm run modes and ownership](assets/modes-runtime.svg)
@@ -31,7 +31,7 @@ The CLI:
 
 1. creates the session owner;
 2. loads cached model state and runtime resources;
-3. binds extension UI;
+3. binds plugin UI;
 4. renders the terminal;
 5. starts live model discovery in the background.
 
@@ -41,7 +41,7 @@ Session replacement adopts another session or branch. `/refresh` is different.
 It blocks input and builds a candidate resource generation and candidate
 `AgentSession` over the current `SessionManager`. A successful swap keeps the
 same session ID, branch, and V4 history. It replaces settings, keybindings,
-extensions, skills, prompts, themes, context files, providers, and cached model
+plugins, skills, prompts, themes, context files, providers, and cached model
 state as one transaction.
 
 When startup finds an interrupted durable run, the TUI blocks input while it
@@ -62,15 +62,17 @@ the user types `/recover` or provides an explicit programmatic resolution.
 
 `InteractiveMode` is public for hosts that already own an `AgentSessionRuntime` and terminal dependencies. It closes the terminal it creates or receives. It does not dispose the supplied runtime.
 
+Ready-made adapters can attach to an idle session already initialized by the SDK. A host-mode change emits a balanced plugin shutdown/start with reason `refresh`, without reloading plugin files. Session and UI facets rebind; worker facets retain their generation lifetime. Stopping an interactive host and attaching a new one also reinitializes its plugin UI.
+
 Embedding hosts can rebuild the active transcript with `renderInitialMessages()`, wait for the next text-only idle submission with `getUserInput()`, clear the draft with `clearEditor()`, and add typed notices with `showError()`, `showWarning()`, `showNewVersionNotification()`, or `showPackageUpdateNotification()`. Slash commands, shell commands, and prompts with image attachments keep their normal routing while `getUserInput()` waits. Closing the mode rejects a pending input request.
 
 While a model turn is active, built-in slash commands keep their documented
-dispatch, interruption, cancellation, or follow-up policy. Registered extension
+dispatch, interruption, cancellation, or follow-up policy. Registered plugin
 commands, prompt templates, and enabled skill commands are also admitted
 immediately; any prompt they generate is queued as a follow-up to the active
 turn. An unknown slash command reports an error immediately. `!` and `!!` shell
 shortcuts remain queued until the session is idle. Embedding hosts pass their
-static command and prompt projection as `InteractiveModeOptions.extensionCatalog`.
+static command and prompt projection as `InteractiveModeOptions.pluginCatalog`.
 
 ## Print and JSON
 
@@ -87,8 +89,13 @@ configured harness.
 
 At the CLI, `--mode text` explicitly selects this one-shot path even when standard input and output are terminals. `--print` is its shortcut.
 
+A local plugin command can run without a model when none is configured or
+requested. A command that returns a prompt still requires a model. Explicit or
+configured model selection retains its normal credential validation before
+command dispatch; omit `--model` for an unconfigured, command-only invocation.
+
 `mode: "json"` writes a session header followed by public `AgentSessionEvent`
-records as newline-delimited JSON. A failed extension callback is a bounded,
+records as newline-delimited JSON. A failed plugin callback is a bounded,
 redacted `{ type: "extension_error", extensionId, extensionPath, event, error }`
 record; startup failures are queued until after the session header. `initialImages`
 applies only to `initialMessage` and accepts `{ type: "image", mimeType, data }`
@@ -98,7 +105,10 @@ Text and JSON modes attempt safe recovery before the first supplied message.
 They return a failure if recovery needs an explicit decision. Use interactive,
 RPC, serve, or SDK recovery before running the one-shot command again.
 
-The default writer preserves stdout order and backpressure. An embedded host can provide `write(text)` instead.
+The default writer preserves stdout order and backpressure. An embedded host can
+provide `write(text)` instead; it may return a Promise that resolves after the
+output is accepted. JSON delivery waits for that Promise, and the adapter drains
+queued output before returning. Synchronous custom writers remain supported.
 The adapter does not redirect or take over `process.stdout`; embedded hosts retain stream ownership.
 
 At the CLI, piped standard input in text or JSON mode is prompt text. JSON mode does not read command objects and is not bidirectional. Use RPC when the parent process must send commands while the session is running.
@@ -113,7 +123,7 @@ Run:
 ohm --mode rpc
 ```
 
-RPC reads one JSON command per input line and writes responses, raw agent events, shell updates, and extension UI requests as JSON records on standard output. Human diagnostics use standard error.
+RPC reads one JSON command per input line and writes responses, compact agent events, shell updates, and plugin UI requests as JSON records on standard output. Human diagnostics use standard error. JSON and RPC progress events use `SessionWireEvent`: `streamVersion: 1`, usage and deltas, without cumulative assistant snapshots. See the [wire migration notes](rpc.md#raw-events); SDK subscribers retain full snapshots.
 
 RPC does not choose an explicit recovery outcome for its host. Read
 `get_state.suspendedRun` or call `get_recovery_status`, then call
@@ -146,13 +156,14 @@ service never infers abandonment.
 
 The default address is `127.0.0.1:4317`. The CLI accepts only `127.0.0.1`,
 `localhost`, or `::1`. The service is for a trusted local operator. It has no
-WebSocket, CORS, public multi-tenant policy, or SQLite backend.
+WebSocket, CORS, or public multi-tenant policy. Durable sessions use the shared
+SQLite-backed V4 journal; JSONL remains the import/export format.
 
 See [HTTP and SSE service](serve.md).
 
 ## SDK and embedding
 
-Use `ohm/sdk` to create and retain sessions in the current process. The SDK exposes providers, models, tools, extensions, resources, execution backends, events, and lifecycle controls without taking terminal or child-process ownership.
+Use `ohm/sdk` to create and retain sessions in the current process. The SDK exposes providers, models, tools, plugins, resources, execution backends, events, and lifecycle controls without taking terminal or child-process ownership.
 
 Use `ohm/embedding` for a smaller task-oriented wrapper around a retained session. It is an SDK facade, not a seventh runtime mode.
 
@@ -163,7 +174,10 @@ SDK callers own:
 - session and provider shutdown;
 - any process or UI bridge around the session.
 
-An SDK session can use durable JSONL or `SessionManager.inMemory()`.
+An SDK session defaults to durable SQLite. Use `SessionManager.inMemory()` for
+an ephemeral session. JSONL remains an import/export format; explicitly resuming
+a legacy JSONL session creates a validated SQLite copy without changing the
+original file. There is no selectable persistent storage backend.
 
 SDK hosts read `session.suspendedRun` and call
 `session.recoverInterruptedRun()`. They own any prompt or UI used to obtain an

@@ -31,9 +31,10 @@ export interface NativeOverlayItemSnapshot {
   readonly tree?: { readonly active: boolean };
 }
 
-/** Renderer-neutral, bounded state for one controller-owned picker. */
+/** Renderer-neutral, bounded state for one controller-owned picker or prompt. */
 export interface NativeOverlaySnapshot {
   readonly title: string;
+  readonly promptMode?: "input" | "confirmation";
   readonly pickerKind: PickerKind;
   readonly inline: boolean;
   readonly settings: boolean;
@@ -210,6 +211,7 @@ export function normalizeNativeOverlaySnapshot(
   const emptyMessage = cleanOptionalLine(snapshot.emptyMessage);
   return {
     title: cleanLine(snapshot.title),
+    ...optionalProperties(snapshot.promptMode === undefined ? undefined : { promptMode: snapshot.promptMode }),
     pickerKind: snapshot.pickerKind,
     inline: snapshot.inline === true,
     settings: snapshot.settings === true,
@@ -234,6 +236,7 @@ export function createNativeOverlaySnapshot(
 ): NativeOverlaySnapshot {
   return normalizeNativeOverlaySnapshot({
     title: overlay.title,
+    ...optionalProperties(overlay.promptMode === undefined ? undefined : { promptMode: overlay.promptMode }),
     pickerKind: overlay.pickerKind ?? "generic",
     inline: overlay.inline === true,
     settings: overlay.settings === true,
@@ -293,6 +296,7 @@ function titleLine(
   width: number,
   presentation: OverlayPresentation,
 ): OverlayLine {
+  if (snapshot.promptMode !== undefined) return { text: clipped(snapshot.title, width, presentation), role: "title" };
   const count = snapshot.items.length === 0 ? "0/0" : `${snapshot.selected + 1}/${snapshot.items.length}`;
   return { text: twoColumns(snapshot.title || "Select", count, width, presentation), role: "title" };
 }
@@ -433,21 +437,28 @@ function fullLayout(
   height: number,
   presentation: OverlayPresentation,
 ): OverlayLayout {
+  const query = snapshot.promptMode === "confirmation" ? undefined : queryViewport(snapshot, width, presentation);
   if (height === 1) {
+    if (snapshot.promptMode === "input") {
+      return { lines: [{ text: query!.text, role: "accent" }], cursor: { row: 0, column: query!.cursorColumn } };
+    }
+    if (snapshot.promptMode === "confirmation") {
+      return { lines: [{ text: clipped(snapshot.status ?? snapshot.title, width, presentation), role: "accent" }] };
+    }
     const items = itemWindow(snapshot, width, 1, presentation);
     return { lines: items.lines };
   }
 
   let title: OverlayLine[] = [titleLine(snapshot, width, presentation)];
   let states = wrappedLines(snapshot.states.join(presentation.separator), width, "muted", 2);
-  let status = wrappedLines(snapshot.status, width, "accent", 2);
-  const query = queryViewport(snapshot, width, presentation);
-  const queryLine: OverlayLine = { text: query.text, role: "accent" };
+  let status = wrappedLines(snapshot.status, width, "accent", snapshot.promptMode === undefined ? 2 : height);
+  const queryLines: OverlayLine[] = query === undefined ? [] : [{ text: query.text, role: "accent" }];
   let description = wrappedLines(selectedDescription(snapshot), width, "normal", 3);
   let hints = snapshot.hints.flatMap((hint) => wrappedLines(hint, width, "muted", 2)).slice(0, 4);
 
-  const metadataCount = () => title.length + states.length + status.length + 1 + description.length + hints.length;
-  while (metadataCount() + 1 > height) {
+  const metadataCount = () => title.length + states.length + status.length + queryLines.length + description.length + hints.length;
+  const itemRows = snapshot.promptMode === undefined ? 1 : 0;
+  while (metadataCount() + itemRows > height) {
     if (hints.length > 0) hints = hints.slice(0, -1);
     else if (states.length > 0) states = states.slice(0, -1);
     else if (status.length > 0) status = status.slice(0, -1);
@@ -457,15 +468,14 @@ function fullLayout(
   }
 
   const itemRoom = Math.max(1, height - metadataCount());
-  const items = itemWindow(snapshot, width, itemRoom, presentation);
-  const prefix = [...title, ...states, ...status, queryLine];
-  const lines = [...prefix, ...items.lines, ...description, ...hints].slice(0, height);
+  const items = snapshot.promptMode === undefined ? itemWindow(snapshot, width, itemRoom, presentation).lines : [];
+  const prefix = [...title, ...states, ...status, ...queryLines];
+  const lines = [...prefix, ...items, ...description, ...hints].slice(0, height);
   return {
     lines,
-    cursor: {
-      row: prefix.length - 1,
-      column: query.cursorColumn,
-    },
+    ...optionalProperties(query === undefined ? undefined : {
+      cursor: { row: prefix.length - 1, column: query.cursorColumn },
+    }),
   };
 }
 

@@ -3,13 +3,26 @@ import test from "node:test";
 
 import { parseArgs } from "../../src/cli/args.js";
 
+test("plugin selection has one repeatable canonical flag and independent code suppression", () => {
+  const parsed = parseArgs(["--plugin", "one", "--plugin=two", "--plugin", "three", "--no-plugins"]);
+  assert.deepEqual(parsed.pluginPaths, ["one", "two", "three"]);
+  assert.equal("extensions" in parsed, false);
+  assert.equal(parsed.noPlugins, true);
+  assert.equal(parsed.unknownFlags.size, 0);
+  assert.deepEqual(parsed.diagnostics, []);
+  const codeOnly = parseArgs(["--no-plugin-code"]);
+  assert.equal(codeOnly.noPluginCode, true);
+  assert.equal(codeOnly.noPlugins, undefined);
+  assert.equal(codeOnly.noSkills, undefined);
+});
+
 test("agent arguments preserve repeated resource paths, messages, and file arguments", () => {
   const parsed = parseArgs([
-    "--extension", "./one.ts", "-e", "./two.ts",
+    "--plugin", "./one.ts", "--plugin", "./two.ts",
     "--skill", "./skills", "--prompt-template", "./prompts", "--theme", "./theme.json",
     "@context.md", "inspect", "this workspace",
   ]);
-  assert.deepEqual(parsed.extensions, ["./one.ts", "./two.ts"]);
+  assert.deepEqual(parsed.pluginPaths, ["./one.ts", "./two.ts"]);
   assert.deepEqual(parsed.skills, ["./skills"]);
   assert.deepEqual(parsed.promptTemplates, ["./prompts"]);
   assert.deepEqual(parsed.themes, ["./theme.json"]);
@@ -42,7 +55,7 @@ test("list-models has an optional search and does not consume flags or files", (
   assert.equal(all.offline, true);
 });
 
-test("unknown long options are deferred to extensions while unknown short options are errors", () => {
+test("unknown long options are deferred to plugins while unknown short options are errors", () => {
   const parsed = parseArgs(["--plan", "strict", "--dry-run=true", "-z"]);
   assert.deepEqual([...parsed.unknownFlags], [["plan", "strict"], ["dry-run", "true"]]);
   assert.deepEqual(parsed.diagnostics, [{ type: "error", message: "Unknown option: -z" }]);

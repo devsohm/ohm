@@ -37,6 +37,46 @@ import type {
   FileWriteContent,
 } from "../src/capabilities/filesystem.js";
 import type { ExecutionErrorCode, ShellRunner } from "../src/capabilities/process.js";
+import {
+  applySessionV4CommitOwned,
+  cloneSessionV4State,
+  createSessionV4ReducerState,
+  createSessionV4State,
+  type SessionV4Header,
+  type SessionV4Json,
+  type SessionV4NodeCollection,
+  type SessionV4NodeMetadata,
+  type SessionV4State,
+} from "../src/session-v4/index.js";
+
+const applyDecodedSessionRecord: (state: SessionV4State, record: SessionV4Json) => boolean = applySessionV4CommitOwned;
+void applyDecodedSessionRecord;
+
+function verifySessionV4Collections(header: SessionV4Header): SessionV4State {
+  const initial = createSessionV4State(header);
+  const stored = initial.nodes;
+  const nodes: SessionV4NodeCollection = {
+    get size() { return stored.size; },
+    get: (id) => stored.get(id),
+    has: (id) => stored.has(id),
+    set(id, value) { stored.set(id, value); },
+    delete: (id) => stored.delete(id),
+    keys: () => stored.keys(),
+    values: () => stored.values(),
+    entries: () => stored.entries(),
+    [Symbol.iterator]: () => stored.entries(),
+    getMetadata: (id) => stored.get(id),
+    metadataEntries: () => stored.entries(),
+  };
+  const state = createSessionV4ReducerState(header, { ...initial, nodes });
+  const metadata: SessionV4NodeMetadata | undefined = state.nodes.getMetadata?.("node");
+  const snapshot = cloneSessionV4State(state);
+  snapshot.nodes.clear();
+  snapshot.commits.forEach((commit) => { void commit.sequence; });
+  void metadata;
+  return snapshot;
+}
+void verifySessionV4Collections;
 
 const maximumThinking: ThinkingLevel = "max";
 // @ts-expect-error ultra is not a canonical ohm thinking level.

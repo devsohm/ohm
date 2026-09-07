@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { builtinSlashCommands } from "../../src/extensions/reserved.js";
+import { builtinSlashCommands } from "../../src/plugins/reserved.js";
 import {
   INTERACTIVE_COMMANDS,
   interactiveCommand,
@@ -62,7 +62,7 @@ test("palette and help are generated from visible registry metadata", () => {
   assert.equal(palette.some((item) => item.value === "/follow"), false);
   assert.match(
     palette.find((item) => item.value === "/refresh")?.label ?? "",
-    /keyboard mappings, extensions, skills, prompt templates, themes, and instruction files/u,
+    /plugins, keyboard mappings, and instruction files/u,
   );
   const help = renderInteractiveCommandHelp();
   assert.match(help, /\/refresh/u);

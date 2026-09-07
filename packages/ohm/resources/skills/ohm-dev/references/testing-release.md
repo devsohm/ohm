@@ -16,13 +16,13 @@ version-matched [Local diagnostics](../../../../docs/diagnostics.md) guide inste
    when an owner-only file is needed; it never replaces a file.
 3. Validate only the implicated non-executable surface with `ohm config validate --json` or
    `ohm sessions doctor --json`. Project configuration requires existing trust.
-4. Run `ohm extensions doctor --json --offline` only when extension behavior is implicated and the user explicitly
-   authorizes executing the already-trusted extension runtime. It may initialize runtime state, and trusted extension
+4. Run `ohm plugins doctor --json --offline` only when plugin behavior is implicated and the user explicitly
+   authorizes executing the already-trusted plugin runtime. It may initialize runtime state, and trusted plugin
    code can perform its own side effects. Never grant project trust merely to diagnose it. Omit `--offline` only when
-   network-dependent extension behavior is necessary and separately authorized.
+   network-dependent plugin behavior is necessary and separately authorized.
 5. If those reports are insufficient, ask before opening private content. Use the paths returned by
    `ohm logs --json`, select only the relevant bounded log region or crash record, and inspect an exact session only
-   when its conversation evidence is necessary. Never bulk-read these directories or edit a live session JSONL file.
+   when its conversation evidence is necessary. Never bulk-read these directories or edit a live session store.
 6. Before sharing any artifact, redact credentials, local paths, URLs, request identifiers, prompts, model or reasoning
    text, tool input/output, source content, and other operational context. A redacted session export still requires
    human review.
@@ -51,7 +51,7 @@ npm run typecheck:test --workspace ohm
 git diff --check
 ```
 
-Build sibling workspaces before testing built exports. Use an isolated `OHM_HOME` and `--offline` when a test must not read personal settings, credentials, sessions, packages, or caches. Offline mode does not sandbox extension or tool code.
+Build sibling workspaces before testing built exports. Use an isolated `OHM_HOME` and `--offline` when a test must not read personal settings, credentials, sessions, packages, or caches. Offline mode does not sandbox plugin or tool code.
 
 Test terminal input, resize, paste, scroll, and cancellation in a real PTY. Test provider transports with deterministic fixtures before any live call. Run paid or credentialed live tests only after explicit authorization for the provider, model, and cost.
 
@@ -74,7 +74,7 @@ Record exact pass, fail, and skip counts. A skipped platform or credential case 
 
 ## Package verification
 
-For an extension package, follow the exact source, packed-archive, install, `/refresh`, behavior, removal, and cleanup sequence in [Extensions](extensions.md). Test the installed artifact rather than inferring behavior from source.
+For a plugin package, follow the exact source, packed-archive, install, `/refresh`, behavior, removal, and cleanup sequence in [Plugins](plugins.md). Test the installed artifact rather than inferring behavior from source.
 
 For ohm itself, use the private source installer only when verifying launchers, ownership markers, platform helpers, update, or uninstall behavior. Use a temporary home and installation root. Confirm that installation preserves user `AGENTS.md` and `config.json`, and that uninstall removes only marker-owned files.
 

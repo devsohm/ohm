@@ -1,7 +1,7 @@
 # ohm documentation
 
 ohm is a local-first terminal harness and an extensible agent runtime. If this is your first visit, start with
-[Getting started](getting-started.md). It covers installation, workspaces, providers, tools, sessions, extensions,
+[Getting started](getting-started.md). It covers installation, workspaces, providers, tools, sessions, plugins,
 data locations, updates, and removal in one workflow.
 
 ## Use ohm
@@ -9,7 +9,7 @@ data locations, updates, and removal in one workflow.
 - [Getting started](getting-started.md) — install, connect a model, run a task, resume it, and add reusable behavior.
 - [Terminal workflow](../README.md#terminal-workflow) — built-in tools, interactive commands, queues, status, and key shortcuts.
 - [CLI command and flag reference](cli-reference.md) — invocation modes, session flags, resource controls, and administrative commands.
-- [Keybindings](keybindings.md) — default actions, key notation, extension shortcuts, and input diagnosis.
+- [Keybindings](keybindings.md) — default actions, key notation, plugin shortcuts, and input diagnosis.
 - [Terminal setup](terminal-setup.md) — Linux, macOS, Windows, WSL, Termux, SSH, and tmux recipes.
 - [Installation and platform troubleshooting](install.md) — requirements, command paths, Linux, macOS, Windows, WSL, Termux, and tmux.
 - [Providers and authentication](providers.md) — built-in providers, OAuth and API keys, environment credentials, model catalogs, and custom endpoints.
@@ -27,28 +27,28 @@ data locations, updates, and removal in one workflow.
 
 ## Extend ohm
 
-- [Extensions](extensions.md) — runtime API, discovery, trust, tools, commands, providers, authentication, durable state, and lifecycle.
-- [Extension API reference](extension-api.md) — complete registration, callback, lifecycle, session, UI, and process contracts.
+- [Plugins](plugins.md) — runtime API, discovery, trust, tools, commands, providers, authentication, durable state, and lifecycle.
+- [Plugin API reference](plugin-api.md) — complete registration, callback, lifecycle, session, UI, and process contracts.
 - [Provider authoring](provider-authoring.md) — custom providers, model metadata, authentication, streaming, request hooks, and testing.
 - [Package authoring and local gallery](packages.md) — package formats, install sources, dependencies, project locks, provenance, testing, and release guidance.
-- [Extension capability matrix](extension-capabilities.md) — public extension surfaces, supported hosts, examples, and conformance coverage.
+- [Plugin capability matrix](plugin-capabilities.md) — public plugin surfaces, supported hosts, examples, and conformance coverage.
 - [Facets, portable presentations, and wire services](facets-and-presentations.md) — optional worker/session/UI facets, shared JSON state, and cross-process view/service contracts.
-- [Extension TUI](tui.md) — structural components, ordered session slots, overlays, tool and session renderers, themes, input, focus, and lifecycle.
-- [Runtime extension events](extension-events.md) — event payloads, ordering, bounds, cancellation, and failure isolation.
+- [Plugin TUI](tui.md) — structural components, ordered session slots, overlays, tool and session renderers, themes, input, focus, and lifecycle.
+- [Runtime plugin events](plugin-events.md) — event payloads, ordering, bounds, cancellation, and failure isolation.
 - [Package discovery index](package-gallery.md) — public gallery metadata and deterministic discovery checks.
-- [Extension authentication threat model](extension-auth-threat-model.md) — credential brokering and extension authority boundaries.
+- [Plugin authentication threat model](plugin-auth-threat-model.md) — credential brokering and plugin authority boundaries.
 - [Resource catalog](resource-catalog.md) — bounded introspection of tools, commands, prompts, skills, custom themes, providers, packages, and diagnostics.
 - [Prompt templates](prompt-templates.md), [Skills](skills.md), and [Themes](themes.md) — authoring formats, discovery, precedence, and safety boundaries.
-- [MCP stdio example](../examples/mcp-stdio/README.md) — bridge an allowlisted server with ordinary tool registrations and a fully extension-owned transport, protocol, catalog, and lifecycle.
+- [MCP stdio example](../examples/mcp-stdio/README.md) — bridge an allowlisted server with ordinary tool registrations and a fully plugin-owned transport, protocol, catalog, and lifecycle.
 - [Specialist delegation example](../examples/subagent-specialists/README.md) — run bounded named specialists with ordinary tools and generation-owned managed processes.
 
 ## Automate or embed ohm
 
-- [RPC protocol and typed client](rpc.md) — newline-delimited commands, raw agent events, sessions, cancellation, and extension UI.
+- [RPC protocol and typed client](rpc.md) — newline-delimited commands, raw agent events, sessions, cancellation, and plugin UI.
 - [HTTP and SSE service](serve.md) — authenticated local session control, live events, reconnect, and security limits.
 - [JSON event stream](json.md) — parse one-shot session events from standard output.
 - [Embedding ohm](embedding.md) — owned in-process runtime lifecycle and task-focused examples.
-- [SDK composition](sdk.md) — compose providers, tools, extensions, resources, context defaults, and lifecycle without exposing runtime internals.
+- [SDK composition](sdk.md) — compose providers, tools, plugins, resources, context defaults, and lifecycle without exposing runtime internals.
 - [Run modes](modes.md) — terminal, one-shot, RPC, local service, and in-process surfaces with explicit lifecycle ownership.
 - [Public Node.js API policy](public-api.md) — supported package exports and compatibility rules.
 - [Root API aliases and adapters](api-aliases.md) — convenient package-root names, thin adapters, and native contracts.

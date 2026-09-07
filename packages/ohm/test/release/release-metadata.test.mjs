@@ -217,8 +217,8 @@ async function runPosixBootstrap(root, options = {}) {
     writeFile(join(payload, "lib/node_modules/ohm/resources/AGENTS.md"), ""),
     writeFile(join(payload, "lib/node_modules/ohm/resources/config.example.json"), "{}\n"),
     writeFile(join(fakeBin, "curl"), `#!/usr/bin/env node
-const { appendFile, copyFile } = require("node:fs/promises");
-const { basename } = require("node:path");
+const { appendFile, copyFile } = process.getBuiltinModule("node:fs/promises");
+const { basename } = process.getBuiltinModule("node:path");
 (async () => {
   const args = process.argv.slice(2);
   const url = args.at(-1);
@@ -324,9 +324,9 @@ const { basename } = require("node:path");
   ) {
     const failureCommand = options.failAfterRuntime === "scaffold" ? "cp" : "mv";
     await writeFile(join(fakeBin, failureCommand), `#!/usr/bin/env node
-const { existsSync, rmSync, writeFileSync } = require("node:fs");
-const { spawnSync } = require("node:child_process");
-const { basename } = require("node:path");
+const { existsSync, rmSync, writeFileSync } = process.getBuiltinModule("node:fs");
+const { spawnSync } = process.getBuiltinModule("node:child_process");
+const { basename } = process.getBuiltinModule("node:path");
 const args = process.argv.slice(2);
 const source = args.at(-2);
 const destination = args.at(-1);
@@ -692,26 +692,10 @@ async function runWindowsBootstrap(root, home, assets, options = {}) {
 }
 
 async function runNode(args, options = {}) {
-  const child = spawn(process.execPath, args, {
+  const result = await runProcess(process.execPath, args, {
     cwd: options.cwd ?? PROJECT_ROOT,
     env: options.env ?? process.env,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
   });
-  const stdout = [];
-  const stderr = [];
-  child.stdout.on("data", (chunk) => stdout.push(chunk));
-  child.stderr.on("data", (chunk) => stderr.push(chunk));
-  const code = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  const result = {
-    code,
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
-  };
   if (options.reject === true) assert.notEqual(result.code, 0);
   else assert.equal(result.code, 0, result.stderr);
   return result;
@@ -1085,7 +1069,8 @@ process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.
 
 test("release metadata policy matches the GitHub artifact contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.1.1");
+  const manifest = JSON.parse(await readFile(join(PROJECT_ROOT, "package.json"), "utf8"));
+  assert.equal(result.version, manifest.version);
   assert.equal(result.subpathCount, 23);
   assert.equal(result.targetCount, 6);
   assert.equal(result.nativeTargetCount, 6);

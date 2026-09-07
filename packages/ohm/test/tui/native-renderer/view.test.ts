@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cellWidth, stripAnsi } from "@ohm/terminal";
+import { cellWidth, stripAnsi, wrapTextWithAnsi } from "@ohm/terminal";
 
 import type { OhmTuiSnapshot, OhmTuiToolDetail } from "../../../src/tui/native-renderer/types.js";
 import {
   internalCreateOhmNativeToolDetailCache,
   internalPrewarmOhmNativeToolDetail,
+  internalProjectOhmNativeTranscript,
   projectOhmNativeFrame,
   projectOhmNativeTranscriptEntries,
   OhmNativeView,
@@ -88,92 +89,80 @@ function props(columns: number, theme?: Theme): OhmNativeViewProps {
 }
 
 const exactFrame = [
-  "",
-  " Check the renderer and keep it stable.",
-  "",
-  "",
-  "I will inspect the active state.",
-  "",
-  "✦ Thinking",
-  "  Checking the current frame.",
-  "",
-  "○ read · pending",
-  "  ↳ Waiting for a slot",
-  "● bash · running",
-  "  ↳ Focused checks",
-  "  ↳ Progress",
-  "    line one",
-  "    line two",
-  "✓ edit · done",
-  "  ↳ Two files",
-  "× write · failed · exit 1",
-  "  ↳ Unavailable",
-  "  ↳ Error",
-  "    denied",
-  "",
-  "! warning Catalog",
-  "  temporarily unavailable",
-  "",
-  "Queued · 1",
-  "  Run the narrow check next.",
-  "",
-  "─ Ask ohm · manual ────────────────────",
-  "  What next?",
-  "  › Add an update test.",
-  "───────────────────────────────────────",
-  "",
-  "● connected · model-x · max · testing",
-  "  ctx 47.2%/100k · in 12k · out 860",
-  "  R11k · W800 · cache hit 91.0%",
-  "  $0.125 (sub)",
-].join("\n");
+    "",
+    " Check the renderer and keep it stable.",
+    "",
+    "",
+    "ohm   I will inspect the active state.",
+    "",
+    "✦ Thinking",
+    "  Checking the current frame.",
+    "",
+    "○ read  Waiting for a slot  pending",
+    "● bash  Focused checks  running",
+    "  ↳ Progress",
+    "    line one",
+    "    line two",
+    "✓ edit  Two files  done",
+    "× write  Unavailable  failed · exit 1",
+    "    denied",
+    "",
+    "! warning Catalog",
+    "  temporarily unavailable",
+    "",
+    "Queued · 1",
+    "  Run the narrow check next.",
+    "",
+    "─ Ask ohm · manual ────────────────────",
+    "  What next?",
+    "  › Add an update test.",
+    "",
+    "● model-x · think max · testing",
+    "  ctx 47.2%/100k · cache hit 91.0%",
+    "  in 12k/out 860 · read 11k/write 800",
+    "  $0.125 (sub)",
+  ].join("\n");
 
 const exactThemedFrame = [
-  " ".repeat(40),
-  " Check the renderer and keep it stable. ",
-  " ".repeat(40),
-  "",
-  "I will inspect the active state.",
-  "",
-  "◆ Thinking",
-  "  Checking the current frame.",
-  "",
-  "… read · pending".padEnd(40),
-  "  ↳ Waiting for a slot".padEnd(40),
-  "▸ bash · running".padEnd(40),
-  "  ↳ Focused checks".padEnd(40),
-  "  ↳ Progress".padEnd(40),
-  "    line one".padEnd(40),
-  "    line two".padEnd(40),
-  "✓ edit · done".padEnd(40),
-  "  ↳ Two files".padEnd(40),
-  "✗ write · failed · exit 1",
-  "  ↳ Unavailable",
-  "  ↳ Error",
-  "    denied",
-  "",
-  "! warning Catalog",
-  "  temporarily unavailable",
-  "",
-  "Queued · 1",
-  "  Run the narrow check next.",
-  "",
-  "─ Ask ohm · manual ────────────────────",
-  "  What next?",
-  "  › Add an update test.",
-  "───────────────────────────────────────",
-  "",
-  "✓ connected · model-x · max · testing",
-  "  ctx 47.2%/100k · in 12k · out 860",
-  "  R11k · W800 · cache hit 91.0%",
-  "  $0.125 (sub)",
-].join("\n");
+    "",
+    " Check the renderer and keep it stable.",
+    "",
+    "",
+    "ohm   I will inspect the active state.",
+    "",
+    "◆ Thinking",
+    "  Checking the current frame.",
+    "",
+    "… read  Waiting for a slot  pending",
+    "▸ bash  Focused checks  running",
+    "  ↳ Progress",
+    "    line one",
+    "    line two",
+    "✓ edit  Two files  done",
+    "✗ write  Unavailable  failed · exit 1",
+    "    denied",
+    "",
+    "! warning Catalog",
+    "  temporarily unavailable",
+    "",
+    "Queued · 1",
+    "  Run the narrow check next.",
+    "",
+    "─ Ask ohm · manual ────────────────────",
+    "  What next?",
+    "  › Add an update test.",
+    "",
+    "✓ model-x · think max · testing",
+    "  ctx 47.2%/100k · cache hit 91.0%",
+    "  in 12k/out 860 · read 11k/write 800",
+    "  $0.125 (sub)",
+  ].join("\n");
 
 test("native view projects the exact visible frame and composer geometry", () => {
   const projected = projectOhmNativeFrame(props(40));
-  assert.equal(projected.text, exactFrame);
-  assert.deepEqual(projected.cursor, { row: 32, column: 12 });
-  assert.deepEqual(projected.composer, { top: 29, bottom: 33 });
+  assert.equal(projected.text.split("\n").map((line) => line.trimEnd()).join("\n"), exactFrame);
+  assert.deepEqual(projected.cursor, { row: 27, column: 12 });
+  assert.deepEqual(projected.composer, { top: 24, bottom: 27 });
 });
 
 test("native view keeps narrow projections bounded and marker-free", () => {
@@ -215,12 +204,56 @@ test("native thinking entries override the global expansion fallback independent
 test("native color projection preserves exact visible geometry and semantic roles", () => {
   const theme = selectedTheme(true);
   const projected = projectOhmNativeFrame(props(40, theme));
-  assert.equal(stripAnsi(projected.text), exactThemedFrame);
-  assert.deepEqual(projected.cursor, { row: 32, column: 12 });
-  assert.deepEqual(projected.composer, { top: 29, bottom: 33 });
-  assert.match(projected.text, terminalPattern("\\u001b\\[38;5;15m\\u001b\\[48;5;22m", "u"));
+  assert.equal(stripAnsi(projected.text).split("\n").map((line) => line.trimEnd()).join("\n"), exactThemedFrame);
+  assert.deepEqual(projected.cursor, { row: 27, column: 12 });
+  assert.deepEqual(projected.composer, { top: 24, bottom: 27 });
+  assert.ok(projected.text.includes(theme.fg("userMessageText", "Check the renderer and keep it stable.")));
+  assert.ok(projected.text.includes(theme.fg("thinkingText", "ohm   ")));
+  assert.ok(projected.text.includes(theme.getBgAnsi("userMessageBg")));
   assert.match(projected.text, terminalPattern("\\u001b\\[38;5;196m", "u"));
   assert.match(projected.text, terminalPattern("\\u001b\\[38;5;33m", "u"));
+});
+
+test("user cards have neutral text, a small inset, and one padded row above and below", () => {
+  for (const color of [true, false]) {
+    const theme = selectedTheme(color);
+    const blocks = projectOhmNativeTranscriptEntries({
+      snapshot: { ...snapshot, transcript: [{ id: "user", kind: "user", text: "one" }] },
+      columns: 8,
+      theme,
+    })!;
+    assert.deepEqual(blocks[0]!.map(stripAnsi), ["        ", " one    ", "        "]);
+    assert.ok(blocks[0]![1]!.includes(theme.fg("userMessageText", "one")));
+    assert.doesNotMatch(blocks[0]!.join("\n"), /YOU|›/u);
+  }
+});
+
+test("user rows fill the theme-owned background without changing no-color or narrow geometry", () => {
+  for (const columns of [1, 2, 8, 40]) {
+    for (const name of ["signal", "native-view"]) {
+      const theme = name === "signal"
+        ? createTheme(name, { color: true, unicode: true })
+        : selectedTheme(true);
+      const plainTheme = name === "signal"
+        ? createTheme(name, { color: false, unicode: true })
+        : selectedTheme(false);
+      const selected = {
+        ...snapshot,
+        transcript: [{ id: "user", kind: "user" as const, text: "one\n\ntwo 你好" }],
+      };
+      const colored = projectOhmNativeTranscriptEntries({ snapshot: selected, columns, theme })![0]!;
+      const plain = projectOhmNativeTranscriptEntries({ snapshot: selected, columns, theme: plainTheme })![0]!;
+      assert.equal(colored.length, plain.length);
+      assert.deepEqual(colored.map((line) => stripAnsi(line).trimEnd()), plain.map((line) => line.trimEnd()));
+      for (const line of colored) {
+        assert.ok(line.startsWith(theme.getBgAnsi("userMessageBg")));
+        assert.equal(cellWidth(line), columns);
+        assert.ok(line.endsWith("\u001b[49m"));
+        assert.equal(wrapTextWithAnsi(`${line}\nprobe`, 1000).at(-1), "probe");
+      }
+      assert.doesNotMatch(plain.join("\n"), terminalPattern("\\u001b\\[", "u"));
+    }
+  }
 });
 
 test("failed tool headers remain foreground-only for built-in and generic tools", () => {
@@ -255,7 +288,7 @@ test("failed tool headers remain foreground-only for built-in and generic tools"
   }
 });
 
-test("native tool blocks use neutral live backgrounds, success backgrounds, and background-free failures", () => {
+test("native tool ledger preserves status colors without full-width background slabs", () => {
   const theme = selectedTheme(true);
   const builtInsAndUnknown = [
     "read",
@@ -290,16 +323,19 @@ test("native tool blocks use neutral live backgrounds, success backgrounds, and 
 
   for (const columns of [1, 2, 8, 32]) {
     const blocks = projectOhmNativeTranscriptEntries({ snapshot: toolSnapshot, columns, theme });
-    assert.ok(blocks[0]!.every((line) => line.includes(theme.getBgAnsi("toolPendingBg"))));
-    assert.ok(blocks[1]!.every((line) => line.includes(theme.getBgAnsi("toolPendingBg"))));
+    assert.ok(blocks[0]!.some((line) => line.includes(theme.getFgAnsi("toolOutput"))));
+    assert.ok(blocks[1]!.some((line) => line.includes(theme.getFgAnsi("toolTitle"))));
     for (const block of blocks.slice(2, -1)) {
-      assert.ok(block.every((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
-      assert.ok(block.every((line) => cellWidth(line) === columns));
+      assert.ok(block.some((line) => line.includes(theme.getFgAnsi("success"))));
     }
     const failure = blocks.at(-1)!;
     assert.ok(failure.every((line) => !line.includes(theme.getBgAnsi("toolPendingBg"))));
     assert.ok(failure.every((line) => !line.includes(theme.getBgAnsi("toolSuccessBg"))));
     assert.ok(failure.every((line) => !line.includes(theme.getBgAnsi("toolErrorBg"))));
+    for (const block of blocks) for (const line of block) {
+      assert.ok(cellWidth(line) <= columns);
+      assert.doesNotMatch(line, terminalPattern("\\u001b\\[[0-9;]*48;", "u"));
+    }
   }
 });
 
@@ -319,7 +355,7 @@ test("native transcript compacts consecutive tools without merging retained iden
   const initial: OhmNativeViewProps = { snapshot: compactSnapshot, columns: 32 };
   const view = new OhmNativeView(initial);
   const text = stripAnsi(view.project().text);
-  assert.match(text, /✓ read · done\n✓ write · done\n\nBoth calls completed\.\n\n✓ grep · done/u);
+  assert.match(text, /✓ read  done\n✓ write  done\n\nohm   Both calls completed\.\n\n✓ grep  done/u);
   assert.deepEqual(view.transcriptRenderCounts(), [1, 1, 1, 1]);
 
   view.update({
@@ -335,7 +371,7 @@ test("native transcript compacts consecutive tools without merging retained iden
   assert.deepEqual(view.transcriptRenderCounts(), [1, 2, 1, 1]);
 });
 
-test("native tool components retain identity while their live background becomes successful", () => {
+test("native tool components retain identity while their status becomes successful", () => {
   const theme = selectedTheme(true);
   const running: OhmTuiSnapshot = {
     transcript: [{ id: "call", kind: "tool", name: "bash", status: "running", state: "running" }],
@@ -347,7 +383,8 @@ test("native tool components retain identity while their live background becomes
   const view = new OhmNativeView({ snapshot: running, columns: 30, theme });
   const live = view.projectTranscriptEntries()[0]!;
   assert.deepEqual(view.transcriptRenderCounts(), [1]);
-  assert.ok(live.every((line) => line.includes(theme.getBgAnsi("toolPendingBg"))));
+  assert.ok(live.some((line) => line.includes(theme.getFgAnsi("toolTitle"))));
+  assert.equal(stripAnsi(live.join("\n")), "▸ bash  running");
 
   view.update({
     snapshot: {
@@ -359,30 +396,44 @@ test("native tool components retain identity while their live background becomes
   });
   const complete = view.projectTranscriptEntries()[0]!;
   assert.deepEqual(view.transcriptRenderCounts(), [2]);
-  assert.ok(complete.every((line) => line.includes(theme.getBgAnsi("toolSuccessBg"))));
+  assert.ok(complete.some((line) => line.includes(theme.getFgAnsi("success"))));
+  assert.equal(stripAnsi(complete.join("\n")), "✓ bash  done · 12ms");
 });
 
 test("native transcript batch projection returns exact independent entry blocks", () => {
-  assert.deepEqual(projectOhmNativeTranscriptEntries(props(40, selectedTheme(false))), [
-    ["", " Check the renderer and keep it stable.", ""],
-    ["I will inspect the active state."],
-    ["◆ Thinking", "  Checking the current frame."],
-    ["… read · pending", "  ↳ Waiting for a slot"],
+  assert.deepEqual(projectOhmNativeTranscriptEntries(props(40, selectedTheme(false)))?.map((block) => block.map((line) => line.trimEnd())), [
     [
-      "▸ bash · running",
-      "  ↳ Focused checks",
+      "",
+      " Check the renderer and keep it stable.",
+      ""
+    ],
+    [
+      "ohm   I will inspect the active state."
+    ],
+    [
+      "◆ Thinking",
+      "  Checking the current frame."
+    ],
+    [
+      "… read  Waiting for a slot  pending"
+    ],
+    [
+      "▸ bash  Focused checks  running",
       "  ↳ Progress",
       "    line one",
-      "    line two",
+      "    line two"
     ],
-    ["✓ edit · done", "  ↳ Two files"],
     [
-      "✗ write · failed · exit 1",
-      "  ↳ Unavailable",
-      "  ↳ Error",
-      "    denied",
+      "✓ edit  Two files  done"
     ],
-    ["! warning Catalog", "  temporarily unavailable"],
+    [
+      "✗ write  Unavailable  failed · exit 1",
+      "    denied"
+    ],
+    [
+      "! warning Catalog",
+      "  temporarily unavailable"
+    ]
   ]);
 });
 
@@ -446,4 +497,36 @@ test("controller-scoped native view retains unchanged transcript components", ()
   const changed = [...first];
   changed[1] = 2;
   assert.deepEqual(view.transcriptRenderCounts(), changed);
+});
+
+test("transcript-only projection preserves exact full-frame rows without shell work", () => {
+  const trimEmptyRows = (rows: readonly string[]): string[] => {
+    let start = 0;
+    let end = rows.length;
+    while (start < end && rows[start] === "") start += 1;
+    while (end > start && rows[end - 1] === "") end -= 1;
+    return rows.slice(start, end);
+  };
+  for (const color of [false, true]) {
+    for (const unicode of [false, true]) {
+      const theme = createTheme("signal", { color, unicode });
+      for (const columns of [1, 2, 8, 40, 120]) {
+        for (const expanded of [false, true]) {
+          for (const transcript of [snapshot.transcript, []]) {
+            const selected: OhmNativeViewProps = {
+              ...props(columns, theme), unicode,
+              thinkingExpanded: expanded, toolDetailsExpanded: expanded,
+              snapshot: { ...snapshot, transcript, queuedMessages: [] },
+            };
+            const frame = projectOhmNativeFrame(selected);
+            assert.deepEqual(
+              trimEmptyRows(internalProjectOhmNativeTranscript(selected)),
+              trimEmptyRows(frame.text.split("\n").slice(0, frame.composer.top)),
+              `color=${color} unicode=${unicode} width=${columns} expanded=${expanded}`,
+            );
+          }
+        }
+      }
+    }
+  }
 });

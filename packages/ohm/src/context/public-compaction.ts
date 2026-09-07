@@ -37,9 +37,9 @@ import { deriveContextBudget, fallbackContextBudget } from "./budget.js";
 import { estimateTextTokens } from "./projection.js";
 
 import type {
-  ReadonlyExtensionSessionManager,
+  ReadonlyPluginSessionManager,
   SessionEntry,
-} from "../extensions/session-contract.js";
+} from "../plugins/session-contract.js";
 
 export interface CompactionSettings {
   enabled: boolean;
@@ -145,7 +145,7 @@ export interface CompactionResult<T = unknown> {
 }
 
 export type ReadonlyCompactionSessionManager = Pick<
-  ReadonlyExtensionSessionManager,
+  ReadonlyPluginSessionManager,
   "getBranch" | "getEntry"
 >;
 

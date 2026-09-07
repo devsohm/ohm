@@ -152,7 +152,23 @@ Custom model IDs and provider IDs remain valid through the open string unions. C
 
 Image generation has separate model, request, result, registry, and provider interfaces. Text-streaming assumptions do not leak into image APIs.
 
-Import image registration through the documented image subpaths. The side-effect-free root does not register optional implementations.
+Use an instance-scoped collection from the side-effect-free root; registering a provider does not change another host's image catalog or credentials:
+
+```ts
+import { createImageModels } from "@ohm/models";
+import { openrouterImagesProvider } from "@ohm/models/providers/openrouter-images";
+
+const images = createImageModels({ credentials, env: {} });
+images.setProvider(openrouterImagesProvider());
+const model = images.getModels("openrouter")[0];
+if (model) await images.generateImage(model, { prompt: "A small lighthouse" });
+```
+
+`ImageProvider.auth` uses the same injected `CredentialStore` and `AuthContext` as text providers, including atomic OAuth refresh. The image transport receives resolved API keys and headers, never refresh credentials. Invocation credentials take precedence without reading the store; endpoint and case-insensitive header overrides remain available. An explicit empty `env` prevents ambient environment discovery.
+
+Providers may implement `refreshModels(context)` to return an authoritative image catalog. `images.refresh({ allowNetwork: false })` passes the offline policy to that provider, reports errors by provider, and retains the last valid catalog on failure, cancellation, or provider replacement. Returned model metadata is detached. Built-in image metadata remains the reviewed offline catalog; no live image discovery endpoint is assumed or fabricated.
+
+Compatibility image-registration subpaths remain available and delegate to one default collection. They are global convenience APIs; embedded hosts should use their own collection. The root does not register optional implementations.
 
 ## Package boundaries
 

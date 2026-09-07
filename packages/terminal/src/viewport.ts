@@ -35,6 +35,13 @@ export interface ViewportPointerEvent {
   row: number;
   column: number;
   button: "left" | "middle" | "right" | "none";
+  shift?: boolean;
+  alt?: boolean;
+  ctrl?: boolean;
+  /** Consecutive same-cell clicks within 500ms, capped at three; zero for hover/wheel. */
+  clickCount?: number;
+  /** Motion with a held button, or a release after moving the pressed pointer. */
+  dragging?: boolean;
   deltaRows?: number;
 }
 
@@ -97,7 +104,7 @@ function isViewportPointerRegionComponent(component: Component): component is Vi
   return VIEWPORT_POINTER_REGIONS in component && component[VIEWPORT_POINTER_REGIONS] === true;
 }
 
-interface PointerLocation {
+export interface PointerLocation {
   target: ViewportPointerTarget;
   row: number;
   column: number;
@@ -139,12 +146,14 @@ function pointerPath(
           ? [...nested, { target: component, ...bounds }]
           : nested;
       }
+      // An overlapping plain component still covers the component underneath it.
+      if (contains(row, column, absolute)) break;
     }
   }
   return isViewportPointerTarget(component) ? [{ target: component, ...bounds }] : [];
 }
 
-function targetLocation(
+export function targetLocation(
   component: Component,
   selected: ViewportPointerTarget,
   bounds: Omit<ViewportPointerRegion, "component">,

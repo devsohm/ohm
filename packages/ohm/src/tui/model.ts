@@ -4,7 +4,7 @@ import type { EventEnvelope, RuntimeEvent } from "../core/events.js";
 import { toJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
 import type { CanonicalMessage, ImageBlock, NormalizedUsage, TextBlock, ToolResultBlock } from "../core/types.js";
 import { parse as parsePartialJson } from "partial-json";
-import type { CustomMessageEntry } from "../extensions/session-contract.js";
+import type { CustomMessageEntry } from "../plugins/session-contract.js";
 import {
   CACHE_MISS_NOTICE_COST,
   CACHE_MISS_NOTICE_TOKENS,
@@ -22,7 +22,7 @@ import { normalizedCacheHitRate } from "../core/cache-usage.js";
 import { parseSkillBlock } from "../core/skill-block.js";
 import type { TranscriptImage } from "./terminal-image.js";
 import { projectRuntimeToolRenderResult } from "./components.js";
-import { projectRuntimeDirectToolRenderContent } from "./tool-render-view.js";
+import { boundedToolRenderJson, projectRuntimeDirectToolRenderContent } from "./tool-render-view.js";
 import type {
   TranscriptEntry,
   TuiContext,
@@ -263,27 +263,6 @@ function boundedRollingToolPreview(value: string, maximumBytes: number): Bounded
     tail,
     truncated: true,
   };
-}
-
-function boundedJsonView(value: JsonValue, maximumBytes: number): JsonValue | undefined {
-  let nodes = 0;
-  const sanitize = (selected: JsonValue, depth: number): JsonValue => {
-    nodes += 1;
-    if (nodes > 4_096 || depth > 32) throw new Error("Tool renderer data is too deeply nested");
-    if (isStringValue(selected)) return sanitizeTerminalText(selected);
-    if (selected === null || !hasObjectType(selected)) return selected;
-    if (Array.isArray(selected)) return selected.map((entry) => sanitize(entry, depth + 1));
-    return Object.fromEntries(Object.entries(selected).map(([key, entry]) => [
-      sanitizeTerminalText(key),
-      sanitize(entry, depth + 1),
-    ]));
-  };
-  try {
-    const safe = sanitize(value, 0);
-    return Buffer.byteLength(JSON.stringify(safe), "utf8") <= maximumBytes ? safe : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function boundedToolResult(
@@ -527,7 +506,7 @@ function conciseMutationInput(input: JsonValue, maximumBytes: number): JsonValue
     const value = inputText(input, key);
     return value === undefined ? [] : [[key, value]];
   }));
-  return Object.keys(selected).length === 0 ? undefined : boundedJsonView(selected, maximumBytes);
+  return Object.keys(selected).length === 0 ? undefined : boundedToolRenderJson(selected, maximumBytes);
 }
 
 function mutationResultPreview(
@@ -645,7 +624,7 @@ function projectToolInput(
   const retainStructured = Buffer.byteLength(rawArguments, "utf8") <= maximumBytes;
   const inputPreview = mutationInputPreview(name, input, maximumBytes);
   const structured = retainStructured
-    ? boundedJsonView(input, maximumBytes)
+    ? boundedToolRenderJson(input, maximumBytes)
     : conciseMutationTools.has(name) ? conciseMutationInput(input, maximumBytes) : undefined;
   const selectedPreview = inputPreview ?? (structured === undefined
     ? boundedRollingToolPreview(rawArguments, maximumBytes).text
@@ -925,13 +904,7 @@ export class TuiModel {
 
   toggleTool(callId?: string): boolean {
     if (callId === undefined) {
-      const expanded = !this.#toolOutputExpanded;
-      this.#toolOutputExpanded = expanded;
-      if (this.#startup !== undefined) this.#startup.expanded = expanded;
-      for (const entry of this.#entries) {
-        if (entry.kind === "tool" || entry.expandable === true) entry.expanded = expanded;
-      }
-      return true;
+      return this.setToolOutputExpanded(!this.#toolOutputExpanded);
     }
     const entries = this.#entries.filter((item) => item.callId === callId);
     if (entries.length === 0) return false;
@@ -942,16 +915,15 @@ export class TuiModel {
 
   setToolOutputExpanded(expanded: boolean): boolean {
     if (!isBooleanValue(expanded)) throw new TypeError("Tool output expansion must be boolean");
-    const changed = this.#toolOutputExpanded !== expanded
-      || (this.#startup !== undefined && this.#startup.expanded !== expanded)
-      || this.#entries.some((entry) => (
-        entry.kind === "tool"
-        || entry.expandable === true
-      ) && entry.expanded !== expanded);
+    let changed = this.#toolOutputExpanded !== expanded
+      || (this.#startup !== undefined && this.#startup.expanded !== expanded);
     this.#toolOutputExpanded = expanded;
     if (this.#startup !== undefined) this.#startup.expanded = expanded;
     for (const entry of this.#entries) {
-      if (entry.kind === "tool" || entry.expandable === true) entry.expanded = expanded;
+      if ((entry.kind === "tool" || entry.expandable === true) && entry.expanded !== expanded) {
+        entry.expanded = expanded;
+        changed = true;
+      }
     }
     return changed;
   }
@@ -1079,7 +1051,7 @@ export class TuiModel {
       entry.timedOut === true ||
       entry.signal !== undefined ||
       (entry.exitCode !== undefined && entry.exitCode !== 0);
-    const input = boundedJsonView({
+    const input = boundedToolRenderJson({
       command: entry.command,
       ...optionalProperties(entry.excludeFromContext === true ? { excludeFromContext: true } : undefined),
     }, this.#limits.maxToolPreviewBytes);
@@ -1119,13 +1091,18 @@ export class TuiModel {
     this.#bound();
   }
 
-  applyAll(items: readonly TuiTranscriptItem[]): void {
+  applyAll(items: readonly TuiTranscriptItem[], options: { historical?: boolean } = {}): void {
     for (const item of items) {
       if ("event" in item) this.#apply(item);
       else if (item.type === "session_summary") this.applySessionSummary(item);
       else if (item.type === "shell_execution") this.applySessionShell(item);
       else this.applySessionEntry(item);
       this.#bound();
+    }
+    if (options.historical === true) {
+      for (const entry of this.#entries) {
+        if (entry.kind === "tool" && (entry.status === "pending" || entry.status === "running")) entry.historical = true;
+      }
     }
   }
 
@@ -2036,7 +2013,7 @@ export class TuiModel {
       ? userShellProjection(text)
       : undefined;
     if (userShell !== undefined) {
-      const input = boundedJsonView({ command: userShell.command }, this.#limits.maxToolPreviewBytes);
+      const input = boundedToolRenderJson({ command: userShell.command }, this.#limits.maxToolPreviewBytes);
       ownedEntries.push(this.#append({
         id: message.id,
         kind: "tool",
@@ -2401,7 +2378,7 @@ export class TuiModel {
       ? undefined
       : draft.truncated
         ? conciseMutationInput(partialInput, this.#limits.maxToolPreviewBytes) ?? {}
-        : boundedJsonView(partialInput, this.#limits.maxToolPreviewBytes);
+        : boundedToolRenderJson(partialInput, this.#limits.maxToolPreviewBytes);
     const projection = partialInput === undefined
       ? undefined
       : projectToolInput(
@@ -2507,6 +2484,7 @@ export class TuiModel {
         continue;
       }
       entry.status = "in_doubt";
+      delete entry.historical;
       if (entry.toolData !== undefined) {
         const { progress: _progress, partialResult: _partialResult, ...settled } = entry.toolData;
         if (Object.keys(settled).length === 0) delete entry.toolData;
@@ -2625,6 +2603,7 @@ export class TuiModel {
     }
     entry.title = sanitizeTerminalText(name);
     entry.status = status;
+    delete entry.historical;
     if (values.text !== undefined) entry.text = sanitizeTerminalText(values.text);
     if (values.summary !== undefined) entry.summary = sanitizeTerminalText(values.summary);
     if (values.clearInputPreview === true) delete entry.inputPreview;

@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { types as utilTypes } from "node:util";
+import { isDeepStrictEqual, types as utilTypes } from "node:util";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
@@ -27,7 +27,8 @@ import {
 import { BOOLEAN_VALUE, NUMBER_VALUE, STRING_VALUE } from "./value-schemas.js";
 
 const MAX_SETTINGS_BYTES = 256 * 1024;
-const CONFIG_SCHEMA = "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json";
+const CONFIG_SCHEMA = "https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/packages/ohm/resources/schemas/config-v1.json";
+const LEGACY_CONFIG_SCHEMA = "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json";
 const SETTINGS_RECORD_VALUE = Type.Record(Type.String(), Type.Unknown());
 
 type SettingsInputRecord = Static<typeof SETTINGS_RECORD_VALUE>;
@@ -55,7 +56,7 @@ export const SETTINGS_KEYS = [
   "shellCommandPrefix",
   "npmCommand",
   "collapseChangelog",
-  "packages",
+  "plugins",
   "extensions",
   "skills",
   "prompts",
@@ -94,6 +95,8 @@ export interface PackageSourceOptions extends JsonObject {
   source: string;
   autoload?: boolean;
   manifest?: "legacy";
+  entrypoints?: string[];
+  /** @deprecated Use entrypoints. Accepted only as a compatibility input. */
   extensions?: string[];
   prompts?: string[];
   skills?: string[];
@@ -220,6 +223,8 @@ export interface Settings extends JsonObject {
   shellCommandPrefix?: string | null;
   npmCommand?: string[] | null;
   collapseChangelog?: boolean | null;
+  plugins?: PackageSource[] | null;
+  /** @deprecated Use plugins. Effective and persisted settings use plugins. */
   packages?: PackageSource[] | null;
   extensions?: string[] | null;
   skills?: string[] | null;
@@ -299,6 +304,28 @@ function cleanSettings(value: JsonObject): Settings {
   delete cleaned.$schema;
   validateSettings(cleaned);
   return cleaned;
+}
+
+function normalizeLegacyKey(value: JsonObject, canonical: string, legacy: string, path: string): void {
+  if (value[legacy] === undefined) return;
+  if (value[canonical] !== undefined && !isDeepStrictEqual(value[canonical], value[legacy])) {
+    throw new Error(`${path}.${canonical} and ${path}.${legacy} contain conflicting values; use ${canonical} only`);
+  }
+  setOwn(value, canonical, value[legacy]);
+  delete value[legacy];
+}
+
+function normalizeSettings<T>(input: T): Settings {
+  validateSettings(input);
+  const normalized = clone(input);
+  if (normalized.$schema === LEGACY_CONFIG_SCHEMA) normalized.$schema = CONFIG_SCHEMA;
+  for (const key of ["plugins", "packages"] as const) {
+    normalized[key]?.forEach((source, index) => {
+      if (!Value.Check(STRING_VALUE, source)) normalizeLegacyKey(source, "entrypoints", "extensions", `settings.${key}[${index}]`);
+    });
+  }
+  normalizeLegacyKey(normalized, "plugins", "packages", "settings");
+  return normalized;
 }
 
 function stripNulls(value: JsonValue): JsonValue {
@@ -414,7 +441,7 @@ function validateTimeout<T>(value: T, name: string): void {
 
 function validateSettings<T>(settings: T): asserts settings is T & Settings {
   if (!Value.Check(SETTINGS_RECORD_VALUE, settings)) invalid("settings", "an object");
-  if (settings.$schema !== undefined && settings.$schema !== CONFIG_SCHEMA) {
+  if (settings.$schema !== undefined && settings.$schema !== CONFIG_SCHEMA && settings.$schema !== LEGACY_CONFIG_SCHEMA) {
     invalid("config.$schema", CONFIG_SCHEMA);
   }
   for (const key of [
@@ -457,20 +484,23 @@ function validateSettings<T>(settings: T): asserts settings is T & Settings {
     stringArray(settings[key], `settings.${key}`);
   }
 
-  if (!nullable(settings.packages)) {
-    if (!Array.isArray(settings.packages)) invalid("settings.packages", "an array");
-    settings.packages.forEach((entry, index) => {
+  for (const key of ["plugins", "packages"]) {
+    const sources = settings[key];
+    if (nullable(sources)) continue;
+    if (!Array.isArray(sources)) invalid(`settings.${key}`, "an array");
+    sources.forEach((entry, index) => {
+      const path = `settings.${key}[${index}]`;
       if (Value.Check(STRING_VALUE, entry)) {
-        if (entry.trim().length === 0) invalid(`settings.packages[${index}]`, "a non-empty string or package object");
+        if (entry.trim().length === 0) invalid(path, "a non-empty string or plugin object");
         return;
       }
-      const source = objectValue(entry, `settings.packages[${index}]`);
-      if (source === undefined) invalid(`settings.packages[${index}]`, "a non-empty string or package object");
-      stringValue(source.source, `settings.packages[${index}].source`, true);
-      booleanValue(source.autoload, `settings.packages[${index}].autoload`);
-      if (!nullable(source.manifest) && source.manifest !== "legacy") invalid(`settings.packages[${index}].manifest`, "legacy");
-      for (const field of ["extensions", "prompts", "skills", "themes"]) {
-        stringArray(source[field], `settings.packages[${index}].${field}`);
+      const source = objectValue(entry, path);
+      if (source === undefined) invalid(path, "a non-empty string or plugin object");
+      if (!Value.Check(STRING_VALUE, source.source) || source.source.trim().length === 0) invalid(`${path}.source`, "a non-empty string");
+      booleanValue(source.autoload, `${path}.autoload`);
+      if (!nullable(source.manifest) && source.manifest !== "legacy") invalid(`${path}.manifest`, "legacy");
+      for (const field of ["entrypoints", "extensions", "prompts", "skills", "themes"]) {
+        stringArray(source[field], `${path}.${field}`);
       }
     });
   }
@@ -565,8 +595,7 @@ function parseDocument(contents: string | undefined): JsonObject {
     Value.Check(SETTINGS_RECORD_VALUE, parsed)
     && (parsed.doubleEscapeAction === "tree" || parsed.doubleEscapeAction === "fork")
   ) parsed.doubleEscapeAction = "atlas";
-  validateSettings(parsed);
-  return parsed;
+  return normalizeSettings(parsed);
 }
 
 function timeoutSetting(value: JsonValue | undefined, fallback: number, name: string): number {
@@ -687,8 +716,7 @@ export class SettingsManager {
   }
 
   static inMemory<T>(settings?: T, options: SettingsManagerCreateOptions = {}): SettingsManager {
-    const input = settings === undefined ? {} : settings;
-    validateSettings(input);
+    const input = normalizeSettings(settings === undefined ? {} : settings);
     const storage = new InMemorySettingsStorage();
     storage.withLock("global", () => JSON.stringify(input));
     return new SettingsManager(storage, options);
@@ -730,10 +758,11 @@ export class SettingsManager {
     if (scope === "project" && !this.#projectTrusted) {
       throw new Error("Project settings are not writable because this project is not trusted");
     }
-    const raw = applyPatch(this.#states[scope].raw, patch);
+    const normalized = normalizeSettings(patch);
+    const raw = applyPatch(this.#states[scope].raw, normalized);
     validateSettings(raw);
     this.#states[scope] = { raw, settings: cleanSettings(raw), loadable: this.#states[scope].loadable };
-    this.#pending[scope] = applyPatch(this.#pending[scope], patch);
+    this.#pending[scope] = applyPatch(this.#pending[scope], normalized);
     this.#revision += 1;
   }
 
@@ -751,9 +780,10 @@ export class SettingsManager {
   updateGlobalSettings(patch: Settings): void { this.#update("global", patch); }
   updateProjectSettings(patch: Settings): void { this.#update("project", patch); }
   applyOverrides(overrides: Settings): void {
-    const candidate = mergeSettings(this.#effective(), overrides);
+    const normalized = normalizeSettings(overrides);
+    const candidate = mergeSettings(this.#effective(), normalized);
     validateSettings(candidate);
-    this.#overrides = clone(overrides);
+    this.#overrides = normalized;
     this.#revision += 1;
   }
 
@@ -951,12 +981,12 @@ export class SettingsManager {
   getCollapseChangelog(): boolean { return this.#effective().collapseChangelog ?? false; }
   setCollapseChangelog(value: boolean): void { this.#set("collapseChangelog", value); }
 
-  getPackages(): PackageSource[] { return clone(this.#effective().packages ?? []); }
-  setPackages(value: PackageSource[]): void { this.#set("packages", value); }
-  setProjectPackages(value: PackageSource[]): void { this.#update("project", { packages: value }); }
-  getExtensionPaths(): string[] { return clone(this.#effective().extensions ?? []); }
-  setExtensionPaths(value: string[]): void { this.#set("extensions", value); }
-  setProjectExtensionPaths(value: string[]): void { this.#update("project", { extensions: value }); }
+  getPackages(): PackageSource[] { return clone(this.#effective().plugins ?? []); }
+  setPackages(value: PackageSource[]): void { this.#set("plugins", value); }
+  setProjectPackages(value: PackageSource[]): void { this.#update("project", { plugins: value }); }
+  getLegacyPluginEntrypoints(): string[] { return clone(this.#effective().extensions ?? []); }
+  setLegacyPluginEntrypoints(value: string[]): void { this.#set("extensions", value); }
+  setProjectLegacyPluginEntrypoints(value: string[]): void { this.#update("project", { extensions: value }); }
   getSkillPaths(): string[] { return clone(this.#effective().skills ?? []); }
   setSkillPaths(value: string[]): void { this.#set("skills", value); }
   setProjectSkillPaths(value: string[]): void { this.#update("project", { skills: value }); }

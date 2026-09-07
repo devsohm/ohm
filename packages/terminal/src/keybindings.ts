@@ -9,7 +9,7 @@ type EditorMutationAction =
   | "deleteToLineStart" | "deleteToLineEnd" | "yank" | "yankPop" | "undo" | "redo";
 type InputAction = "newLine" | "submit" | "tab" | "copy";
 type SelectAction = "up" | "down" | "pageUp" | "pageDown" | "confirm" | "cancel";
-type TranscriptAction = "pageUp" | "pageDown" | "previousPrompt" | "nextPrompt" | "top" | "bottom";
+type TranscriptAction = "pageUp" | "pageDown" | "previousPrompt" | "nextPrompt" | "previousTool" | "nextTool" | "top" | "bottom";
 type EditorNavigationKeybindings = Record<`tui.editor.${EditorNavigationAction}`, true>;
 type EditorMutationKeybindings = Record<`tui.editor.${EditorMutationAction}`, true>;
 type InputKeybindings = Record<`tui.input.${InputAction}`, true>;
@@ -72,6 +72,8 @@ const TUI_BINDING_REGISTRY = {
   "tui.transcript.pageDown": ["pageDown", "Scroll the viewport toward later content"],
   "tui.transcript.previousPrompt": ["ctrl+shift+up", "Jump to the preceding marked message"],
   "tui.transcript.nextPrompt": ["ctrl+shift+down", "Jump to the following marked message"],
+  "tui.transcript.previousTool": ["alt+pageUp", "Jump to the preceding tool"],
+  "tui.transcript.nextTool": ["alt+pageDown", "Jump to the following tool"],
   "tui.transcript.top": ["ctrl+home", "Go to the beginning of the viewport content"],
   "tui.transcript.bottom": ["ctrl+end", "Go to the end of the viewport content"],
 } as const satisfies Record<Keybinding, BindingSpec>;

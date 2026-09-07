@@ -28,7 +28,7 @@ const LAYER_ENTRY_POINTS = {
   "ohm/context": "deriveContextBudget",
   "ohm/core": "HarnessError",
   "ohm/embedding": "createInMemoryHarness",
-  "ohm/extensions": "defineTool",
+  "ohm/plugins": "defineTool",
   "ohm/images": "sniffImageMediaType",
   "ohm/interfaces": "RpcClient",
   "ohm/modes": "runPrintMode",
@@ -49,7 +49,7 @@ test("built package root exposes the direct session architecture without retired
   assert.equal(api.AgentSession instanceof Function, true);
   assert.equal(api.SessionManager instanceof Function, true);
   assert.equal(api.defineTool instanceof Function, true);
-  assert.equal("RuntimeExtensionHost" in api, false);
+  assert.equal("RuntimePluginHost" in api, false);
   assert.equal("HarnessService" in api, false);
   assert.equal("SessionStore" in api, false);
   assert.equal("createohmSdk" in sdk, false);
@@ -82,7 +82,7 @@ test("built package root exposes the documented aliases and adapters", () => {
     "createEditTool",
     "createEditToolDefinition",
     "createEventBus",
-    "createExtensionRuntime",
+    "createPluginRuntime",
     "createFindTool",
     "createFindToolDefinition",
     "createGrepTool",
@@ -206,7 +206,7 @@ test("built print mode owns the runtime and supports an embedded output sink", a
       },
     },
     state: { messages: [] },
-    async bindExtensions() {},
+    async bindPlugins() {},
     subscribe() { return () => {}; },
     async prompt() {
       this.state.messages.push({
@@ -304,7 +304,7 @@ test("every built named export has declaration and runtime conformance evidence"
     runtimeBindings,
     typeOnlyBindings,
     totalBindings: runtimeBindings + typeOnlyBindings,
-    semanticFunctions: 22,
+    semanticFunctions: 23,
   });
   assert.equal(result.stderr, "");
 });

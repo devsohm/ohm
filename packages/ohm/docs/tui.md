@@ -1,30 +1,69 @@
 # Terminal UI
 
 ohm's interactive mode owns one terminal viewport with a retained transcript,
-a word-wrapped composer, an active-work row, and a compact status dock. User messages use a
-full-width gray card with one row and one cell of inner padding by default. The
-dock can show workspace, session, live work, model, reasoning, tokens, cache,
-cost, and context pressure.
+a word-wrapped composer, an active-work row, and a compact status dock. A workspace
+and session masthead sits above the transcript. `YOU` and `OHM` gutters distinguish
+turns without full-width message backgrounds; narrow terminals use compact glyphs.
+The dock shows model, reasoning, live work, tokens, cache, cost, and context pressure.
 
-The built-in composer uses plain full-width rails and no fixed prompt label. Interactive questions display their prompt separately. A positioned terminal cursor marks the exact insertion point by default. Set `showHardwareCursor: false` to hide it; when that setting is omitted, `OHM_HARDWARE_CURSOR=0` also hides it. Up and Down wrap across both ends of the `/` command suggestions. While work is active, an animated row immediately above the composer shows the current public phase, elapsed time, retry countdown, and cancel hint. The status dock keeps the model and thinking level together, then adds context, token, cache, and cost fields as room permits. `in` is prompt/context input, including separately reported cache reads and writes; `out` is generated output. `R` and `W` are non-zero aggregate cache-read and cache-write token counts, and `$` is recorded cost; subscription-backed usage adds `(sub)`. These labels present the best available session total without an exactness glyph, while extension snapshots retain separate exact and reported fields. `cache hit N.N%` is the newest completed non-summary request's exact provider-reported cache-read share. The chip is omitted when that request lacks either cache-read telemetry or an exact prompt denominator. It advances when that response completes and remains on the prior completed request while a new response is streaming. No cache chip appears before the first metered observation. `ctx N.N%` presents the current occupancy without a source glyph; extension snapshots retain whether it is provider-observed or projected. Narrow terminals omit whole low-priority fields instead of printing partial values.
+The built-in composer uses one full-width boundary and a small input gutter.
+Interactive questions display their prompt separately. A positioned terminal
+cursor marks the insertion point by default. Set `showHardwareCursor: false` to
+hide it; when that setting is omitted, `OHM_HARDWARE_CURSOR=0` also hides it.
+Up and Down wrap across both ends of the `/` command suggestions. During work,
+an animated row above the composer shows the public phase, elapsed time, retry
+countdown, and cancel hint.
+
+The dock keeps model and thinking together. `in` is prompt/context input,
+including separately reported cache reads and writes; `out` is generated output.
+`cache read` and `cache write` are non-zero aggregate token counts; narrow layouts
+shorten these to `read` and `write`. `$` is recorded cost, with `(sub)` for
+subscription-backed usage. These are the best available session totals; plugin
+snapshots retain separate exact and reported fields.
+
+`cache hit N.N%` is the newest completed non-summary request's exact reported
+cache-read share. It is absent without cache-read telemetry and an exact prompt
+denominator, and retains the prior value while the next response streams.
+Compaction notices do not show this chip. `ctx N.N%` is current context occupancy;
+plugin snapshots distinguish observed and projected values. Narrow layouts wrap
+metrics, abbreviate counts, and prioritize explicit errors over optional status.
 
 The model picker and reasoning-level cycle remain available while a response is active. Each accepted operation keeps its original model-and-reasoning tuple. A selection made during that response becomes the session selection for the next accepted operation, including a queued follow-up; it does not change or relabel the provider request already in flight. An explicitly installed low-level `agent.prepareNextTurn` hook may intentionally select the tuple for a later provider turn inside that operation.
 
-On a raw TTY, ohm enters its rich alternate-screen viewport automatically. There is no surface setting or mode flag. Vertical mouse-wheel input scrolls the retained transcript. `fullscreenScrollbar` controls whether the transcript scrollbar appears automatically, always, or stays hidden. Only the visible scrollbar thumb starts a drag; a click on its track falls through to the underlying viewport. Page Up and Page Down move by a viewport, Ctrl+Home and Ctrl+End move to its limits, and Ctrl+Shift+Up or Ctrl+Shift+Down move between marked user and final assistant messages. Ctrl+Shift+F opens case-insensitive search over the rendered retained rows. Whitespace is collapsed so phrases can match across wrapped rows. Enter or Ctrl+G selects the next result, Shift+Enter or Ctrl+Shift+G selects the previous result, and Escape restores the unchanged composer. Search editing and actions remain keyboard-operated. Wheel and scrollbar movement remain manual while search is open; only a query edit or explicit result navigation reveals a match. A left-button drag selects complete graphemes and copies at most 75,000 bytes; reaching a transcript edge continues the scroll. With `fullscreenCopyOnSelect: false`, releasing the button keeps the highlight and the normal copy action copies it. A successful copy clears the highlight and shows a short-lived popup, while a failed copy retains the selection and reports a warning. Losing terminal focus cancels an unfinished drag. A click can open a validated `http`, `https`, or `mailto` link. A drag never opens a link. Horizontal wheel input is ignored. Direct terminals receive all-motion mouse reporting. tmux, Zellij, and GNU Screen sessions retain button-motion, focus, and cell-coordinate reporting without all-motion reports. On shutdown, ohm disables mouse, focus, keyboard, paste, and terminal protocols before restoring the normal screen. The retained transcript is bounded to 2,000 entries and 2 MiB.
+On a raw TTY, ohm enters its rich alternate-screen viewport automatically. There is no surface setting or mode flag. Vertical mouse-wheel input scrolls the transcript. `fullscreenScrollbar` controls whether the transcript scrollbar appears automatically, always, or stays hidden. Only the visible scrollbar thumb starts a drag; a click on its track falls through to the underlying viewport. Page Up and Page Down move by a viewport and fetch adjacent journal pages at its boundaries. Ctrl+Home opens the oldest page on the displayed branch; Ctrl+End closes history/search and returns to live output. Ctrl+Shift+Up or Ctrl+Shift+Down move between user prompts, and Alt+Page Up or Alt+Page Down move between tools, including across page boundaries.
 
-Built-in pickers, settings, the composer, tool and reasoning cards, and transcript search are keyboard-operated. Structured extension components retain their opt-in bounded pointer contract and decide explicitly which cells consume an event.
+Ctrl+Shift+F searches visible text throughout the session journal, including abandoned branches. Enter or Ctrl+G finds the next older matching entry; Shift+Enter or Ctrl+Shift+G finds the next newer entry. Search opens a read-only page ending at the match: it never switches the active branch. Escape closes search without changing the composer draft. Searches yield between bounded batches and are cancelled when replaced, closed, or detached. Hidden provider state, hidden reasoning and renderer-only plugin data are not searched. Embedded terminal controllers without a journal provider retain viewport-only search; that fallback collapses rendered whitespace across wrapped rows. Search editing and actions remain keyboard-operated.
 
-`older transcript` is a scroll-position marker: retained rows still exist above
-the current viewport, and `Ctrl+Home` reaches their top. When space permits, the
-same bounded row includes the collapsed user prompt that owns the visible
-transcript section. It is distinct from the explicit `Older transcript entries
-were discarded from the viewport` notice, which appears only after the
-retained-entry or byte ceiling evicts old viewport rows. The durable V4 journal
-remains complete; use `/export` when archival history beyond the bounded
-interactive viewport is required.
+A left-button drag selects complete graphemes and copies at most 75,000 bytes; reaching a transcript edge continues the scroll. With `fullscreenCopyOnSelect: false`, releasing the button keeps the highlight and the normal copy action copies it. A successful copy clears the highlight and shows a short-lived popup, while a failed copy retains the selection and reports a warning. Losing terminal focus cancels an unfinished drag. A click can open a validated `http`, `https`, or `mailto` link. A drag never opens a link. Horizontal wheel input is ignored. Direct terminals receive all-motion mouse reporting. tmux, Zellij, and GNU Screen sessions retain button-motion, focus, and cell-coordinate reporting without all-motion reports. On shutdown, ohm disables mouse, focus, keyboard, paste, and terminal protocols before restoring the normal screen.
+
+Built-in pickers, settings, the composer, tool and reasoning cards, and transcript search are keyboard-operated. Structured plugin components retain their opt-in bounded pointer contract and decide explicitly which cells consume an event.
+
+Atlas label editing displays the current label and its save/cancel actions.
+Session deletion displays the target, the recycling/permanent-deletion warning,
+and the existing Enter-to-delete and Escape-to-cancel actions. These prompts do
+not display picker counts or empty-search messages. The exported host rendering
+snapshot `TuiViewState.overlay.promptMode` distinguishes `input` and
+`confirmation`; omitting it retains the ordinary picker presentation.
+
+`older transcript` marks rows above the current viewport. When space permits,
+the same row includes the user prompt that owns the visible section. The live
+model retains at most 2,000 entries and 2 MiB. Browsing adds one disposable page
+model capped at 500 entries and 1 MiB; pages normally read at most 100 journal
+entries and 256 KiB. Smaller configured limits also constrain history pages.
+An oversized message displays a labelled excerpt, centered near the search
+term when applicable; `/export` retains its complete content. History uses the
+same tool/custom renderers and bounded fallbacks as live output. New events,
+usage and cancellation continue on the live model while history is displayed.
+Refresh/session replacement cancels pending history work and returns to the
+live transcript; resize preserves the selected page and viewport anchor.
+An unfinished call in restored history is labelled `history · result not shown`,
+not `queued` or `running`. The result may exist outside the selected branch or
+page; the label makes no claim about execution or recovery. Actual live tool
+events replace that recorded state. The working row, input queue and composer
+continue to describe the live session; host questions show `Waiting for input`.
 
 In the rich viewport, transient informational notices such as model, refresh,
-session, export, and extension reports remain readable until the next model run
+session, export, and plugin reports remain readable until the next model run
 starts. That run removes those status rows; warnings, errors, durable messages,
 tool cards, and compaction receipts remain. Append-only compatibility output
 cannot retract lines it has already written.
@@ -36,6 +75,26 @@ When raw terminal control is unavailable, ohm automatically uses bounded line ou
 Presentation settings live in `config.json`. `/refresh` blocks input while it replaces the runtime generation, then rebuilds the active transcript from the same `SessionManager`. Stable scrollback is not moved through the mutable renderer. `/hotkeys` reports the active key map, including user overrides.
 
 ## Input, events, and rendering
+
+`/inspect` shows effective runtime metadata: the selected model, context sources,
+tools and owners, loaded plugins, authorization-gate configuration, and recent
+operation/tool timings with recognized stop reasons. Gate presence is not a
+permission decision or a process sandbox. The same
+snapshot is available to SDK, RPC, and HTTP clients. `/actions` opens the active
+portable plugin presentations and collects schema-validated action input.
+Actions remain owned and validated by their plugin generation.
+
+The footer uses theme roles to distinguish model, thinking level, activity,
+context use, cache reuse, token counts, and reported cost. Context use turns
+warning-colored at 80% and error-colored at 95%; these are presentation guides,
+not compaction thresholds. `configured` means a provider and model are selected,
+not that a network connection has been verified. Narrow terminals omit that
+healthy label before shortening the model, retain thinking and explicit states,
+and pair input/output and cache read/write counts with `/`. Labels
+remain readable without color, and cache-hit percentage stays in the normal
+footer rather than the compaction card.
+Explicit error, connecting, and offline states take priority over long activity
+or thinking text when space is limited.
 
 Terminal bytes are decoded into key events and then `TuiAction` values. The interactive command coordinator routes submit, steer, follow-up, abort, picker, and editor actions. A submitted prompt eventually calls `AgentSession.prompt()`.
 
@@ -56,7 +115,7 @@ label edit cancels and recovers the exact active operation first, while closing
 Atlas leaves the run untouched. Saved-session discovery and switching remain
 in `/resume`.
 `/cancel` and `/follow` retain their direct active-turn behavior. A second local
-command receives an immediate busy warning, while extension prompts, extension
+command receives an immediate busy warning, while plugin prompts, plugin
 commands, and shell shortcuts keep their bounded deferred-queue behavior.
 
 Escape cancels the active turn once. Queued user input is restored to the
@@ -83,6 +142,10 @@ Both update `TuiModel`. Ordinary UI changes are coalesced into a microtask. High
 and tool-progress events update the model as they arrive, while terminal projection and writes are coalesced to at most
 one rich redraw every 16 milliseconds. Wheel, Page Up, scrollbar-drag, and Escape input can promote a pending stream
 frame immediately. `TuiController.renderNow()` builds the current frame and sends it to `LiveSurfaceRenderer`.
+Embedding hosts that reconstruct recorded events directly can use
+`TuiModel.applyAll(items, { historical: true })`. Its default remains ordinary
+bulk event application. `TranscriptEntry.historical` is optional presentation
+metadata on unfinished restored calls; it does not change the runtime status.
 
 Full mode is admitted only when the rich native frame projector is installed. The public `TuiController` installs that
 projector, as does the internal rich-controller factory used by the CLI; internal construction without it fails before
@@ -125,31 +188,31 @@ The rich viewport updates mutable answer, visible reasoning, and tool rows as ev
 kept for the complete call lifecycle: pending argument collection, queued, running progress, completed, failed, or
 in-doubt. Its header shows one lifecycle glyph, the operation name, and a neutral state label; a completed card colors
 only its success tick. Indented detail rows use no continuous rail or full-row status background. Operation names,
-paths, and diff spans retain their semantic styling. A collapsed active Write card shows its target,
-received-byte state, and at most the newest three sanitized source rows. Its final `Ctrl+O` affordance appears only when
-earlier source is retained; expansion switches immediately to the bounded retained head and tail. A collapsed active
+paths, and diff spans retain their semantic styling. A collapsed active Write card shows its target
+and increasing received-byte state while retaining sanitized source detail behind expansion. `Ctrl+O` expands the bounded retained head and
+tail without repeating a keyboard hint on every card. A collapsed active
 Edit card shows only its target and state. Expanding it reveals only complete old/new replacement pairs that the partial
 argument parser has already converted into a bounded semantic preview; incomplete fields and raw argument JSON stay
-hidden. Unknown extension tools use a bounded newest-input fallback unless they provide a semantic renderer. Completed
+hidden. Unknown plugin tools use a bounded newest-input fallback unless they provide a semantic renderer. Completed
 answer and reasoning rows become durable.
 
-Completed and extension-provided tool detail follows these viewport limits:
+Completed built-in tools collapse to a single ledger row containing their name,
+target or summary, and state. `Ctrl+O` reveals detail for all tools; the focused
+tool expansion action changes only the selected call. Custom renderers retain
+control of their own content. Default expanded detail follows these viewport limits:
 
-| Tool | Collapsed detail | Expanded detail |
-| --- | --- | --- |
-| Write | First three source rows, with an expansion hint only when more is retained | Bounded source head and tail |
-| Edit | Bounded authoritative diff | Bounded larger diff |
-| Bash | Command plus latest five output rows | Latest retained output, bounded to 120 rows |
-| Read | First ten result rows | First retained result rows, bounded to 120 rows |
-| Grep | First fifteen result rows | First retained result rows, bounded to 120 rows |
-| Find / ls | First twenty result rows | First retained result rows, bounded to 120 rows |
-| Unknown extension tool | Bounded semantic input/output preview | Bounded retained head and tail, at most 120 rows per section |
+| Tool | Expanded detail |
+| --- | --- |
+| Write | Bounded source head and tail |
+| Edit | Bounded authoritative diff |
+| Bash | Command and latest retained output, bounded to 120 rows |
+| Read / grep / find / ls | First retained result rows, bounded to 120 rows |
+| Unknown plugin tool | Bounded retained input/output head and tail, at most 120 rows per section |
 
-Bash command headers occupy at most two visual rows. Omission markers distinguish collapsed detail that can be expanded
-from expanded detail that remains intentionally bounded. A collapsed tool card shows at most one `Ctrl+O` affordance,
-always as its final detail row; the expanded marker never misleadingly suggests `Ctrl+O`.
+Bash command headers occupy at most two visual rows. Omission markers identify
+expanded detail that remains intentionally bounded.
 Model-invoked Bash cards prefix the command with a visual shell prompt, for example `$ npm test`; the `$` is not part of
-the command sent to Bash. Startup help, skill and summary cards, and rendererless extension-message fallbacks use the
+the command sent to Bash. Startup help, skill and summary cards, and rendererless plugin-message fallbacks use the
 same 120-row expanded ceiling. Exceptionally long individual Markdown or output lines are sampled before parsing and
 cell measurement and carry an explicit retained-content marker.
 
@@ -158,9 +221,9 @@ pending visible reasoning block can be printed first. Opaque or redacted reasoni
 already visible, later reasoning is omitted because append-only output cannot insert it earlier. A context-limit attempt
 is discarded; an output-token-limit finish keeps partial text and adds a warning. Resumed history uses canonical order.
 
-## Direct extension UI
+## Direct plugin UI
 
-Event, tool, command, and shortcut callback contexts expose UI as `context.ui`. The activation-time `ExtensionAPI` has no global UI namespace.
+Event, tool, command, and shortcut callback contexts expose UI as `context.ui`. The activation-time `PluginAPI` has no global UI namespace.
 
 Check `context.hasUI` before requiring interaction. Print, JSON, serve, and embedding hosts do not emulate terminal components.
 
@@ -180,7 +243,13 @@ The context supports:
 - a persistent content-safe background plane;
 - `custom` components and overlays.
 
-UI registrations belong to one runtime generation. Failed activation, refresh, host reset, and shutdown remove stale registrations and reveal the nearest surviving owner. An extension-owned timer, watcher, socket, or other resource still needs `ohm.onDispose`.
+UI registrations belong to one runtime generation. Failed activation, refresh, host reset, and shutdown remove stale registrations and reveal the nearest surviving owner. A plugin-owned timer, watcher, socket, or other resource still needs `ohm.onDispose`.
+
+Completed custom transcript renderers are retained while their entry, expansion,
+width, theme, and output padding stay unchanged. Typing or scrolling reuses that
+output. A component whose output depends on external state should request a
+redraw after changing that state; the direct TUI's `requestRender()` and an
+explicit `TuiController.renderNow()` reevaluate custom transcript rendering.
 
 `setStatus(key, text)` contributes compact text to the shared work row in the status dock; values from multiple keys are joined and width-bounded. It is not an independently placed content row. Use `setWidget(key, value, { placement })` for a dedicated block above or below the editor.
 
@@ -205,10 +274,10 @@ There are two main rendering families—trusted raw components and bounded runti
 
 | Contract | Output | Intended host |
 | --- | --- | --- |
-| `Component` | `render(width): string[]`, optional raw `handleInput(data)`, and `invalidate()` | Explicitly trusted direct extensions using `context.ui` |
+| `Component` | `render(width): string[]`, optional raw `handleInput(data)`, and `invalidate()` | Explicitly trusted direct plugins using `context.ui` |
 | `EditorComponent` | `Component` plus text, change, and submit methods | Complete direct-editor replacement |
 | `BackgroundComponent` | `render(width, height): BackgroundCell[]`, `invalidate()`, and optional `dispose()` | The content-safe full-TUI background plane |
-| `RuntimeUiComponent` | A bounded `RuntimeUiBlock` of text spans and theme roles, plus optional decoded-key and pointer handling | Extension routes and interactive-host or `NativeUiHost` integrations |
+| `RuntimeUiComponent` | A bounded `RuntimeUiBlock` of text spans and theme roles, plus optional decoded-key and pointer handling | Plugin routes and interactive-host or `NativeUiHost` integrations |
 | `RuntimeUiComponentFactory<T>` | Receives an abortable host with `requestRender()` and `close(value)` | Bounded custom, overlay, and persistent mounts |
 
 Raw `Component` output may contain trusted terminal styling and terminal images. `RuntimeUiComponent` output is sanitized, clipped to the supplied width, and limited to 128 lines, 256 KiB, and 256 spans per line by default. Prefer the bounded contract unless the package genuinely needs raw terminal rendering.
@@ -224,7 +293,7 @@ All of these names are exported from `ohm/tui`:
 | Input and selection | `Input`, `Editor`, `SelectList`, `SettingsList` |
 | Progress | `Loader`, `CancellableLoader` |
 | Messages | `AssistantMessageComponent`, `UserMessageComponent`, `BranchSummaryMessageComponent`, `CompactionSummaryMessageComponent`, `SkillInvocationMessageComponent`, `CustomMessageComponent` |
-| Extension interaction | `DynamicBorder`, `BorderedLoader`, `CustomEditor`, `ExtensionInputComponent`, `ExtensionEditorComponent`, `ExtensionSelectorComponent` |
+| Plugin interaction | `DynamicBorder`, `BorderedLoader`, `CustomEditor`, `PluginInputComponent`, `PluginEditorComponent`, `PluginSelectorComponent` |
 | Selectors | `ThinkingSelectorComponent`, `ShowImagesSelectorComponent`, `ThemeSelectorComponent`, `UserMessageSelectorComponent`, `ModelSelectorComponent`, `OAuthSelectorComponent`, `SessionSelectorComponent`, `TreeSelectorComponent`, `SettingsSelectorComponent` |
 | Execution and status | `BashExecutionComponent`, `ToolExecutionComponent`, `FooterComponent`, `LoginDialogComponent` |
 
@@ -232,9 +301,9 @@ All of these names are exported from `ohm/tui`:
 
 `Markdown` renders complete dollar or backslash-delimited math by default and preserves unsupported, escaped, incomplete, code-span, currency, and shell-like source. Pass `{ renderLatex: false }` to opt out. `renderLatex()` exposes the bounded renderer directly, while `Marked`, `Token`, and `Tokens` support independently configured parser integrations.
 
-`UserMessageComponent` uses the same full-width gray card, vertical padding, and width-aware Markdown transformation as the shipping transcript. `AssistantMessageComponent` accepts the same optional transformer list and passes the live streaming state and available content width. Display-transform failures leave the source message readable.
+`UserMessageComponent` uses the same quiet role gutter and width-aware Markdown transformation as the shipping transcript. Explicit user foreground and background theme colors remain attached to message text without filling the entire row. `AssistantMessageComponent` accepts the same optional transformer list and passes the live streaming state and available content width. Display-transform failures leave the source message readable.
 
-The CLI frontend selection is separate from main-screen and alternate-screen host ownership. At the lower-level `@ohm/terminal` layer, `TUI` is the main-screen host and `FullscreenTUI` is an alternate-screen host for a single root component. `TuiMainScreen` aliases `TUI`, and `TuiAltScreen` aliases `FullscreenTUI`. `TuiAltScreenOptions` aliases `FullscreenTUIOptions`. `setLayoutRoot()` aliases `setRoot()`. `ViewportTUI` describes that root-replacement capability, and `isViewportTUI()` detects it. Use a stack as that root to divide the terminal into regions. Main-screen hosts can pass an unchanged captured frame to a replacement by combining `captureRenderState()`, `stop({ preserveScreen: true })`, and `restoreRenderState()` before the replacement starts; a width mismatch repaints fully, and alternate-screen cleanup is never bypassed. A `ScrollView` owns one vertical viewport and supports follow-to-end, arbitrary programmatic positioning, pointer-targeted chained or contained overscroll, and hidden, automatic, or persistent draggable scrollbars. Its scrollbar policy and style can change at runtime. Symbol-marked `ViewportPointerTarget` and `ViewportPointerRegionComponent` contracts let custom layouts join the same hit-testing path. `ScrollViewScrollbar` names its scrollbar policy, and `compositeTuiLine()` aliases `compositeTerminalLine()`. These hosts are for standalone trusted terminal applications; an extension running inside ohm must use the host supplied through `context.ui`.
+The CLI frontend selection is separate from main-screen and alternate-screen host ownership. At the lower-level `@ohm/terminal` layer, `TUI` is the main-screen host and `FullscreenTUI` is an alternate-screen host for a single root component. `TuiMainScreen` aliases `TUI`, and `TuiAltScreen` aliases `FullscreenTUI`. `TuiAltScreenOptions` aliases `FullscreenTUIOptions`. `setLayoutRoot()` aliases `setRoot()`. `ViewportTUI` describes that root-replacement capability, and `isViewportTUI()` detects it. Use a stack as that root to divide the terminal into regions. Main-screen hosts can pass an unchanged captured frame to a replacement by combining `captureRenderState()`, `stop({ preserveScreen: true })`, and `restoreRenderState()` before the replacement starts; a width mismatch repaints fully, and alternate-screen cleanup is never bypassed. A `ScrollView` owns one vertical viewport and supports follow-to-end, arbitrary programmatic positioning, pointer-targeted chained or contained overscroll, and hidden, automatic, or persistent draggable scrollbars. Its scrollbar policy and style can change at runtime. Symbol-marked `ViewportPointerTarget` and `ViewportPointerRegionComponent` contracts let custom layouts join the same hit-testing path. `ScrollViewScrollbar` names its scrollbar policy, and `compositeTuiLine()` aliases `compositeTerminalLine()`. These hosts are for standalone trusted terminal applications; a plugin running inside ohm must use the host supplied through `context.ui`.
 
 ### Named routes
 
@@ -247,7 +316,7 @@ titles are terminal-safe single lines, and one generation can register at most
 64 KiB; use it for bounded presentation input, not live application state.
 
 Only one route can occupy the rich viewport. Opening a route closes and
-disposes the previous route, regardless of its owning extension. It replaces
+disposes the previous route, regardless of its owning plugin. It replaces
 the transcript region while the composer, status dock, and ohm chrome remain
 visible. The host prepends `← Title · Esc back` with an ASCII fallback. The
 route component receives each decoded key first; an unhandled Escape or
@@ -272,7 +341,7 @@ catalog inspection stays empty and `close()` is a safe no-op.
 
 ### Persistent slots
 
-Direct extension mounts are keyed and owned by the active extension generation:
+Direct plugin mounts are keyed and owned by the active plugin generation:
 
 ohm renders its own built-in footer; it does not reuse or detect a shell prompt or terminal font. The footer shows
 live workspace, release, session, activity, model, thinking, token, cache, cost, and context values. `setStatus` adds
@@ -282,19 +351,19 @@ compact text to its shared status row, while `setFooter` replaces the complete f
 | --- | --- |
 | `setStatus(key, text)` | Adds or replaces compact keyed text in the shared status-dock work row; passing `undefined` removes it. |
 | `setWidget(key, value)` | Adds or replaces one keyed widget above the editor. Use `{ placement: "belowEditor" }` for the lower slot. Moving a key removes it from its previous slot. A string-array value is rendered as text; a factory receives the live `TUI` and `Theme`. |
-| `setHeader(factory)` | Installs this extension's complete header replacement. |
-| `setFooter(factory)` | Installs this extension's complete footer replacement. The factory also receives `ReadonlyFooterDataProvider`. |
+| `setHeader(factory)` | Installs this plugin's complete header replacement. |
+| `setFooter(factory)` | Installs this plugin's complete footer replacement. The factory also receives `ReadonlyFooterDataProvider`. |
 | `setEditorComponent(factory)` | Pushes a complete `EditorComponent` replacement while preserving the current draft. `getEditorComponent()` reports the globally active factory. |
-| `setBackground(factory)` | Installs this extension's background owner in the rich viewport. |
+| `setBackground(factory)` | Installs this plugin's background owner in the rich viewport. |
 
 Passing `undefined` removes that registration. Replacement, editor, and background slots reveal the newest surviving owner within their family. A raw direct header or footer replacement takes precedence over a bounded `NativeUiHost` replacement while any raw owner remains visible; otherwise the newest surviving bounded owner renders. Separately keyed widgets remain independently mounted.
 
-For renderer-neutral extension content, prefer `context.ui.slots`. Its canonical
+For renderer-neutral plugin content, prefer `context.ui.slots`. Its canonical
 paths are `session.header`, `session.beforeEditor`, `session.afterEditor`, and
 `session.footer`. Each keyed contribution supplies one to four plain-text lines,
 optional finite-integer `order`, and `prepend`, `append`, or header/footer-only
 `replace` placement. Prepend and append groups sort by ascending order, then
-extension load encounter and registration encounter. The greatest replacement
+plugin load encounter and registration encounter. The greatest replacement
 wins; disposal reveals the next surviving replacement. Raw trusted header or
 footer replacement remains the final authority, then a slot replacement, then
 an earlier bounded structured replacement.
@@ -321,7 +390,7 @@ request's exact hit rate. It omits the cache chip when that request lacks the re
 counters remain available in the snapshot.
 
 `data.getGitBranch()` returns the cached branch and schedules its bounded refresh;
-`data.onBranchChange(callback)` subscribes to branch changes. `data.getExtensionStatuses()` returns shared keyed
+`data.onBranchChange(callback)` subscribes to branch changes. `data.getPluginStatuses()` returns shared keyed
 status text, and `data.getAvailableProviderCount()` returns the live provider count. Footer components should use
 `theme.unicode` and `theme.glyphs` for the host's Unicode or ASCII presentation.
 
@@ -345,6 +414,7 @@ Without `overlay`, the component occupies the custom interaction surface. A norm
 | `focus()` | Focuses a visible capturing mount and raises its focus order. |
 | `unfocus()` | Restores the next eligible owner. `unfocus({ target })` selects an explicit active target or `null`. |
 | `isFocused()` | Reports current live focus. |
+| `getBounds()` | Returns the last painted zero-based `{ row, column, width, height }` overlay rectangle, or `undefined` before rendering, while hidden/closed, or after resize until repaint. |
 
 `custom()` resolves with the value passed to `done()`. Generation abort resolves it with `undefined` and disposes the component. A raw custom component that implements `handleInput` consumes the input delivered to it, so it must implement its own confirm and cancel controls. Bounded `RuntimeUiComponent.handleKey()` instead returns whether it handled the decoded key; an unhandled Escape or `Ctrl+C` closes a focused bounded custom component or overlay.
 
@@ -362,7 +432,7 @@ remain render-only for pointer input.
 
 A component must render quickly and deterministically. Perform I/O outside `render()`, invalidate only after state changes, and release component-owned work on disposal. The host owns terminal teardown, resize, focus transfer, and final screen restoration.
 
-`context.ui.setBackground(factory)` installs a generation-owned `BackgroundComponent`; passing `undefined` clears that extension's background and reveals the nearest surviving owner. Its `render(width, height)` method receives the current terminal dimensions and returns zero-based `{ row, column, text }` cells. Each `text` must be exactly one printable, single-column grapheme. The host applies the theme's muted role, rejects terminal controls, and draws a cell only when the transcript, editor, overlays, and terminal images leave that position unoccupied. There is no alpha or background-color blending.
+`context.ui.setBackground(factory)` installs a generation-owned `BackgroundComponent`; passing `undefined` clears that plugin's background and reveals the nearest surviving owner. Its `render(width, height)` method receives the current terminal dimensions and returns zero-based `{ row, column, text }` cells. Each `text` must be exactly one printable, single-column grapheme. The host applies the theme's muted role, rejects terminal controls, and draws a cell only when the transcript, editor, overlays, and terminal images leave that position unoccupied. There is no alpha or background-color blending.
 
 ```js
 context.ui.setBackground(() => ({
@@ -396,13 +466,15 @@ Typing `/` into an empty full-TUI editor opens command completion, `@` at a toke
 
 `context.ui.setEditorComponent(factory)` replaces the complete editor. The factory receives the live TUI, editor theme, and keybinding manager. A replacement must preserve submission, cancellation, paste, resize, focus, accessibility, and host keybindings. Passing `undefined` restores the previous owner.
 
+Editor reads and ownership handoffs use `getExpandedText()` when available, so collapsed paste markers never replace the actual draft. Submission retains the editor's submitted text. Host transcript search/navigation remain available with a custom editor; closing search restores its unchanged draft.
+
 `context.ui.onTerminalInput(handler)` can consume or rewrite terminal input before normal editing. It is a high-authority trusted hook. Do not record secret input, trap exit or cancel behavior, or return unbounded rewrites.
 
 ## Programmatic and native hosts
 
 The interactive host exposes the bounded surface directly: `custom()`, `showOverlay()`, `setPersistentComponent()`, `setAutocompleteProvider()`, and `setEditorMiddleware()`. These methods retain host ownership of decoding, rendering, resize, and teardown.
 
-`createNativeUiHost(controllerBridge, extensionId, generationSignal)` creates the narrower `NativeUiHost` used by interactive host integrations. It is not needed inside a normal extension callback, where `context.ui` is already bound.
+`createNativeUiHost(controllerBridge, extensionId, generationSignal)` creates the narrower `NativeUiHost` used by interactive host integrations. It is not needed inside a normal plugin callback, where `context.ui` is already bound.
 
 | `NativeUiHost` area | Methods |
 | --- | --- |
@@ -421,7 +493,7 @@ Every registration or installation method returns an idempotent disposer. Dispos
 
 `context.ui.theme` is the current resolved theme. `getAllThemes`, `getTheme`, and `setTheme` operate on the built-in `mono` and `signal` themes plus validated discovered custom themes, and custom package themes include their source path. A successful selection in the interactive host updates the live renderer and the user's theme setting; headless hosts cannot persist a terminal selection. Terminal-control data in custom theme values is rejected by the loader.
 
-The explicitly trusted direct TUI is the public TUI runtime backed by the active host renderer. Its dimensions, enhanced-keyboard state, color-scheme notifications and queries, background-color query, redraw count, cursor preference, and clear-on-shrink preference reflect live host state. `start()` and `stop()` pause only the extension generation's components and input listeners; they never take ownership of the process terminal. Forced redraws, input draining, and raw terminal callbacks use the active terminal frontend and expire with the extension generation.
+The explicitly trusted direct TUI is the public TUI runtime backed by the active host renderer. Its dimensions, enhanced-keyboard state, color-scheme notifications and queries, background-color query, redraw count, cursor preference, and clear-on-shrink preference reflect live host state. `start()` and `stop()` pause only the plugin generation's components and input listeners; they never take ownership of the process terminal. Forced redraws, input draining, and raw terminal callbacks use the active terminal frontend and expire with the plugin generation.
 
 ## Tool and session rendering
 
@@ -447,7 +519,7 @@ ohm.registerTool({
 
 Renderers supplement model-visible observations; they do not replace them. Always return useful bounded text or image content from the tool. Missing, expired, or failing renderers fall back to native presentation.
 
-`registerMessageRenderer(customType, renderer)` and `registerEntryRenderer(customType, renderer)` render custom messages and append-only custom session entries. Live appends and resumed history use the same JSONL entries, stable entry IDs, and branch order. `display: false` messages never enter the transcript. The host resolves the active renderer generation on every redraw, including after refresh, theme changes, and terminal resize. Missing, expired, invalid, or throwing renderers fall back to bounded terminal-safe text; renderer-only details and custom-entry data are not copied into that fallback. Transcript presentation retains at most 2,000 entries and 2 MiB.
+`registerMessageRenderer(customType, renderer)` and `registerEntryRenderer(customType, renderer)` render custom messages and append-only custom session entries. Live appends, resumed history and older pages use the same journal entries, stable entry IDs, and branch order. `display: false` messages never enter the transcript. The host resolves the active renderer generation on every redraw, including after refresh, theme changes, and terminal resize. Missing, expired, invalid, or throwing renderers fall back to bounded terminal-safe text; renderer-only details and custom-entry data are not copied into that fallback. The live transcript and disposable history page retain the separate bounds described above.
 
 A renderer must be a pure projection of the stored value and supplied theme so resumed sessions do not depend on lost in-memory state. Test both live append and resume, narrow and wide Unicode layouts, refresh, hidden messages, and a deliberate render exception.
 
@@ -459,9 +531,9 @@ unsupported. Built-in maps are complete and frozen.
 
 | Host | `hasUI` | Available behavior |
 | --- | --- | --- |
-| Rich interactive viewport | `true` | Dialogs, editor state, themes, one active extension route, raw and bounded components, overlays, autocomplete, backgrounds, and tool expansion |
+| Rich interactive viewport | `true` | Dialogs, editor state, themes, one active plugin route, raw and bounded components, overlays, autocomplete, backgrounds, and tool expansion |
 | Automatic line or accessibility fallback | `true` | Searchable numbered prompts for `/settings`, model and session selection, `/atlas`, dialogs, notifications, and core editor interaction; routes, rich overlay filtering, and Atlas folding require the rich viewport; component mounts are rejected or ignored according to the method, and backgrounds are not invoked |
-| RPC | `true` | Bridged select/confirm/input/editor requests plus notifications, status, text widgets, title, whole-draft text replacement, and cursor-relative paste records; client-owned editor state is not readable, and there are no extension routes, terminal components, autocomplete replacement, background, or theme switching |
+| RPC | `true` | Bridged select/confirm/input/editor requests plus notifications, status, text widgets, title, whole-draft text replacement, and cursor-relative paste records; client-owned editor state is not readable, and there are no plugin routes, terminal components, autocomplete replacement, background, or theme switching |
 | Print, JSON, or embedding | `false` | Dialogs return cancellation defaults, editor text is empty, presentation setters are no-ops, and terminal factories are not installed |
 
 The noninteractive fallback theme is colorless, non-Unicode `mono`; its theme catalog is empty, editor replacement is unobservable, and `setTheme()` returns `{ success: false, error: "Interactive UI is unavailable" }`. `select()`, `input()`, and `editor()` resolve without a value, `confirm()` resolves to `false`, `getEditorText()` returns an empty string, and `getToolsExpanded()` returns `false`. Presentation and terminal-component setters do not invoke supplied factories. RPC exposes its own colorless `mono` projection and returns a mode-specific theme-switching error.
@@ -480,4 +552,4 @@ destructive actions require an actual confirmation interaction.
 5. Test narrow/wide resize, Unicode, cancellation, refresh, and a render exception.
 6. Test a safe headless result for every interactive command.
 
-From the repository root, run the source example with `ohm --extension ./packages/ohm/examples/ui-surfaces/extensions/index.mjs`, then exercise its commands in a real PTY. Distributable packages should also test the exact packed and installed artifact.
+From the repository root, run the source example with `ohm --plugin ./packages/ohm/examples/ui-surfaces`, then exercise its commands in a real PTY. Distributable plugins should also test the exact packed and installed artifact.

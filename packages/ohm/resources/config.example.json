@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/devsohm/ohm/v0.1.0/packages/ohm/resources/schemas/config-v1.json",
+  "$schema": "https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/packages/ohm/resources/schemas/config-v1.json",
   "transport": "auto",
   "steeringMode": "one-at-a-time",
   "followUpMode": "one-at-a-time",
@@ -28,11 +28,7 @@
   "quietStartup": false,
   "defaultProjectTrust": "ask",
   "collapseChangelog": false,
-  "packages": [],
-  "extensions": [],
-  "skills": [],
-  "prompts": [],
-  "themes": [],
+  "plugins": [],
   "enableSkillCommands": true,
   "tools": {
     "excluded": []

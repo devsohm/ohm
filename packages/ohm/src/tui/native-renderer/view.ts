@@ -3,12 +3,12 @@ import {
   byteTruncate,
   cellWidth,
   graphemeWidth,
-  padCells,
   splitGraphemes,
   stripAnsi,
   truncateCells,
   truncateToWidth,
   wrapTextWithAnsi,
+  wordWrapLine,
   type Component,
 } from "@ohm/terminal";
 
@@ -25,8 +25,10 @@ import type {
 } from "./types.js";
 import { renderMarkdownMessageLines, type MarkdownRenderedLine } from "../markdown.js";
 import { trustedTerminalHyperlink } from "../terminal-image.js";
-import { type Theme, type ThemeBg, type ThemeColor, type ThemeRole } from "../theme.js";
+import { type Theme, type ThemeColor, type ThemeRole } from "../theme.js";
 import { nativeStyle } from "./style.js";
+import { composerGeometry } from "../composer-layout.js";
+import { turnPrefix } from "../turn-layout.js";
 
 const CURSOR_SENTINEL = "\u2063";
 const CURSOR_CELL = "\ue000";
@@ -66,7 +68,6 @@ interface NativePresentation {
     readonly success: string;
     readonly failure: string;
     readonly unknown: string;
-    readonly user: string;
     readonly connected: string;
     readonly horizontal: string;
     readonly ellipsis: string;
@@ -103,7 +104,6 @@ function nativePresentation(theme: Theme | undefined, unicodeOverride: boolean |
         success: theme.glyphs.success,
         failure: theme.glyphs.failure,
         unknown: theme.glyphs.pending,
-        user: theme.glyphs.user,
         connected: theme.glyphs.success,
         horizontal: theme.glyphs.horizontal,
         ellipsis: "…",
@@ -124,7 +124,6 @@ function nativePresentation(theme: Theme | undefined, unicodeOverride: boolean |
         success: "+",
         failure: "x",
         unknown: "?",
-        user: ">",
         connected: "+",
         horizontal: "-",
         ellipsis: ".",
@@ -143,7 +142,6 @@ function nativePresentation(theme: Theme | undefined, unicodeOverride: boolean |
       success: "✓",
       failure: "×",
       unknown: "?",
-      user: "›",
       connected: "●",
       horizontal: "─",
       ellipsis: "…",
@@ -155,6 +153,22 @@ function nativePresentation(theme: Theme | undefined, unicodeOverride: boolean |
 
 function themed(theme: Theme | undefined, role: ThemeRole, value: string): string {
   return theme === undefined ? value : nativeStyle(theme, role, value);
+}
+
+function entryRenderOptions(
+  props: OhmNativeViewProps,
+  presentation: NativePresentation,
+  toolDetailCache: OhmNativeToolDetailCache,
+): EntryRenderOptions {
+  return {
+    thinkingExpanded: props.thinkingExpanded ?? false,
+    toolDetailsExpanded: props.toolDetailsExpanded ?? false,
+    toolExpandKeyHint: props.toolExpandKeyHint ?? "Ctrl+O",
+    hyperlinks: props.hyperlinks ?? false,
+    codeBlockIndent: props.codeBlockIndent ?? "",
+    presentation,
+    toolDetailCache,
+  };
 }
 
 function joinStyledRuns(runs: readonly string[]): string {
@@ -389,23 +403,17 @@ function optionsEqual(left: EntryRenderOptions, right: EntryRenderOptions): bool
 }
 
 function renderUserMessage(text: string, columns: number, presentation: NativePresentation): string[] {
-  const horizontalPadding = columns >= 3 ? 1 : 0;
-  const contentWidth = Math.max(1, columns - horizontalPadding * 2);
+  const inset = columns >= 3 ? 1 : 0;
+  const contentWidth = Math.max(1, columns - (2 * inset));
   const content = presentation.theme === undefined
     ? wrapComposerText(text === "" ? " " : text, contentWidth).map((line) => line.trimEnd())
     : wrapNativeText(text === "" ? " " : text, contentWidth);
-  if (presentation.theme === undefined || !presentation.theme.ansi) {
-    return [
-      "",
-      ...content.map((line) => `${" ".repeat(horizontalPadding)}${line}`),
-      "",
-    ];
-  }
-  return [
-    " ".repeat(columns),
-    ...content.map((line) => padCells(`${" ".repeat(horizontalPadding)}${line}`, columns)),
-    " ".repeat(columns),
-  ].map((line) => themed(presentation.theme, "userMessage", line));
+  const theme = presentation.theme;
+  const padding = theme === undefined ? " ".repeat(columns) : theme.bg("userMessageBg", " ".repeat(columns));
+  return [padding, ...content.map((line) => {
+    const rendered = `${" ".repeat(inset)}${theme === undefined ? line : theme.fg("userMessageText", line)}${" ".repeat(Math.max(0, columns - inset - cellWidth(line)))}`;
+    return theme === undefined ? rendered : theme.bg("userMessageBg", rendered);
+  }), padding];
 }
 
 function renderThinking(
@@ -748,6 +756,7 @@ function renderToolDetail(
   columns: number,
   expanded: boolean,
   options: EntryRenderOptions,
+  showLabel = true,
 ): BoundedToolDetailRows<string> {
   const indent = columns >= 5 ? 2 : 0;
   const contentIndent = columns >= 7 ? 4 : indent;
@@ -789,8 +798,8 @@ function renderToolDetail(
   }
   return {
     rows: [
-      ...wrapPresentedText(`${presentation.glyphs.branch} ${detail.label}`, Math.max(1, columns - indent), presentation).map((line) =>
-        `${" ".repeat(indent)}${themed(presentation.theme, "muted", line)}`),
+      ...(showLabel ? wrapPresentedText(`${presentation.glyphs.branch} ${detail.label}`, Math.max(1, columns - indent), presentation).map((line) =>
+        `${" ".repeat(indent)}${themed(presentation.theme, "muted", line)}`) : []),
       ...body.map((line) => `${" ".repeat(contentIndent)}${line}`),
     ],
     collapseChanges,
@@ -801,22 +810,6 @@ function toolNameRole(name: string): ThemeRole {
   if (["read", "grep", "find", "ls"].includes(name)) return "info";
   if (["edit", "write", "apply_patch"].includes(name)) return "accent";
   return "title";
-}
-
-function toolBackground(status: OhmTuiToolStatus): ThemeBg | undefined {
-  if (status === "pending" || status === "running") return "toolPendingBg";
-  return status === "completed" ? "toolSuccessBg" : undefined;
-}
-
-function paintToolRows(
-  lines: readonly string[],
-  columns: number,
-  status: OhmTuiToolStatus,
-  theme: Theme | undefined,
-): string[] {
-  const background = toolBackground(status);
-  if (theme?.ansi !== true || background === undefined) return [...lines];
-  return lines.map((line) => theme.bg(background, truncateToWidth(line, columns, "", true)));
 }
 
 function renderTool(entry: OhmTuiToolEntry, columns: number, options: EntryRenderOptions): string[] {
@@ -833,9 +826,11 @@ function renderTool(entry: OhmTuiToolEntry, columns: number, options: EntryRende
     ...(entry.output === undefined || entry.output === "" ? [] : [{ kind: "output" as const, label: "Output", value: entry.output }]),
   ];
   const details = entry.details ?? fallbackDetails;
-  const visibleDetails = selectedExpanded ? details : details.filter((detail) => detail.preview === true);
-  const headline = entry.headline ?? entry.summary;
+  const visibleDetails = selectedExpanded ? details
+    : completed ? [] : details.filter((detail) => detail.preview === true);
   const state = entry.state ?? status.label;
+  const summary = entry.headline ?? entry.summary;
+  const headline = summary === state ? undefined : summary;
   const name = entry.name || "tool";
   const headerText = (color: ThemeColor, role: ThemeRole, value: string): string => {
     if (presentation.theme === undefined) return value;
@@ -849,8 +844,10 @@ function renderTool(entry: OhmTuiToolEntry, columns: number, options: EntryRende
   };
   const iconText = headerText("success", iconRole, status.icon);
   const nameText = headerText("text", nameRole, ` ${name}`);
-  const stateText = headerText("muted", stateRole, `${presentation.separator}${state}`);
-  const fullHeader = `${status.icon} ${name}${presentation.separator}${state}`;
+  const targetWidth = Math.max(0, columns - cellWidth(`${status.icon} ${name}  ${state}`) - 2);
+  const target = headline === undefined || targetWidth < 4 ? "" : truncateCells(headline, targetWidth, presentation.glyphs.ellipsis);
+  const stateText = headerText("muted", stateRole, `  ${state}`);
+  const fullHeader = `${status.icon} ${name}${target === "" ? "" : `  ${target}`}  ${state}`;
   const output: string[] = [];
   if (cellWidth(fullHeader) > columns) {
     const compactName = truncateCells(
@@ -869,28 +866,25 @@ function renderTool(entry: OhmTuiToolEntry, columns: number, options: EntryRende
     output.push(...wrapPresentedText(state, Math.max(1, columns - indent), presentation).map((line) =>
       `${" ".repeat(indent)}${headerText("muted", stateRole, line)}`));
   } else {
-    output.push(joinStyledRuns([iconText, nameText, stateText]));
+    output.push(joinStyledRuns([iconText, nameText, target === "" ? "" : headerText("muted", "muted", `  ${target}`), stateText]));
   }
-  if (headline !== undefined && headline !== "") {
+  if (headline !== undefined && headline !== "" && (target === "" || (selectedExpanded && target !== headline))) {
     const prefix = `${presentation.glyphs.branch} `;
     const lines = wrapPresentedText(`${prefix}${headline}`, Math.max(1, columns - indent), presentation);
     output.push(...lines.map((line) => `${" ".repeat(indent)}${themed(presentation.theme, "muted", line)}`));
   }
-  let expansionChanges = details.some((detail) => detail.preview !== true);
+  let hiddenDetails = visibleDetails.length < details.length;
   for (const detail of visibleDetails) {
-    const rendered = renderToolDetail(detail, columns, selectedExpanded, options);
+    const rendered = renderToolDetail(detail, columns, selectedExpanded, options, selectedExpanded || entry.status !== "error");
+    hiddenDetails ||= rendered.collapseChanges;
     output.push(...rendered.rows);
-    expansionChanges ||= rendered.collapseChanges;
   }
-  const safeHint = options.toolExpandKeyHint?.replaceAll(/\s*\n\s*/gu, " ").trim();
-  if (expansionChanges && safeHint !== undefined && safeHint !== "") {
-    output.push(...wrapPresentedText(
-      `${presentation.glyphs.ellipsis} ${safeHint} ${selectedExpanded ? "collapse" : "details"}`,
-      Math.max(1, columns - indent),
-      presentation,
-    ).map((line) => `${" ".repeat(indent)}${themed(presentation.theme, "muted", line)}`));
+  const expandHint = options.toolExpandKeyHint?.replaceAll(/\s*\n\s*/gu, " ").trim();
+  if (entry.status === "error" && !selectedExpanded && hiddenDetails && expandHint) {
+    output.push(...wrapPresentedText(`${presentation.glyphs.ellipsis} ${expandHint} details`, Math.max(1, columns - indent), presentation)
+      .map((line) => `${" ".repeat(indent)}${themed(presentation.theme, "muted", line)}`));
   }
-  return paintToolRows(output, columns, entry.status, presentation.theme);
+  return output;
 }
 
 const COLLAPSED_RETAINED_NOTICE_ROWS = 20;
@@ -997,8 +991,11 @@ function renderNotice(
 function renderEntry(entry: OhmTuiTranscriptEntry, columns: number, options: EntryRenderOptions): string[] {
   switch (entry.kind) {
     case "user": return renderUserMessage(entry.text, columns, options.presentation);
-    case "assistant": return wrapPresentedText(entry.text, columns, options.presentation).map((line) =>
-      themed(options.presentation.theme, "assistant", line));
+    case "assistant": {
+      const prefix = turnPrefix("assistant", columns, options.presentation.unicode);
+      return wrapPresentedText(entry.text, Math.max(1, columns - cellWidth(prefix)), options.presentation).map((line, index) =>
+        `${themed(options.presentation.theme, "info", index === 0 ? prefix : " ".repeat(prefix.length))}${themed(options.presentation.theme, "assistant", line)}`);
+    }
     case "thinking": return renderThinking(
       entry,
       columns,
@@ -1158,45 +1155,37 @@ class NativeQueueComponent implements Component {
   invalidate(): void {}
 }
 
-function composerText(
-  snapshot: OhmTuiSnapshot,
-  columns: number,
-  markCursor: boolean,
-  presentation: NativePresentation,
-): string {
+function composerText(snapshot: OhmTuiSnapshot): string {
   const value = snapshot.composer.value;
   const placeholder = snapshot.composer.placeholder ?? "";
-  const prefix = columns >= 3 ? `${presentation.glyphs.user} ` : "";
-  if (!markCursor) return `${prefix}${value || placeholder}`;
   if (value === "") {
-    const emptyCursorCell = prefix === "" && placeholder === "" ? CURSOR_CELL : "";
-    return `${prefix}${CURSOR_SENTINEL}${placeholder}${emptyCursorCell}`;
+    const emptyCursorCell = placeholder === "" ? CURSOR_CELL : "";
+    return `${CURSOR_SENTINEL}${placeholder}${emptyCursorCell}`;
   }
   const graphemes = splitGraphemes(value);
   const cursor = Math.max(0, Math.min(graphemes.length, snapshot.composer.cursor ?? graphemes.length));
-  if (cursor === graphemes.length) return `${prefix}${value}${CURSOR_SENTINEL}`;
+  if (cursor === graphemes.length) return `${value}${CURSOR_SENTINEL}`;
   graphemes.splice(cursor, 0, CURSOR_SENTINEL);
-  return `${prefix}${graphemes.join("")}`;
+  return graphemes.join("");
 }
 
 function boundedComposerText(
   snapshot: OhmTuiSnapshot,
   columns: number,
   maximumRows: number | undefined,
-  presentation: NativePresentation,
 ): string {
   const budget = rowBudget(maximumRows, 1);
-  const source = composerText(snapshot, columns, true, presentation);
-  if (budget === undefined) return source;
-  const lines = wrapTextWithAnsi(source, columns);
+  const source = composerText(snapshot);
+  const lines = source.split("\n").flatMap((line) => wordWrapLine(line, columns).map((chunk) => chunk.text));
   let cursorLine = lines.findIndex((line) => line.includes(CURSOR_SENTINEL));
   if (cursorLine < 0) throw new Error("Composer cursor layout failed");
   const marker = lines[cursorLine]!.indexOf(CURSOR_SENTINEL);
   if (cellWidth(lines[cursorLine]!.slice(0, marker)) >= columns) {
     lines[cursorLine] = lines[cursorLine]!.replace(CURSOR_SENTINEL, "");
     cursorLine += 1;
-    lines[cursorLine] = `${CURSOR_SENTINEL}${lines[cursorLine] ?? ""}`;
+    lines.splice(cursorLine, 0, CURSOR_SENTINEL);
   }
+  if (budget === undefined) return lines.join("\n");
   const maximumStart = Math.max(0, lines.length - budget);
   const start = Math.min(maximumStart, Math.max(0, cursorLine - Math.floor((budget - 1) / 2)));
   return lines.slice(start, start + budget).join("\n");
@@ -1256,11 +1245,7 @@ class NativeComposerComponent implements Component {
           },
         }
       : this.#snapshot;
-    const requestedPadding = Number.isFinite(this.#editorPaddingX)
-      ? Math.max(0, Math.min(3, Math.trunc(this.#editorPaddingX ?? 0)))
-      : 0;
-    const padding = Math.min(requestedPadding, Math.floor((columns - 1) / 2));
-    const contentColumns = Math.max(1, columns - padding * 2);
+    const { padding, gutter, width: contentColumns } = composerGeometry(columns, this.#editorPaddingX);
     const label = snapshot.composer.label || "Ask ohm";
     const mode = snapshot.composer.mode === undefined || snapshot.composer.mode === ""
       ? ""
@@ -1270,7 +1255,6 @@ class NativeComposerComponent implements Component {
       snapshot,
       contentColumns,
       this.#composerRows,
-      this.#presentation,
     );
     const promptLines = prompt === undefined
       ? []
@@ -1287,18 +1271,14 @@ class NativeComposerComponent implements Component {
       output.push(...promptLines.map((line) =>
         `${" ".repeat(padding)}${themed(this.#presentation.theme, "title", line)}`));
     }
-    const editorLines = wrapComposerText(editor, contentColumns);
-    output.push(...editorLines.map((line) =>
-      `${" ".repeat(padding)}${themed(
+    const editorLines = editor.split("\n");
+    output.push(...editorLines.map((line, index) =>
+      `${" ".repeat(padding)}${themed(this.#presentation.theme, "accent", gutter === 0 ? "" : index === 0 ? `${this.#presentation.unicode ? "›" : ">"} ` : "  ")}${themed(
         this.#presentation.theme,
         snapshot.composer.value === "" ? "muted" : "editorActive",
         this.#presentation.theme?.ansi === true ? line : line.trimEnd(),
       )}`));
-    output.push(themed(
-      this.#presentation.theme,
-      "border",
-      `${frameRule("", columns, this.#presentation.glyphs.horizontal)}${COMPOSER_END_SENTINEL}`,
-    ));
+    output[output.length - 1] += COMPOSER_END_SENTINEL;
     return output;
   }
 
@@ -1329,7 +1309,7 @@ interface ConnectionPresentation {
 
 function connectionPresentation(connection: OhmTuiStatusSnapshot["connection"]): ConnectionPresentation {
   switch (connection) {
-    case "connected": return { role: "success", label: "connected" };
+    case "connected": return { role: "success", label: "configured" };
     case "connecting": return { role: "warning", label: "connecting" };
     case "offline": return { role: "muted", label: "offline" };
     case "error": return { role: "error", label: "connection error" };
@@ -1353,36 +1333,67 @@ class NativeStatusComponent implements Component {
   render(width: number): string[] {
     const columns = usableWidth(width);
     const connection = connectionPresentation(this.#snapshot.status.connection);
-    const left = [
-      this.#snapshot.status.model,
-      this.#snapshot.status.reasoning,
-      this.#snapshot.status.activity,
-    ].filter((value): value is string => value !== undefined && value !== "");
-    const metrics = [
-      contextLabel(this.#snapshot.telemetry),
-      this.#snapshot.telemetry.inputTokens === undefined ? undefined : `in ${compactNumber(this.#snapshot.telemetry.inputTokens)}`,
-      this.#snapshot.telemetry.outputTokens === undefined ? undefined : `out ${compactNumber(this.#snapshot.telemetry.outputTokens)}`,
-      this.#snapshot.telemetry.cacheReadTokens === undefined || this.#snapshot.telemetry.cacheReadTokens === 0
-        ? undefined
-        : `R${compactNumber(this.#snapshot.telemetry.cacheReadTokens)}`,
-      this.#snapshot.telemetry.cacheWriteTokens === undefined || this.#snapshot.telemetry.cacheWriteTokens === 0
-        ? undefined
-        : `W${compactNumber(this.#snapshot.telemetry.cacheWriteTokens)}`,
-      this.#snapshot.telemetry.cacheHitPercent === undefined
-        ? undefined
-        : `cache hit ${this.#snapshot.telemetry.cacheHitPercent.toFixed(1)}%`,
-      this.#snapshot.telemetry.cost === undefined
-        || (this.#snapshot.telemetry.cost === 0 && this.#snapshot.telemetry.subscription !== true)
-        ? undefined
-        : `$${this.#snapshot.telemetry.cost.toFixed(3)}${this.#snapshot.telemetry.subscription === true ? " (sub)" : ""}`,
-    ].filter((value): value is string => value !== undefined);
     const maximum = lineWidth(columns);
-    const identity = truncateCells([connection.label, ...left].join(this.#presentation.separator), maximum);
+    const separator = themed(this.#presentation.theme, "muted", this.#presentation.separator);
+    const field = (text: string | undefined, role: ThemeRole): string[] =>
+      text === undefined || text === "" ? [] : [themed(this.#presentation.theme, role, text)];
+    const clip = (text: string, width: number): string => this.#presentation.theme?.ansi === true
+      ? truncateToWidth(text, width, this.#presentation.glyphs.ellipsis)
+      : truncateCells(text, width, this.#presentation.glyphs.ellipsis);
+    const reasoning = this.#snapshot.status.reasoning ? `think ${this.#snapshot.status.reasoning}` : undefined;
+    const healthyIdentity = [this.#snapshot.status.model, reasoning, connection.label]
+      .filter((value): value is string => value !== undefined && value !== "").join(this.#presentation.separator);
+    const nonhealthy = this.#snapshot.status.connection !== "connected";
+    const showConnection = nonhealthy
+      || (!this.#snapshot.status.activity?.trim()
+        && (this.#snapshot.status.model === undefined || cellWidth(healthyIdentity) <= maximum));
+    const identityTail = [
+      ...field(nonhealthy ? connection.label : undefined, connection.role),
+      ...field(reasoning, "info"),
+      ...field(this.#snapshot.status.activity, "working"),
+      ...field(!nonhealthy && showConnection ? connection.label : undefined, connection.role),
+    ].join(separator);
+    const modelWidth = Math.max(0, maximum - cellWidth(identityTail)
+      - (identityTail === "" ? 0 : cellWidth(separator)));
+    const model = truncateCells(this.#snapshot.status.model ?? "", modelWidth, this.#presentation.glyphs.ellipsis);
+    const identity = clip([
+      ...field(model, "title"),
+      ...(identityTail === "" ? [] : [identityTail]),
+    ].join(separator), maximum);
+    const telemetry = this.#snapshot.telemetry;
+    const pressure = telemetry.contextTokens === undefined || telemetry.contextWindowTokens === undefined
+      || telemetry.contextWindowTokens <= 0 ? undefined : telemetry.contextTokens / telemetry.contextWindowTokens;
+    const contextRole: ThemeRole = pressure === undefined ? "muted"
+      : pressure >= 0.95 ? "error" : pressure >= 0.8 ? "warning" : "info";
+    const cachePrefix = columns < 60 ? "" : "cache ";
+    const tokenCounts = [
+      ...field(telemetry.inputTokens === undefined ? undefined : `in ${compactNumber(telemetry.inputTokens)}`, "info"),
+      ...field(telemetry.outputTokens === undefined ? undefined : `out ${compactNumber(telemetry.outputTokens)}`, "assistant"),
+    ];
+    const cacheCounts = [
+      ...field(telemetry.cacheReadTokens === undefined || telemetry.cacheReadTokens === 0
+        ? undefined : `${cachePrefix}read ${compactNumber(telemetry.cacheReadTokens)}`, "success"),
+      ...field(telemetry.cacheWriteTokens === undefined || telemetry.cacheWriteTokens === 0
+        ? undefined : `${cachePrefix}write ${compactNumber(telemetry.cacheWriteTokens)}`, "muted"),
+    ];
+    const countSeparator = themed(this.#presentation.theme, "muted", "/");
+    const metrics = [
+      ...field(contextLabel(telemetry), contextRole),
+      ...field(telemetry.cacheHitPercent === undefined
+        ? undefined
+        : `cache hit ${telemetry.cacheHitPercent.toFixed(1)}%`, "success"),
+      ...(columns < 60 && tokenCounts.length > 1 ? [tokenCounts.join(countSeparator)] : tokenCounts),
+      ...(columns < 60 && cacheCounts.length > 1 ? [cacheCounts.join(countSeparator)] : cacheCounts),
+      ...field(telemetry.cost === undefined
+        || (telemetry.cost === 0 && telemetry.subscription !== true)
+        ? undefined
+        : `$${telemetry.cost.toFixed(3)}${telemetry.subscription === true ? " (sub)" : ""}`, "accent"),
+    ];
     const metricLines: string[] = [];
     const metricWidth = Math.max(1, maximum - (columns >= 4 ? 2 : 0));
     let metricLine = "";
     for (const metric of metrics) {
-      const candidate = metricLine === "" ? metric : `${metricLine}${this.#presentation.separator}${metric}`;
+      const candidate = metricLine === "" ? metric : `${metricLine}${separator}${metric}`;
       if (metricLine !== "" && cellWidth(candidate) > metricWidth) {
         metricLines.push(metricLine);
         metricLine = metric;
@@ -1391,8 +1402,8 @@ class NativeStatusComponent implements Component {
       }
     }
     if (metricLine !== "") metricLines.push(metricLine);
-    const metricSummary = metricLines.join(this.#presentation.separator);
-    const combined = [identity, metricSummary].filter(Boolean).join(this.#presentation.separator);
+    const metricSummary = metricLines.join(separator);
+    const combined = [identity, metricSummary].filter(Boolean).join(separator);
     const combinedFits = cellWidth(combined) <= maximum;
     const icon = this.#presentation.theme === undefined && this.#presentation.unicode
       ? this.#presentation.glyphs.connected
@@ -1409,26 +1420,21 @@ class NativeStatusComponent implements Component {
       && iconWidth > 0
       && iconWidth + 1 + cellWidth(selectedIdentity) <= columns;
     const bodyWidth = Math.max(0, columns - (showIcon ? iconWidth + 1 : 0));
-    const body = truncateCells(selectedIdentity, bodyWidth);
+    const body = clip(selectedIdentity, bodyWidth);
     const output = [
       "",
       joinStyledRuns([
         showIcon ? themed(this.#presentation.theme, connection.role, icon) : "",
-        themed(
-          this.#presentation.theme,
-          "muted",
-          `${showIcon ? " " : ""}${body}`,
-        ),
+        `${showIcon ? " " : ""}${body}`,
       ]),
     ];
     if (!combinedFits && metricLines.length > 0) {
       const indent = columns >= 4 ? 2 : 0;
-      output.push(...metricLines.flatMap((line) => wrapPresentedText(
+      output.push(...metricLines.flatMap((line) => wrapTextWithAnsi(
         line,
         Math.max(1, columns - indent),
-        this.#presentation,
       ).map((part) =>
-        `${" ".repeat(indent)}${themed(this.#presentation.theme, "muted", part)}`)));
+        `${" ".repeat(indent)}${part}${this.#presentation.theme?.ansi === true ? "\u001b[0m" : ""}`)));
     }
     return output;
   }
@@ -1477,16 +1483,9 @@ export class OhmNativeView implements Component {
   }
 
   #reconcile(): void {
-    const options: EntryRenderOptions = {
-      thinkingExpanded: this.#props.thinkingExpanded ?? false,
-      toolDetailsExpanded: this.#props.toolDetailsExpanded ?? false,
-      toolExpandKeyHint: this.#props.toolExpandKeyHint ?? "Ctrl+O",
-      hyperlinks: this.#props.hyperlinks ?? false,
-      codeBlockIndent: this.#props.codeBlockIndent ?? "",
-      presentation: this.#presentation,
-      toolDetailCache: this.#toolDetailCache,
-    };
-    this.#transcript.update(this.#snapshot.transcript, options);
+    this.#transcript.update(this.#snapshot.transcript, entryRenderOptions(
+      this.#props, this.#presentation, this.#toolDetailCache,
+    ));
     this.#queue.update(this.#snapshot, this.#props.queueRows, this.#presentation);
     this.#composer.update(this.#props, this.#snapshot, this.#presentation);
     this.#status.update(this.#snapshot, this.#presentation);
@@ -1551,6 +1550,19 @@ export class OhmNativeView implements Component {
   projectTranscriptEntries(): readonly string[][] {
     return this.#transcript.renderBlocks(usableWidth(this.#props.columns));
   }
+}
+
+/** Internal transcript rows without constructing or rendering discarded shell components. */
+export function internalProjectOhmNativeTranscript(
+  props: OhmNativeViewProps,
+  toolDetailCache: OhmNativeToolDetailCache = internalCreateOhmNativeToolDetailCache(),
+): string[] {
+  const snapshot = normalizeOhmTuiSnapshot(props.snapshot);
+  const transcript = new NativeTranscriptComponent();
+  transcript.update(snapshot.transcript, entryRenderOptions(
+    props, nativePresentation(props.theme, props.unicode), toolDetailCache,
+  ));
+  return transcript.render(usableWidth(props.columns));
 }
 
 /** Creates a one-shot native projection for deterministic unit tests. */

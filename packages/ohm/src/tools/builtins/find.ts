@@ -3,9 +3,10 @@ import { realpath } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { Type, type Static } from "typebox";
 
-import { isJsonObject, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { NUMBER_VALUE } from "../../core/value-schemas.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type StandaloneToolDefinition } from "../direct-tool.js";
 import { inputObject, stringInput } from "../input.js";
 import { safeIntegerInput } from "../integer-input.js";
@@ -23,7 +24,7 @@ const findParameters = Type.Object({
   pattern: Type.String({ description: "File-name glob, such as '*.ts', '**/*.json', or 'src/**/*.spec.ts'." }),
   path: Type.Optional(Type.String({ description: "Search directory. The default is the current directory." })),
   limit: Type.Optional(Type.Integer({
-    description: "Largest result count. The default is 1000.",
+    description: `Maximum result count, default ${DEFAULT_LIMIT}. Can be increased; the output byte cap still applies.`,
     minimum: 1,
     maximum: Number.MAX_SAFE_INTEGER,
   })),
@@ -37,20 +38,7 @@ export interface FindOperations {
 }
 export interface FindToolOptions { operations?: FindOperations }
 
-const schema = {
-  type: "object",
-  required: ["pattern"],
-  properties: {
-    pattern: { type: "string", description: "File-name glob, such as '*.ts', '**/*.json', or 'src/**/*.spec.ts'." },
-    path: { type: "string", description: "Search directory. The default is the current directory." },
-    limit: {
-      type: "integer",
-      description: `Largest result count. The default is ${DEFAULT_LIMIT}.`,
-      minimum: 1,
-      maximum: Number.MAX_SAFE_INTEGER,
-    },
-  },
-} satisfies JsonObject;
+const schema = providerInputSchema(findParameters);
 
 function portable(value: string): string {
   return sep === "/" ? value : value.split(sep).join("/");
@@ -91,8 +79,9 @@ export class FindTool implements HarnessTool {
 
   readonly definition = {
     name: "find",
-    description: `Locate files with a glob. Each result is relative to the selected directory. Git ignore rules apply. Output stops at ${DEFAULT_LIMIT} paths or ${TOOL_MAX_BYTES / 1024} KiB.`,
+    description: `Locate files by glob and return paths relative to the search directory. Git ignore rules apply. Defaults to ${DEFAULT_LIMIT} paths; limit can be increased. Output is capped at ${TOOL_MAX_BYTES / 1024} KiB.`,
     promptSnippet: "Locate files with a glob and Git ignore rules",
+    promptGuidelines: ["Use find for file names and grep for file contents. Narrow path or pattern when results are incomplete; increasing limit does not remove the byte cap."],
     inputSchema: schema,
   };
 

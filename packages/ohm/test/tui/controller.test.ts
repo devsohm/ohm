@@ -317,6 +317,84 @@ test("full TUI shows active question prompts without adding a normal composer pr
   controller.close();
 });
 
+test("composer navigation uses the same width as its visible draft", async () => {
+  for (const { columns, padding, scrollbar, length, target } of [
+    { columns: 80, padding: 0, scrollbar: "hidden", length: 76, target: "history" },
+    { columns: 80, padding: 0, scrollbar: "hidden", length: 78, target: 0 },
+    { columns: 80, padding: 0, scrollbar: "hidden", length: 80, target: 2 },
+    { columns: 80, padding: 0, scrollbar: "hidden", length: 90, target: 12 },
+    { columns: 80, padding: 2, scrollbar: "hidden", length: 80, target: 6 },
+    { columns: 80, padding: 0, scrollbar: "always", length: 83, target: 5 },
+  ] as const) {
+    const { input, output, controller } = fullController();
+    output.columns = columns;
+    controller.setOperatorPreferences({ editorPaddingX: padding, fullscreenScrollbar: scrollbar });
+    controller.start();
+    const editor = controller.getEditorImplementation();
+    editor.setText("previous prompt");
+    editor.commitHistory();
+    controller.setEditorText("x".repeat(length));
+    await tick();
+    const terminal = new FocusedVirtualTerminal(output.columns, output.rows);
+    for (const chunk of output.chunks) terminal.write(chunk.toString("utf8"));
+    const before = terminal.cursor();
+    const paintedChunks = output.chunks.length;
+    if (target === "history") {
+      assert.equal(terminal.viewport().filter((row) => row.includes("xxxxx")).length, 1);
+    }
+    input.write("\u001b[A");
+    await tick();
+    if (target === "history") assert.equal(editor.text, "previous prompt");
+    else {
+      assert.equal(editor.cursor, target, JSON.stringify({ padding, scrollbar, length }));
+      for (const chunk of output.chunks.slice(paintedChunks)) terminal.write(chunk.toString("utf8"));
+      assert.equal(terminal.cursor().column, before.column, "Up preserves the painted cursor column");
+      assert.equal(terminal.cursor().row, before.row - 1, "Up moves one painted draft row");
+    }
+    controller.close();
+  }
+});
+
+test("unchanged custom transcript renderers are retained across composer and scroll frames", async () => {
+  const { input, controller } = fullController();
+  controller.start();
+  const generation = new AbortController();
+  let rendered = 0;
+  controller.setSessionRenderers({
+    renderEntry: () => { rendered += 1; return textComponent("retained custom entry"); },
+    renderMessage: () => undefined,
+  }, generation.signal);
+  controller.renderSessionEntry({
+    type: "custom", id: "retained-render", parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z", customType: "test", data: {},
+  });
+  await tick();
+  assert.equal(rendered, 1);
+  controller.setEditorText("draft");
+  await tick();
+  input.write("\u001b[5~");
+  await tick();
+  assert.equal(rendered, 1);
+
+  controller.requestRawRender();
+  await tick();
+  assert.equal(rendered, 2, "extension requestRender explicitly invalidates retained content");
+  controller.renderNow();
+  assert.equal(rendered, 3, "explicit controller redraw reevaluates custom rendering");
+  controller.toggleTool();
+  await tick();
+  assert.equal(rendered, 4, "expansion changes the renderer input");
+  controller.setOperatorPreferences({ outputPad: 0 });
+  await tick();
+  assert.equal(rendered, 5, "padding changes the renderer input");
+  generation.abort();
+  await tick();
+  controller.setEditorText("another draft");
+  await tick();
+  assert.equal(rendered, 5, "an ended generation is never reused");
+  controller.close();
+});
+
 test("full TUI keeps the next question alive behind an action picker", async () => {
   const actions: TuiAction[] = [];
   const { input, controller } = fullController({ actions });
@@ -1448,7 +1526,7 @@ test("PageUp moves within a multiline editor viewport before paging transcript",
   controller.close();
 });
 
-test("visual-row navigation uses the composer text width at exact wrap boundaries", async () => {
+test("visual-row navigation selects history for a single-line draft at narrow widths", async () => {
   const { input, output, controller } = fullController();
   output.resize(12, 10);
   controller.start();
@@ -1460,7 +1538,7 @@ test("visual-row navigation uses the composer text width at exact wrap boundarie
   input.write("abcdefghi");
   input.write("\u001b[A");
   input.write("\r");
-  assert.equal(await answer, "abcdefghi");
+  assert.equal(await answer, "history");
   controller.close();
 });
 
@@ -2188,7 +2266,7 @@ test("extension shortcuts stop at their generation boundary", async () => {
   const { input, controller } = fullController({ actions });
   const generation = new AbortController();
   controller.start();
-  controller.setExtensionShortcuts([{ shortcut: "alt+z", description: "fixture" }], generation.signal);
+  controller.setPluginShortcuts([{ shortcut: "alt+z", description: "fixture" }], generation.signal);
   input.write("\u001bz");
   await tick();
   assert.equal(actions[0]?.type, "extension_shortcut");
@@ -2495,7 +2573,7 @@ test("Ctrl+O width and height rebuilds preserve scrollback identity and the edit
   controller.close();
 });
 
-test("collapsing a large completed read keeps its bounded preview and final answer visible", async () => {
+test("collapsing a large completed read keeps its compact ledger and final answer visible", async () => {
   const { input, output, controller } = fullController();
   output.rows = 16;
   controller.start();
@@ -2572,11 +2650,9 @@ test("collapsing a large completed read keeps its bounded preview and final answ
   flush();
 
   const collapsed = terminal.viewport().join("\n");
-  assert.match(terminalWords(collapsed), /read · done .*large\.txt/u);
+  assert.match(terminalWords(collapsed), /read large\.txt done/u);
   assert.match(collapsed, /large completed final answer/u);
-  assert.match(collapsed, /large-completed-detail-2/u);
-  assert.match(collapsed, /Ctrl\+O/u);
-  assert.doesNotMatch(collapsed, /large-completed-(?:tail|detail-(?:[3-9]|1\d|2\d|30))/u);
+  assert.doesNotMatch(collapsed, /large-completed-(?:head|tail|detail)/u);
   assert.doesNotMatch(terminal.scrollback().join("\n"), /large-completed-(?:head|tail|detail)/u);
   assert.equal(controller.getToolOutputExpanded(), false);
   controller.close();
@@ -3502,9 +3578,8 @@ test("Ctrl+O preserves a scrolled transcript anchor and keeps follow-tail at the
   controller.renderNow();
   flush();
   const collapsedTail = terminal.viewport().join("\n");
-  assert.match(collapsedTail, /toggle-tool-row-3/u);
-  assert.match(collapsedTail, /Ctrl\+O/u);
-  assert.doesNotMatch(collapsedTail, /toggle-tool-row-(?:[4-9]|1\d|2\d|30)/u);
+  assert.match(collapsedTail, /read  anchor\.txt  done/u);
+  assert.doesNotMatch(collapsedTail, /toggle-tool-row/u);
   assert.match(collapsedTail, /toggle-anchor-final-answer/u);
   controller.close();
 });
@@ -3901,7 +3976,7 @@ test("dense live edit arguments do not starve the rich viewport input loop", asy
   const live = terminal.viewport().join("\n");
   assert.match(
     terminalWords(live),
-    /edit · receiving input .*src\/live-edit\.ts · receiving [\d,]+ argument bytes/u,
+    /edit src\/live-edit\.ts · receiving [\d,]+ argument .*receiving input/u,
   );
   assert.equal(occurrences(live, "src/live-edit.ts"), 1);
   assert.doesNotMatch(live, /old-0|new-249/u);
@@ -5948,6 +6023,24 @@ test("line fallback submits slash commands without opening an interactive picker
   controller.close();
 });
 
+test("line questions strip terminal controls and bound prompt output", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  input.isTTY = false;
+  output.isTTY = false;
+  const controller = new TuiController({ input, output, environment: { TERM: "dumb" }, handleSignals: false });
+  try {
+    const answer = controller.question(`Name\u001b]52;c;Y2xpcGJvYXJk\u0007${"x".repeat(16 * 1024)}`);
+    assert.equal(output.text.includes("\u001b"), false);
+    assert.equal(output.text.includes("\u0007"), false);
+    assert.ok(Buffer.byteLength(output.text, "utf8") <= 8 * 1024);
+    input.write("safe\n");
+    assert.equal(await answer, "safe");
+  } finally {
+    controller.close();
+  }
+});
+
 test("accessibility mode never emits cursor-control sequences", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -6792,10 +6885,8 @@ test("rebuilt expanded tool output collapses without entering native scrollback"
   controller.renderNow();
   flush();
   const collapsed = terminal.viewport().join("\n");
-  assert.match(terminalWords(collapsed), /read · done .*rebuilt\.txt/u);
-  assert.match(collapsed, /17 more rows/u);
-  assert.match(collapsed, /Ctrl\+O details/u);
-  assert.doesNotMatch(collapsed, /rebuilt-expanded-body-tail|rebuilt-expanded-detail-18/u);
+  assert.match(terminalWords(collapsed), /read rebuilt\.txt done/u);
+  assert.doesNotMatch(collapsed, /rebuilt-expanded-(?:body|detail)/u);
   assert.doesNotMatch(
     terminal.buffer().join("\n"),
     /rebuilt-expanded-body-tail|rebuilt-expanded-detail-18/u,
@@ -6817,12 +6908,12 @@ test("refresh preserves local notices emitted after the replacement generation s
 test("ordinary refresh preserves a fresh local error", async () => {
   const { output, controller } = fullController();
   controller.start();
-  controller.notify("Extension refresh failed", "error");
+  controller.notify("Plugin refresh failed", "error");
 
   controller.replaceTranscript([], "main", { preserveExisting: true });
   await tick();
 
-  assert.match(terminalWords(output.text), /Extension refresh failed/u);
+  assert.match(terminalWords(output.text), /Plugin refresh failed/u);
   controller.close();
 });
 
@@ -7247,8 +7338,8 @@ test("extension status, widget, and title render through bounded TUI primitives"
   const { output, controller } = fullController();
   controller.start();
   output.chunks.length = 0;
-  controller.setExtensionStatus("probe:ready", "probe ready");
-  controller.setExtensionWidget("probe:panel", "first line\nsecond line");
+  controller.setPluginStatus("probe:ready", "probe ready");
+  controller.setPluginWidget("probe:panel", "first line\nsecond line");
   controller.setTitle("probe\u001b]2;owned");
   await tick();
   assert.match(output.text, /probe ready/u);
@@ -7386,7 +7477,7 @@ test("extension working controls replace and hide the bounded host activity row"
   const shown = fullController();
   shown.controller.start();
   shown.output.chunks.length = 0;
-  shown.controller.setExtensionWorkingMessage("probe", "Indexing workspace\u001b[2J");
+  shown.controller.setPluginWorkingMessage("probe", "Indexing workspace\u001b[2J");
   shown.controller.setContext({ active: true, status: "streaming" });
   await tick();
   assert.match(shown.output.text, /Indexing workspace/u);
@@ -7395,7 +7486,7 @@ test("extension working controls replace and hide the bounded host activity row"
 
   const hidden = fullController();
   hidden.controller.start();
-  hidden.controller.setExtensionWorkingVisible("probe", false);
+  hidden.controller.setPluginWorkingVisible("probe", false);
   hidden.controller.setContext({ active: true, status: "streaming" });
   await tick();
   assert.doesNotMatch(hidden.output.text, /Preparing request/u);
@@ -7567,6 +7658,54 @@ test("the top visible runtime overlay receives local pointer input and captures 
   controller.close();
 });
 
+test("runtime overlay pointer bounds expire before a hidden or resized overlay repaints", async () => {
+  const { input, output, controller } = fullController();
+  output.resize(40, 16);
+  controller.start();
+  const presses: string[] = [];
+  const overlay = controller.showOverlay<void>(() => ({
+    render: () => ({ lines: [{ spans: [{ text: "panel" }] }] }),
+    handlePointer: (event) => {
+      if (event.type === "press") presses.push(`${event.row}:${event.column}`);
+      return { handled: true };
+    },
+  }), { overlayOptions: { anchor: "top-right", width: 8, margin: 1 } });
+  assert.equal(overlay.getBounds?.(), undefined);
+  await tick();
+  const initial = overlay.getBounds?.();
+  assert.ok(initial);
+  const click = (row: number, column: number): void => {
+    input.write(`\u001b[<0;${column + 1};${row + 1}M`);
+    input.write(`\u001b[<0;${column + 1};${row + 1}m`);
+  };
+  click(initial.row, initial.column + 1);
+  assert.deepEqual(presses, ["0:1"]);
+
+  overlay.setHidden(true);
+  overlay.setHidden(false);
+  assert.equal(overlay.getBounds?.(), undefined);
+  click(initial.row, initial.column + 1);
+  assert.deepEqual(presses, ["0:1"]);
+  await tick();
+  assert.deepEqual(overlay.getBounds?.(), initial);
+
+  output.resize(60, 20);
+  assert.equal(overlay.getBounds?.(), undefined);
+  click(initial.row, initial.column + 1);
+  assert.deepEqual(presses, ["0:1"]);
+  await tick();
+  const resized = overlay.getBounds?.();
+  assert.ok(resized);
+  assert.equal(resized.column, initial.column + 20);
+  click(initial.row, initial.column + 1);
+  assert.deepEqual(presses, ["0:1"]);
+  click(resized.row, resized.column + 2);
+  assert.deepEqual(presses, ["0:1", "0:2"]);
+  overlay.close();
+  assert.equal(overlay.getBounds?.(), undefined);
+  controller.close();
+});
+
 test("persistent structured slots receive exact local pointer input and preserve core fallthrough", async () => {
   const { input, output, controller } = fullController();
   output.resize(40, 16);
@@ -7599,7 +7738,7 @@ test("persistent structured slots receive exact local pointer input and preserve
   controller.renderNow();
   flush();
   const visible = terminal.viewport();
-  const markerRow = visible.findIndex((line) => line.includes("earlier extension rows"));
+  const markerRow = visible.findIndex((line) => line.includes("earlier plugin rows"));
   const componentRow = visible.findIndex((line) => line.includes("cropped-1"));
   assert.ok(markerRow >= 0);
   assert.ok(componentRow > markerRow);
@@ -7760,7 +7899,7 @@ test("extension UI routes translate pointer rows below host chrome", async () =>
   controller.start();
   const events: string[] = [];
   const generation = new AbortController();
-  const handle = controller.openExtensionUiRoute("fixture", "details", "Details", () => ({
+  const handle = controller.openPluginUiRoute("fixture", "details", "Details", () => ({
     render: () => ({ lines: [{ spans: [{ text: "route row" }] }] }),
     handlePointer: (event, context) => {
       events.push(`${event.type}:${event.row}:${context.height}`);
@@ -8511,7 +8650,7 @@ test("full TUI owns generation-bound tool renderers and falls back after expiry 
   await tick();
   assert.equal(rendererDisposals, 1);
   assert.equal(v1Calls, callsBeforeAbort);
-  assert.match(terminalWords(output.text), /\bread · queued .*two\.ts\b/u);
+  assert.match(terminalWords(output.text), /\bread two\.ts queued\b/u);
   assert.doesNotMatch(output.text, /Read|◇/u);
   assert.doesNotMatch(output.text, /V1 CALL two\.ts/u);
 
@@ -8526,7 +8665,7 @@ test("full TUI owns generation-bound tool renderers and falls back after expiry 
   output.chunks.length = 0;
   controller.render(envelope({ type: "tool_requested", callId: "three", name: "read", input: { path: "three.ts" }, index: 2 }, 7));
   await tick();
-  assert.match(terminalWords(output.text), /\bread · queued .*three\.ts\b/u);
+  assert.match(terminalWords(output.text), /\bread three\.ts queued\b/u);
   assert.doesNotMatch(output.text, /Read|◇/u);
   assert.deepEqual(rendererFailures, [{ name: "read", slot: "call" }]);
   controller.renderNow();
@@ -8588,9 +8727,11 @@ test("tool renderer slot failures fall back independently and dispose once", asy
   await tick();
 
   const rendered = terminalWords(output.text);
-  assert.match(rendered, /\bprobe · done .*bad-call\.txt CUSTOM RESULT bad-call\b/u);
+  assert.match(rendered, /\bprobe bad-call\.txt done CUSTOM RESULT bad-call\b/u);
   assert.match(rendered, /CUSTOM CALL bad-result/u);
-  assert.match(rendered, /bad-result-native/u);
+  controller.setToolOutputExpanded(true, generation.signal);
+  controller.renderNow();
+  assert.match(terminalWords(output.text), /bad-result-native/u);
   assert.deepEqual(failures, [
     { name: "probe", slot: "call" },
     { name: "probe", slot: "result" },
@@ -9068,7 +9209,7 @@ test("idle native detail prewarming covers the full retained tool history withou
     }, ++sequence));
   }
   await tick();
-  for (let turn = 0; turn < 300; turn += 1) await tick();
+  for (let turn = 0; turn < 600; turn += 1) await tick();
 
   for (const input of [inputs[0]!, inputs.at(-1)!]) {
     assert.equal(internalPrewarmOhmNativeToolDetail({
@@ -9086,7 +9227,7 @@ test("idle native detail prewarming covers the full retained tool history withou
       label: "Output",
       value: output,
       preview: true,
-    }, 80, "", toolDetailCache), false, `visible detail ${index} was evicted while hidden history warmed`);
+    }, 80, "", toolDetailCache), false, `collapsed output ${index} was not warmed for expansion`);
   }
 });
 
@@ -9456,7 +9597,7 @@ test("expanded large edit completion shows its authoritative diff on the differe
   const viewport = terminal.viewport().join("\n");
   assert.match(
     terminalWords(viewport),
-    /edit · done .*large-edit\.ts · 6 edits · 12 to 12 lines · 12,036 to 12,036 bytes/u,
+    /edit src\/large-edit\.ts .*done .*src\/large-edit\.ts · 6 edits · 12 to 12 lines · 12,036 to 12,036 bytes/u,
   );
   assert.match(viewport, /--- a\/src\/large-edit\.ts[\s\S]*\+\+\+ b\/src\/large-edit\.ts/u);
   assert.match(viewport, /-before-completion[\s\S]*\+large-edit-sentinel/u);
@@ -9470,8 +9611,8 @@ test("runtime presentation replacement clears stale UI and blocks input without 
   controller.start();
   const answer = controller.question("you> ");
   input.write("keep draft");
-  controller.setExtensionStatus("old:status", "old status");
-  controller.setExtensionWidget("old:widget", "old widget");
+  controller.setPluginStatus("old:status", "old status");
+  controller.setPluginWidget("old:widget", "old widget");
   controller.setCommandItems([{ id: "old-command", label: "/old-command", value: "/old-command" }]);
   controller.setInputBlocked("Refreshing keybindings, extensions, skills, prompts, themes, and context files...", "refresh");
   input.write(" ignored");
@@ -9481,7 +9622,7 @@ test("runtime presentation replacement clears stale UI and blocks input without 
   assert.doesNotMatch(output.text, /refresh> /u);
   assert.equal(actions.at(-1)?.type, "cancel");
 
-  controller.clearExtensionUi();
+  controller.clearPluginUi();
   controller.setCommandItems([{ id: "new-command", label: "/new-command", value: "/new-command" }]);
   controller.setInputBlocked();
   output.chunks.length = 0;
@@ -9668,13 +9809,13 @@ test("controller exposes pending attachments, recovered queue ownership, and run
   assert.equal(controller.takeSubmittedRecoveredQueueDraft(), true);
   assert.equal(controller.takeSubmittedRecoveredQueueDraft(), false);
 
-  controller.setExtensionHeader("fixture", "header\nvalue");
-  controller.setExtensionFooter("fixture", "footer\nvalue");
+  controller.setPluginHeader("fixture", "header\nvalue");
+  controller.setPluginFooter("fixture", "footer\nvalue");
   await tick();
   assert.match(terminalWords(output.text), /header value/u);
   assert.match(terminalWords(output.text), /footer value/u);
-  controller.setExtensionHeader("fixture");
-  controller.setExtensionFooter("fixture", "");
+  controller.setPluginHeader("fixture");
+  controller.setPluginFooter("fixture", "");
 
   let interrupted = 0;
   controller.setInterruptHandler(() => { interrupted += 1; });
@@ -9696,12 +9837,12 @@ test("extension text chrome is removed when its owning generation ends", async (
   };
   controller.start();
   const generation = new AbortController();
-  controller.setExtensionStatus("fixture:status", "OWNED STATUS", generation.signal);
-  controller.setExtensionWidget("fixture:widget", "OWNED WIDGET", generation.signal);
-  controller.setExtensionHeader("fixture:header", "OWNED HEADER", generation.signal);
-  controller.setExtensionFooter("fixture:footer", "OWNED FOOTER", generation.signal);
-  controller.setExtensionWorkingMessage("fixture", "OWNED WORK", generation.signal);
-  controller.setExtensionWorkingVisible("fixture", true, generation.signal);
+  controller.setPluginStatus("fixture:status", "OWNED STATUS", generation.signal);
+  controller.setPluginWidget("fixture:widget", "OWNED WIDGET", generation.signal);
+  controller.setPluginHeader("fixture:header", "OWNED HEADER", generation.signal);
+  controller.setPluginFooter("fixture:footer", "OWNED FOOTER", generation.signal);
+  controller.setPluginWorkingMessage("fixture", "OWNED WORK", generation.signal);
+  controller.setPluginWorkingVisible("fixture", true, generation.signal);
   controller.setKeyedTitle("fixture:title", "owned title", generation.signal);
   await tick();
   flush();
@@ -9728,12 +9869,12 @@ test("extension text chrome is removed when its owning generation ends", async (
 test("closing the controller releases generation-owned listeners and extension chrome", () => {
   const { controller } = fullController();
   const generation = new AbortController();
-  controller.setExtensionStatus("fixture:status", "status", generation.signal);
-  controller.setExtensionWidget("fixture:widget", "widget", generation.signal);
-  controller.setExtensionHeader("fixture:header", "header", generation.signal);
-  controller.setExtensionFooter("fixture:footer", "footer", generation.signal);
-  controller.setExtensionWorkingMessage("fixture", "work", generation.signal);
-  controller.setExtensionWorkingVisible("fixture", true, generation.signal);
+  controller.setPluginStatus("fixture:status", "status", generation.signal);
+  controller.setPluginWidget("fixture:widget", "widget", generation.signal);
+  controller.setPluginHeader("fixture:header", "header", generation.signal);
+  controller.setPluginFooter("fixture:footer", "footer", generation.signal);
+  controller.setPluginWorkingMessage("fixture", "work", generation.signal);
+  controller.setPluginWorkingVisible("fixture", true, generation.signal);
   controller.setKeyedTitle("fixture:title", "title", generation.signal);
   controller.registerUnsafeTerminalInputHandler(() => undefined, generation.signal);
   controller.onThemeChange(() => undefined, generation.signal);

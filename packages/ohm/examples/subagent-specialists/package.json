@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Optional managed-process specialist orchestration extension for ohm",
+  "description": "Optional managed-process specialist orchestration plugin for ohm",
   "scripts": {
     "test": "node --test --test-isolation=none checks/runtime.test.mjs"
   },
@@ -11,9 +11,9 @@
     "typebox": "1.3.17"
   },
   "peerDependencies": {
-    "ohm": ">=0.1.0 <0.2.0"
+    "ohm": ">=0.2.0 <0.3.0"
   },
   "ohm": {
-    "extensions": ["extensions/index.mjs"]
+    "entrypoints": ["src/index.mjs"]
   }
 }

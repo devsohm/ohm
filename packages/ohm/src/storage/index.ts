@@ -8,7 +8,14 @@ export {
   sessionEntryToContextMessages,
   SessionManager,
 } from "./session-manager.js";
-export type { ActiveBranchUsage, ReadonlySessionManager } from "./session-manager.js";
+export type {
+  ActiveBranchUsage,
+  ReadonlySessionManager,
+  SessionHistoryPage,
+  SessionHistoryPageOptions,
+  SessionHistorySearchOptions,
+  SessionHistorySearchResult,
+} from "./session-manager.js";
 export { exportSessionFile, renderSessionHtml } from "./session-export.js";
 export type {
   RenderSessionHtmlOptions,
@@ -27,7 +34,7 @@ export type {
   CustomEntry,
   CustomMessage,
   CustomMessageEntry,
-  ExtensionSessionProvenance,
+  PluginSessionProvenance,
   FileEntry,
   LabelEntry,
   ModelChangeEntry,

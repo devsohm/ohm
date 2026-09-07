@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   caughtProcessFailure,
-  InteractiveExtensionUiBinder,
+  InteractivePluginUiBinder,
   isStructuredOutputFailure,
   loginInteractively,
   parseInteractiveModelReference,
@@ -18,14 +18,14 @@ import { interactiveRuntimeCommandUi } from "../../src/modes/interactive-runtime
 import { ProviderAuthRegistry } from "../../src/auth/registry.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import {
-  attachExtensionRuntimeHost,
-  createExtensionRuntime,
-  ExtensionRunner,
-} from "../../src/extensions/compat-runtime.js";
+  attachPluginRuntimeHost,
+  createPluginRuntime,
+  PluginRunner,
+} from "../../src/plugins/compat-runtime.js";
 import {
-  RuntimeExtensionHost,
+  RuntimePluginHost,
   type RuntimeDirectUiHandler,
-} from "../../src/extensions/runtime.js";
+} from "../../src/plugins/runtime.js";
 import type { TerminalPrompter } from "../../src/interfaces/terminal.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
 import { createModels, createProvider } from "../../src/providers/models.js";
@@ -138,12 +138,12 @@ test("extension command UI scopes resources and forwards bounded interactions", 
   const record = (name: string, ...values: RuntimeValue[]): void => { calls.push({ name, values }); };
   const terminal = Object.assign(new TuiController({ mode: "accessible", handleSignals: false }), {
     notify: (...values: RuntimeValue[]) => record("notify", ...values),
-    setExtensionStatus: (...values: RuntimeValue[]) => record("status", ...values),
-    setExtensionWidget: (...values: RuntimeValue[]) => record("widget", ...values),
-    setExtensionHeader: (...values: RuntimeValue[]) => record("header", ...values),
-    setExtensionFooter: (...values: RuntimeValue[]) => record("footer", ...values),
-    setExtensionWorkingMessage: (...values: RuntimeValue[]) => record("working-message", ...values),
-    setExtensionWorkingVisible: (...values: RuntimeValue[]) => record("working-visible", ...values),
+    setPluginStatus: (...values: RuntimeValue[]) => record("status", ...values),
+    setPluginWidget: (...values: RuntimeValue[]) => record("widget", ...values),
+    setPluginHeader: (...values: RuntimeValue[]) => record("header", ...values),
+    setPluginFooter: (...values: RuntimeValue[]) => record("footer", ...values),
+    setPluginWorkingMessage: (...values: RuntimeValue[]) => record("working-message", ...values),
+    setPluginWorkingVisible: (...values: RuntimeValue[]) => record("working-visible", ...values),
     setTitle: (...values: RuntimeValue[]) => record("title", ...values),
     setKeyedTitle: (...values: RuntimeValue[]) => record("keyed-title", ...values),
     selectedThemeName: () => theme,
@@ -252,9 +252,9 @@ test("CLI runtime replacement factories forward cancellation into runtime loadin
 
 test("CLI TUI bindings share one extension error projection", async () => {
   const cli = await readFile(new URL("../../src/cli/main.ts", import.meta.url), "utf8");
-  assert.match(cli, /onError: reportExtensionError/u);
-  assert.doesNotMatch(cli, /(?:bindExtensions|updateExtensionBindings)\(\{\s*mode: "tui"/su);
-  assert.equal((cli.match(/interactiveExtensionBindings\(/gu) ?? []).length, 4);
+  assert.match(cli, /onError: reportPluginError/u);
+  assert.doesNotMatch(cli, /(?:bindPlugins|updatePluginBindings)\(\{\s*mode: "tui"/su);
+  assert.equal((cli.match(/interactivePluginBindings\(/gu) ?? []).length, 4);
 });
 
 test("interactive extension UI binds every host surface across startup, refresh, resume, and workspace replacement", () => {
@@ -276,21 +276,21 @@ test("interactive extension UI binds every host surface across startup, refresh,
   });
 
   interface HandlerRegistry {
-    ui?: Parameters<RuntimeExtensionHost["setUiHandler"]>[0];
-    advanced?: Parameters<RuntimeExtensionHost["setAdvancedUiHandler"]>[0];
-    native?: Parameters<RuntimeExtensionHost["setNativeUiHandler"]>[0];
-    unsafe?: Parameters<RuntimeExtensionHost["setUnsafeTerminalHandler"]>[0];
-    interactive?: Parameters<RuntimeExtensionHost["setInteractiveUiHandler"]>[0];
-    direct?: Parameters<RuntimeExtensionHost["setDirectUiHandler"]>[0];
+    ui?: Parameters<RuntimePluginHost["setUiHandler"]>[0];
+    advanced?: Parameters<RuntimePluginHost["setAdvancedUiHandler"]>[0];
+    native?: Parameters<RuntimePluginHost["setNativeUiHandler"]>[0];
+    unsafe?: Parameters<RuntimePluginHost["setUnsafeTerminalHandler"]>[0];
+    interactive?: Parameters<RuntimePluginHost["setInteractiveUiHandler"]>[0];
+    direct?: Parameters<RuntimePluginHost["setDirectUiHandler"]>[0];
   }
-  type FixtureExtensionChange = Parameters<Parameters<RuntimeExtensionHost["onChange"]>[0]>[0];
+  type FixtureExtensionChange = Parameters<Parameters<RuntimePluginHost["onChange"]>[0]>[0];
 
   function fixtureHost(id: string) {
     const lifecycle = new AbortController();
     const handlers: HandlerRegistry = {};
-    const changes = new Set<Parameters<RuntimeExtensionHost["onChange"]>[0]>();
+    const changes = new Set<Parameters<RuntimePluginHost["onChange"]>[0]>();
     let toolBindingRequests = 0;
-    const host = new RuntimeExtensionHost(`/tmp/${id}`);
+    const host = new RuntimePluginHost(`/tmp/${id}`);
     const toolBinding = host.toolRendererBinding();
     const setUiHandler = host.setUiHandler.bind(host);
     const setAdvancedUiHandler = host.setAdvancedUiHandler.bind(host);
@@ -304,11 +304,11 @@ test("interactive extension UI binds every host surface across startup, refresh,
         toolBindingRequests += 1;
         return toolBinding;
       },
-      onChange: (listener: Parameters<RuntimeExtensionHost["onChange"]>[0]) => {
+      onChange: (listener: Parameters<RuntimePluginHost["onChange"]>[0]) => {
         changes.add(listener);
         return () => { changes.delete(listener); };
       },
-      initialUi: (): ReturnType<RuntimeExtensionHost["initialUi"]> => [{
+      initialUi: (): ReturnType<RuntimePluginHost["initialUi"]> => [{
         extensionId: id,
         sourcePath: `/tmp/${id}`,
         ownerKey: `${id}:owner`,
@@ -317,27 +317,27 @@ test("interactive extension UI binds every host surface across startup, refresh,
         key: "phase",
         value: "ready",
       }],
-      setUiHandler: (value: Parameters<RuntimeExtensionHost["setUiHandler"]>[0]) => {
+      setUiHandler: (value: Parameters<RuntimePluginHost["setUiHandler"]>[0]) => {
         handlers.ui = value;
         setUiHandler(value);
       },
-      setAdvancedUiHandler: (value: Parameters<RuntimeExtensionHost["setAdvancedUiHandler"]>[0]) => {
+      setAdvancedUiHandler: (value: Parameters<RuntimePluginHost["setAdvancedUiHandler"]>[0]) => {
         handlers.advanced = value;
         setAdvancedUiHandler(value);
       },
-      setNativeUiHandler: (value: Parameters<RuntimeExtensionHost["setNativeUiHandler"]>[0]) => {
+      setNativeUiHandler: (value: Parameters<RuntimePluginHost["setNativeUiHandler"]>[0]) => {
         handlers.native = value;
         setNativeUiHandler(value);
       },
-      setUnsafeTerminalHandler: (value: Parameters<RuntimeExtensionHost["setUnsafeTerminalHandler"]>[0]) => {
+      setUnsafeTerminalHandler: (value: Parameters<RuntimePluginHost["setUnsafeTerminalHandler"]>[0]) => {
         handlers.unsafe = value;
         setUnsafeTerminalHandler(value);
       },
-      setInteractiveUiHandler: (value: Parameters<RuntimeExtensionHost["setInteractiveUiHandler"]>[0]) => {
+      setInteractiveUiHandler: (value: Parameters<RuntimePluginHost["setInteractiveUiHandler"]>[0]) => {
         handlers.interactive = value;
         setInteractiveUiHandler(value);
       },
-      setDirectUiHandler: (value: Parameters<RuntimeExtensionHost["setDirectUiHandler"]>[0]) => {
+      setDirectUiHandler: (value: Parameters<RuntimePluginHost["setDirectUiHandler"]>[0]) => {
         handlers.direct = value;
         setDirectUiHandler(value);
       },
@@ -360,11 +360,11 @@ test("interactive extension UI binds every host surface across startup, refresh,
     enableSkillCommands = true,
     promptIds: readonly string[] = ["static-prompt"],
   ): InteractiveUiRuntime => {
-    const extensionRuntime = createExtensionRuntime();
-    attachExtensionRuntimeHost(extensionRuntime, fixture.host);
-    const extensionRunner = new ExtensionRunner(
+    const pluginRuntime = createPluginRuntime();
+    attachPluginRuntimeHost(pluginRuntime, fixture.host);
+    const pluginRunner = new PluginRunner(
       [],
-      extensionRuntime,
+      pluginRuntime,
       workspace,
       SessionManager.inMemory(workspace),
       new ModelRegistry(createModels()),
@@ -398,10 +398,10 @@ test("interactive extension UI binds every host surface across startup, refresh,
       },
       session: {
         toolRendererBinding: () => fixture.host.toolRendererBinding(),
-        extensionRunner,
+        pluginRunner,
       },
-      runtimeExtensions: fixture.host,
-      extensions: {
+      runtimePlugins: fixture.host,
+      plugins: {
         bundle: () => ({
           commands: [{ extensionId: fixture.id, name: "static-command" }],
           prompts: promptIds.map((id) => ({ extensionId: fixture.id, id })),
@@ -412,12 +412,12 @@ test("interactive extension UI binds every host surface across startup, refresh,
   };
 
   const startup = fixtureHost("startup");
-  const binder = new InteractiveExtensionUiBinder(terminal);
+  const binder = new InteractivePluginUiBinder(terminal);
   const startupRuntime = runtime(startup, "/workspace-a", false);
   assert.equal(binder.bind(startupRuntime), true);
-  assert.ok(["setToolRenderers", "setSessionRenderers", "setExtensionShortcuts",
+  assert.ok(["setToolRenderers", "setSessionRenderers", "setPluginShortcuts",
     "setCommandCompletionProvider", "setCommandItems",
-    "setCustomThemes", "setExtensionStatus"].every((name) => calls.some((call) => call.name === name)), calls.map((call) => call.name).join(", "));
+    "setCustomThemes", "setPluginStatus"].every((name) => calls.some((call) => call.name === name)), calls.map((call) => call.name).join(", "));
   const latestValue = (name: string, index: number): RuntimeValue =>
     calls.findLast((call) => call.name === name)?.values[index];
   const commandValues = (): string[] => {
@@ -549,12 +549,12 @@ test("interactive extension UI binds every host surface across startup, refresh,
   assert.equal(refreshed.changeListeners(), 1);
   assert.equal(commandValues().includes("/skill:review"), true, "refresh rebinds enabled discovered skills");
   assert.equal(commandValues().includes("/skill:static-prompt"), true, "refresh reveals a skill after its matching prompt is removed");
-  assert.equal(calls.filter((call) => call.name === "clearExtensionUi").length, 3);
+  assert.equal(calls.filter((call) => call.name === "clearPluginUi").length, 3);
   const replacement = fixtureHost("workspace");
   assert.equal(binder.bind(runtime(replacement, "/workspace-b")), true, "cross-workspace resume binds the replacement runtime");
   assert.equal(refreshed.changeListeners(), 0);
   assert.equal(replacement.changeListeners(), 1);
-  assert.equal(calls.filter((call) => call.name === "clearExtensionUi").length, 4);
+  assert.equal(calls.filter((call) => call.name === "clearPluginUi").length, 4);
   binder.close();
   assert.equal(replacement.changeListeners(), 0);
   assert.deepEqual(Object.values(replacement.handlers), Array(6).fill(undefined));

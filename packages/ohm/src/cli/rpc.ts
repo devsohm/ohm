@@ -7,9 +7,9 @@ import { Value } from "typebox/value";
 
 import { getAgentDir } from "../config/paths.js";
 import { isJsonValue } from "../core/json.js";
-import type { RuntimeInlineExtension } from "../extensions/runtime.js";
-import { RpcExtensionUiBridge } from "../interfaces/rpc-extension-ui.js";
-import { boundedRpcErrorMessage, createRpcExtensionErrorEvent } from "../interfaces/rpc-error.js";
+import type { RuntimeInlinePlugin } from "../plugins/runtime.js";
+import { RpcPluginUiBridge } from "../interfaces/rpc-plugin-ui.js";
+import { boundedRpcErrorMessage, createRpcPluginErrorEvent } from "../interfaces/rpc-error.js";
 import { RpcRuntimeDispatcher } from "../interfaces/rpc-runtime.js";
 import {
   decodeRpcLines,
@@ -31,7 +31,7 @@ import { createAgentSessionRuntimeCommandActions } from "../service/runtime-comm
 import { SessionManager } from "../storage/session-manager.js";
 import type { ToolAuthorizationHandler } from "../tools/approval.js";
 import type { Args } from "./args.js";
-import { applyRuntimeExtensionFlags } from "./extension-flags.js";
+import { applyRuntimePluginFlags, pluginResourceOptions } from "./plugin-flags.js";
 import { loadRuntime, type LoadedRuntime } from "./runtime.js";
 import type { ProjectTrustResolver } from "./project-trust.js";
 import { selectStartupSession } from "./session-picker.js";
@@ -60,7 +60,7 @@ process.once("disconnect", () => {
 const MAX_CONCURRENT_RPC_HANDLERS = 64;
 const MAX_PENDING_RPC_COMMANDS = 1_024;
 const PRIORITY_RPC_COMMANDS = new Set(["abort", "abort_bash", "abort_retry"]);
-const RPC_EXTENSION_UI_RESPONSE_VALUE = Type.Union([
+const RPC_PLUGIN_UI_RESPONSE_VALUE = Type.Union([
   Type.Object({ type: Type.Literal("extension_ui_response"), id: Type.String(), value: Type.String() }, { additionalProperties: true }),
   Type.Object({ type: Type.Literal("extension_ui_response"), id: Type.String(), confirmed: Type.Boolean() }, { additionalProperties: true }),
   Type.Object({ type: Type.Literal("extension_ui_response"), id: Type.String(), cancelled: Type.Literal(true) }, { additionalProperties: true }),
@@ -162,7 +162,7 @@ async function settleBounded(promises: readonly Promise<unknown>[], timeoutMs: n
 interface RpcCommandLoopOptions {
   lines: AsyncIterable<string>;
   writer: Pick<RpcWriter, "send">;
-  bridge: Pick<RpcExtensionUiBridge, "handle">;
+  bridge: Pick<RpcPluginUiBridge, "handle">;
   dispatcher: Pick<RpcRuntimeDispatcher, "dispatch">;
 }
 
@@ -252,7 +252,7 @@ export async function runRpcCommandLoop(options: RpcCommandLoopOptions): Promise
         continue;
       }
       if (parsed.type === "extension_ui_response") {
-        if (Value.Check(RPC_EXTENSION_UI_RESPONSE_VALUE, parsed)) {
+        if (Value.Check(RPC_PLUGIN_UI_RESPONSE_VALUE, parsed)) {
           options.bridge.handle(parsed);
         } else {
           await options.writer.send(errorResponse(
@@ -334,7 +334,7 @@ async function createRuntimeOwner(
   args: Args,
   manager: SessionManager,
   sessionDirectory: string | undefined,
-  extensionFactories: readonly RuntimeInlineExtension[] = [],
+  pluginFactories: readonly RuntimeInlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<AgentSessionRuntime<RpcLoadedServices>> {
@@ -352,15 +352,12 @@ async function createRuntimeOwner(
       sessionManager,
       ...optionalProperties(modelScope === undefined ? undefined : { modelScope }),
       ...optionalProperties(sessionDirectory === undefined ? undefined : { sessionDirectory }),
-      extensions: args.noExtensions !== true,
-      extensionPaths: args.extensions ?? [],
-      extensionFactories,
+      ...pluginResourceOptions(args),
+      pluginPaths: args.pluginPaths,
+      pluginFactories,
       ...optionalProperties(projectTrustResolver === undefined ? undefined : { projectTrustResolver }),
-      skills: args.noSkills !== true,
       skillPaths: args.skills ?? [],
-      promptTemplates: args.noPromptTemplates !== true,
       promptTemplatePaths: args.promptTemplates ?? [],
-      themes: args.noThemes !== true,
       themePaths: args.themes ?? [],
       ...optionalProperties(args.apiKey === undefined ? undefined : { apiKey: args.apiKey, apiKeyProvider: args.provider ?? "openai" }),
       ...optionalProperties(projectTrustResolver === undefined && args.projectTrustOverride !== undefined ? { projectTrusted: args.projectTrustOverride } : undefined),
@@ -368,18 +365,18 @@ async function createRuntimeOwner(
       ...optionalProperties(signal === undefined ? undefined : { signal }),
       ...optionalProperties(args.systemPrompt === undefined ? undefined : { systemPrompt: args.systemPrompt }),
       ...optionalProperties(args.appendSystemPrompt === undefined ? undefined : { appendSystemPrompt: args.appendSystemPrompt }),
-      extensionRuntime: true,
+      pluginRuntime: true,
       offline: args.offline === true || /^(?:1|true|yes)$/iu.test(process.env.OHM_OFFLINE ?? ""),
       ...optionalProperties(toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler }),
     });
     try {
-      applyRuntimeExtensionFlags(args, runtime.runtimeExtensions);
+      applyRuntimePluginFlags(args, runtime.runtimePlugins);
       const argumentErrors = args.diagnostics.filter((entry) => entry.type === "error");
       if (argumentErrors.length > 0) throw new Error(argumentErrors.map((entry) => entry.message).join("\n"));
       return {
         session: runtime.session,
-        extensionsResult: runtime.resourceLoader.getExtensions(),
-        diagnostics: runtime.runtimeExtensions.diagnostics().map((entry) => ({
+        pluginsResult: runtime.resourceLoader.getPlugins(),
+        diagnostics: runtime.runtimePlugins.diagnostics().map((entry) => ({
           type: "warning" as const,
           message: entry.message,
         })),
@@ -403,14 +400,14 @@ async function createRuntimeOwner(
     sessionManager: manager,
   }, {
     async beforeSwitch(event, signal) {
-      const host = owner.services.runtime.runtimeExtensions;
+      const host = owner.services.runtime.runtimePlugins;
       return await host.reduceSessionBeforeSwitch({
         reason: event.reason,
         ...optionalProperties(event.targetSessionFile === undefined ? undefined : { targetSessionFile: event.targetSessionFile }),
       }, signal);
     },
     async beforeFork(event, signal) {
-      return await owner.services.runtime.runtimeExtensions.reduceSessionBeforeFork({
+      return await owner.services.runtime.runtimePlugins.reduceSessionBeforeFork({
         sourceThreadId: owner.services.runtime.session.sessionId,
         sourceEventId: event.entryId,
         position: event.position,
@@ -418,7 +415,7 @@ async function createRuntimeOwner(
     },
     async shutdown(event) {
       const runtime = owner.services.runtime;
-      await runtime.runtimeExtensions.dispatch("session_shutdown", {
+      await runtime.runtimePlugins.dispatch("session_shutdown", {
         reason: event.reason,
         ...optionalProperties(event.targetSessionFile === undefined ? undefined : { targetSessionFile: event.targetSessionFile }),
       });
@@ -428,7 +425,7 @@ async function createRuntimeOwner(
 }
 
 export interface RpcServerOptions {
-  extensionFactories?: readonly RuntimeInlineExtension[];
+  pluginFactories?: readonly RuntimeInlinePlugin[];
   projectTrustResolver?: ProjectTrustResolver;
   /** Optional caller-owned gate for model-requested tool effects in every RPC session. */
   toolAuthorizationHandler?: ToolAuthorizationHandler;
@@ -475,7 +472,7 @@ async function runRpcServerOperation(
     args,
     selected.sessionManager,
     sessionDirectory,
-    options.extensionFactories,
+    options.pluginFactories,
     options.projectTrustResolver,
     options.toolAuthorizationHandler,
   );
@@ -495,7 +492,7 @@ async function runRpcServerOperation(
     const configuredTools = runtime.settings.getToolSettings();
     const selection = selectedTools(
       args,
-      runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+      runtime.runtimePlugins.tools().map((tool) => tool.definition.name),
       {
         ...optionalProperties(configuredTools.enabled === undefined ? undefined : { allowedTools: configuredTools.enabled }),
         ...optionalProperties(configuredTools.excluded === undefined ? undefined : { excludedTools: configuredTools.excluded }),
@@ -507,7 +504,7 @@ async function runRpcServerOperation(
     ));
     if (configuredModelSelectionPending === session) configuredModelSelectionPending = undefined;
   };
-  const bridge = new RpcExtensionUiBridge({ async emit(request) { await writer.send(request); } });
+  const bridge = new RpcPluginUiBridge({ async emit(request) { await writer.send(request); } });
   const dispatcher = new RpcRuntimeDispatcher({
     runtime: owner,
     async output(value) { await writer.send(value); },
@@ -515,7 +512,7 @@ async function runRpcServerOperation(
       const configuredTools = owner.services.runtime.settings.getToolSettings();
       const selection = selectedTools(
         args,
-        owner.services.runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        owner.services.runtime.runtimePlugins.tools().map((tool) => tool.definition.name),
         {
           ...optionalProperties(configuredTools.enabled === undefined ? undefined : { allowedTools: configuredTools.enabled }),
           ...optionalProperties(configuredTools.excluded === undefined ? undefined : { excludedTools: configuredTools.excluded }),
@@ -527,22 +524,22 @@ async function runRpcServerOperation(
       };
     },
     async bindSession(session) {
-      owner.services.runtime.runtimeExtensions.setDirectUiHandler((extensionId, signal, ownerKey) =>
+      owner.services.runtime.runtimePlugins.setDirectUiHandler((extensionId, signal, ownerKey) =>
         bridge.context(extensionId, ownerKey, signal));
-      owner.services.runtime.setExtensionShutdownHandler(async () => {
+      owner.services.runtime.setPluginShutdownHandler(async () => {
         closing = true;
         input.close();
       });
-      await session.bindExtensions({
+      await session.bindPlugins({
         mode: "rpc",
         uiContext: bridge.context(
           "runtime",
           "runtime",
-          owner.services.runtime.runtimeExtensions.lifecycleSignal(),
+          owner.services.runtime.runtimePlugins.lifecycleSignal(),
         ),
         commandContextActions: createAgentSessionRuntimeCommandActions(owner, session),
         onError(error) {
-          void writer.send(createRpcExtensionErrorEvent(error)).catch(() => undefined);
+          void writer.send(createRpcPluginErrorEvent(error)).catch(() => undefined);
         },
       });
       await applyConfiguredSession(session);

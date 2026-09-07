@@ -6,7 +6,7 @@ import {
   getAuthPath,
   getCrashDir,
   getDiagnosticsDir,
-  getExtensionsDir,
+  getPluginsDir,
   getLogsDir,
   getModelsPath,
   getPromptsDir,
@@ -24,7 +24,7 @@ export interface AgentPaths {
   sessions: string;
   modelCatalog: string;
   userSkills: string;
-  userExtensions: string;
+  userPlugins: string;
   userPrompts: string;
   userThemes: string;
   logs: string;
@@ -45,7 +45,7 @@ export function agentPaths(
     sessions: directory === undefined ? getSessionsDir(environment) : join(agentDirectory, "sessions"),
     modelCatalog: directory === undefined ? getModelsPath(environment) : join(agentDirectory, "models.json"),
     userSkills: directory === undefined ? getSkillsDir(environment) : join(agentDirectory, "skills"),
-    userExtensions: directory === undefined ? getExtensionsDir(environment) : join(agentDirectory, "extensions"),
+    userPlugins: directory === undefined ? getPluginsDir(environment) : join(agentDirectory, "plugins"),
     userPrompts: directory === undefined ? getPromptsDir(environment) : join(agentDirectory, "prompts"),
     userThemes: directory === undefined ? getCustomThemesDir(environment) : join(agentDirectory, "themes"),
     logs: directory === undefined ? getLogsDir(environment) : join(agentDirectory, "logs"),

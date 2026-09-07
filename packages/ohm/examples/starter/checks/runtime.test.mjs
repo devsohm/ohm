@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import activate from "../extensions/index.ts";
+import activate from "../src/index.ts";
 
 function registrations() {
   let command;

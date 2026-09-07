@@ -29,6 +29,7 @@ import type {
   StreamFn,
 } from "./contracts.js";
 import { createAssistantMessageEventStream, errorAssistantMessage, lazyStream } from "./streaming.js";
+import { resolveProviderAuth } from "./provider-auth.js";
 
 function completionOf(stream: AssistantMessageEventStream): Promise<AssistantMessage> {
   return stream.result();
@@ -336,30 +337,7 @@ class ModelCollection implements MutableModels {
   }
 
   async #resolveAuth(provider: Provider): Promise<AuthResult | undefined> {
-    let credential = await this.#credentials.read(provider.id);
-    if (credential?.type === "oauth" && provider.auth.oauth) {
-      const now = this.#authContext.now?.() ?? Date.now();
-      if (credential.expires <= now) {
-        credential = await this.#credentials.modify(provider.id, async (stored) => {
-          if (stored?.type !== "oauth") return stored;
-          const currentNow = this.#authContext.now?.() ?? Date.now();
-          if (stored.expires > currentNow) return stored;
-          return { ...await provider.auth.oauth!.refresh(stored), type: "oauth" };
-        });
-      }
-      if (credential?.type === "oauth") {
-        return {
-          auth: await provider.auth.oauth.toAuth(credential),
-          source: "stored OAuth credential",
-        };
-      }
-    }
-    if (provider.auth.apiKey) {
-      const input: ApiKeyResolutionInput = { ctx: this.#context(provider.id) };
-      if (credential?.type === "api_key") input.credential = credential;
-      return provider.auth.apiKey.resolve(input);
-    }
-    return undefined;
+    return resolveProviderAuth(provider, this.#authContext, this.#credentials);
   }
 }
 

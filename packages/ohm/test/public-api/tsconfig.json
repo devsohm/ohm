@@ -11,17 +11,20 @@
     "authoring-consumer.mts",
     "consumer.mts",
     "embedding-consumer.mts",
-    "extension-config-consumer.mts",
-    "extension-contract-consumer.mts",
-    "extension-model-consumer.mts",
+    "plugin-config-consumer.mts",
+    "plugin-contract-consumer.mts",
+    "plugin-model-consumer.mts",
     "facets-consumer.mts",
     "api-alias-consumer.mts",
     "layer-consumer.mts",
     "modes-consumer.mts",
     "managed-process-consumer.mts",
     "model-registry-consumer.mts",
+    "plugin-consumer.mts",
     "sdk-consumer.mts",
-    "testing-consumer.mts"
+    "testing-consumer.mts",
+    "tool-renderer-input-consumer.mts",
+    "harness-composition-consumer.mts"
   ],
   "exclude": []
 }

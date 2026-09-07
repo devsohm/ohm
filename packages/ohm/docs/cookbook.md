@@ -1,7 +1,7 @@
 # Runtime cookbook
 
 These recipes use shipped interfaces. The active ohm process keeps authority
-over sessions, tools, providers, and extensions.
+over sessions, tools, providers, and plugins.
 
 ## Run one isolated, unsaved review
 
@@ -48,11 +48,11 @@ share it.
 ## Inspect resource loading without executing an agent run
 
 ```sh
-ohm extensions doctor
+ohm plugins doctor
 ohm diagnostics ./support.json
 ```
 
-The first command reports the active extension catalog. The diagnostic bundle
+The first command reports the active plugin catalog. The diagnostic bundle
 checks static resources and records path ownership and local timing. It does
 not read credential or session contents.
 
@@ -71,29 +71,36 @@ runtime keeps the first eligible root in its configured order. A collision
 diagnostic reports both paths. Only the skill name and description enter the
 base prompt. Full instructions load on invocation.
 
-## Build and verify an extension package
+## Build and verify a plugin
 
-Use `/skill:ohm-dev <request>` in a disposable workspace. The single bundled
-development skill routes extension work to the installed contract, directs the
-agent to a fresh directory, and describes the managed install, `/refresh`, and
-removal path. For a manual baseline from an ohm source checkout, copy the
-bundled starter to an explicit workspace outside that checkout:
+Create a private copy of the version-matched starter in a new directory:
 
 ```sh
-cp -R packages/ohm/examples/starter /absolute/path/to/workspace/my-extension
-cd /absolute/path/to/workspace
-ohm install ./my-extension
-ohm extensions doctor
-ohm list --json
-ohm remove ./my-extension
+ohm plugins init ./my-plugin
+cd my-plugin
 ```
 
-From an installed runtime, use the version-matched starter linked by the bundled `ohm-dev` skill as a read-only reference and create the package in the active workspace; do not assume a `packages/ohm` directory exists there.
+Read the copied README and install its dependencies using the documented release
+archives, then run the same workflow from a checkout or an installed host:
+
+```sh
+ohm plugins test .
+ohm plugins verify .
+ohm plugins preview .
+ohm plugins install .
+ohm plugins doctor
+ohm plugins list --json
+ohm plugins remove .
+```
+
+In the preview, use `/refresh` after editing and `/exit` to return to the shell.
+For guided authoring, `/skill:ohm-dev <request>` routes to the installed contract
+and examples. Bundled examples remain read-only references.
 
 Runtime tools, commands, providers, UI contributions, prompts, custom themes,
-and skills run inside the active harness. Agent-style subprocess extensions use
+and skills run inside the active harness. Plugins that own subprocesses use
 bounded `ohm.exec` for one-shot work or `ohm.processes` for asynchronous
-workers and framed pipes. The extension owns its arguments, protocol,
+workers and framed pipes. The plugin owns its arguments, protocol,
 task-level concurrency, recursion policy, validation, and result presentation.
 
 ## Persist workspace memory and task state
@@ -101,18 +108,18 @@ task-level concurrency, recursion policy, validation, and result presentation.
 Install [`state-and-policy`](../examples/state-and-policy/README.md) for an executable baseline:
 
 ```sh
-ohm install ./packages/ohm/examples/state-and-policy
+ohm plugins install ./packages/ohm/examples/state-and-policy
 ```
 
 It uses the current callback's `context.paths.workspaceData`, a fixed schema,
 bounded records, user-only file permissions, and sequential tools.
 `paths.userData` is the equivalent root for state that should follow the
-extension across workspaces.
+plugin across workspaces.
 
 Do not derive either root yourself. Do not store provider credentials there.
 Remembered text becomes visible to the model when recalled.
 
-Use `ohm.config` when the extension needs one bounded, atomic JSON settings
+Use `ohm.config` when the plugin needs one bounded, atomic JSON settings
 document per user or workspace scope. Its compare-and-swap revision prevents
 silent writer races. Use the data paths for larger or multi-file domain state.
 
@@ -123,7 +130,7 @@ JSON, and keep durable state separate from transient progress.
 
 ## Bridge an MCP server
 
-MCP support is extension-owned. Core provides no MCP registry, transport,
+MCP support is plugin-owned. Core provides no MCP registry, transport,
 configuration file, authentication flow, or server lifecycle. A trusted bridge
 should:
 
@@ -137,14 +144,14 @@ should:
 
 Use `ohm.exec` for a one-request worker. A long-lived standard-input/output
 server should use `ohm.processes` with pipe mode. The host bounds buffers,
-applies backpressure, and owns process-tree cleanup; the extension still frames
+applies backpressure, and owns process-tree cleanup; the plugin still frames
 and validates every message. Provider steps see registered bridge tools through
 the same ordinary tool registry and authorization path used in TUI, print,
 JSON, RPC, serve, and SDK modes.
 
 The portable package loader currently supports skills only. It ignores a root
 `mcp.json`; that file does not start a process or register tools. Start from the
-tested [`mcp-stdio` example extension](../examples/mcp-stdio/README.md) when a
+tested [`mcp-stdio` example plugin](../examples/mcp-stdio/README.md) when a
 package needs a complete MCP tool bridge.
 
 ## Add web fetch or search
@@ -171,7 +178,7 @@ action schema, such as navigate, click a selected locator, fill, capture text,
 and screenshot.
 
 Do not expose arbitrary JavaScript evaluation, browser profile selection,
-extension loading, file downloads, or unrestricted local URLs. Limit page text
+plugin loading, file downloads, or unrestricted local URLs. Limit page text
 and images. Forward cancellation. Close browser contexts after every outcome.
 Report only sanitized status through `onUpdate`.
 
@@ -181,7 +188,7 @@ and out of example packages.
 
 ## Add LSP diagnostics
 
-An LSP extension should start one fixed `ohm.processes` language-server worker
+An LSP plugin should start one fixed `ohm.processes` language-server worker
 for each canonical workspace. It should implement bounded `Content-Length`
 framing and normalize document URIs through the workspace boundary.
 
@@ -200,7 +207,7 @@ the workspace. [`input-guard`](../examples/input-guard/README.md) shows input
 transformation and shell-call blocking.
 
 These hooks intercept policy; they do not create isolation. Another active
-tool or trusted extension may keep broader authority. For a hard boundary,
+tool or trusted plugin may keep broader authority. For a hard boundary,
 limit the active tools and use an external execution backend.
 
 ## Execute tools remotely over SSH
@@ -230,10 +237,10 @@ design. Replace it only with a reviewed flow.
 ## Stream managed-process status
 
 `ohm.exec` buffers one bounded request. For live output from a worker or
-extension-owned delegated agent, use `ohm.processes` pipe mode and decode its
+plugin-owned delegated agent, use `ohm.processes` pipe mode and decode its
 framed stream incrementally. Combine updates, enforce byte and event limits,
 forward the callback signal, and still return one complete final tool result.
-The extension owns delegated-agent admission, orchestration, bounds, event
+The plugin owns delegated-agent admission, orchestration, bounds, event
 parsing, result composition, and presentation; managed-process cancellation and
 process-tree cleanup remain generic host services.
 
@@ -244,10 +251,10 @@ stream, documented in [RPC](rpc.md).
 
 ```sh
 npm run benchmark:offline --workspace ohm
-npm run benchmark:extensions --workspace ohm
+npm run benchmark:plugins --workspace ohm
 ```
 
 Both commands are credential-free. The first measures core harness plumbing.
-The second validates managed extension candidates through install, discovery,
+The second validates managed plugin candidates through install, discovery,
 activation, refresh, and removal. It reports verifier pass@1 and pass@3.
 Neither benchmark measures model intelligence.

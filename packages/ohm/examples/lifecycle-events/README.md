@@ -4,7 +4,7 @@ This example observes agent, turn, message, and tool-execution events. The
 handlers collect operational counts without changing messages or results.
 
 ```text
-ohm install ./packages/ohm/examples/lifecycle-events
+ohm plugins install ./packages/ohm/examples/lifecycle-events
 /example-lifecycle-status
 ```
 

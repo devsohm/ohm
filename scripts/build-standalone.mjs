@@ -142,7 +142,7 @@ async function runSmoke(runtime, cli, launcher, cwd, environment, version) {
   assert.match(helpResult.stdout, /^ohm\b/mu);
   assert.equal(helpResult.stderr, "");
   const rpcResult = await runBoundedCommand(runtime, [cli,
-    "--mode", "rpc", "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {
+    "--mode", "rpc", "--no-session", "--offline", "--no-plugin-code", "--no-skills", "--no-prompt-templates", "--no-themes"], {
     cwd, env: environment, timeoutMs: 30_000, label: "standalone offline RPC startup check",
   });
   assert.equal(rpcResult.stdout, "");

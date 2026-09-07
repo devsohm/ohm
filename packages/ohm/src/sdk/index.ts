@@ -6,7 +6,7 @@ import type { Api, Model } from "@ohm/models";
 import { getAgentDir } from "../config/paths.js";
 import {
 	DefaultResourceLoader,
-	type ResourceExtensionsResult,
+	type ResourcePluginsResult,
 	type ResourceLoader,
 } from "../core/resource-loader.js";
 import {
@@ -15,20 +15,20 @@ import {
 	type ObservabilitySink,
 } from "../core/observability.js";
 import { SettingsManager, type ThinkingLevel } from "../core/settings-manager.js";
-import { BUILTIN_SLASH_COMMANDS } from "../core/slash-commands.js";
-import type { SessionStartEvent, ToolDefinition } from "../extensions/direct.js";
+import { runtimeDiscoveryView } from "../core/runtime-discovery.js";
+import type { SessionStartEvent } from "../plugins/direct.js";
 import {
-	ensureExtensionRuntimeHost,
-	getExtensionRuntimeHost,
-} from "../extensions/compat.js";
+	ensurePluginRuntimeHost,
+	getPluginRuntimeHost,
+} from "../plugins/compat.js";
 import {
 	protocolFromPublicApi,
-} from "../extensions/model-boundary.js";
+} from "../plugins/model-boundary.js";
 import {
 	bindDirectProviderWireLifecycle,
 	directToolRendererBinding,
-	type RuntimeExtensionHost,
-} from "../extensions/runtime.js";
+	type RuntimePluginHost,
+} from "../plugins/runtime.js";
 import { providerAdapterFromModels } from "../providers/internal-runtime-bridge.js";
 import { ModelRuntime } from "../providers/model-compat.js";
 import { modelRuntimeForInternalRegistry } from "../providers/model-runtime-ownership.js";
@@ -38,13 +38,13 @@ import { ProviderRegistry } from "../providers/registry.js";
 import type { ProviderWireLifecycleHost } from "../providers/wire.js";
 import { AgentSession } from "../service/agent-session.js";
 import {
-	attachAgentSessionOwner,
 	deferAgentSessionSelection,
 } from "../service/agent-session-owner.js";
 import { getDefaultSessionDir, SessionManager } from "../storage/session-manager.js";
 import { allToolNames } from "../tools/catalog.js";
 import type { ToolExecutionBackend } from "../tools/backend.js";
 import type { ToolAuthorizationHandler } from "../tools/approval.js";
+import { customToolInventory } from "../tools/custom-tool-inventory.js";
 import {
 	createHarnessToolFromDefinition,
 	isHarnessTool,
@@ -90,11 +90,11 @@ export interface CreateAgentSessionOptions {
 	observabilitySink?: ObservabilitySink;
 }
 
-export type LoadExtensionsResult = ResourceExtensionsResult;
+export type LoadPluginsResult = ResourcePluginsResult;
 
 export interface CreateAgentSessionResult {
 	session: AgentSession;
-	extensionsResult: LoadExtensionsResult;
+	pluginsResult: LoadPluginsResult;
 	modelFallbackMessage?: string;
 }
 
@@ -131,81 +131,6 @@ function implicitDefault(models: readonly Model<Api>[]): Model<Api> | undefined 
 		?? models[0];
 }
 
-function customToolNames(tools: readonly AgentSessionTool[]): string[] {
-	return tools.map((tool) => isHarnessTool(tool) ? tool.definition.name : tool.name);
-}
-
-interface SplitCustomToolsResult {
-	harness: AgentSessionTool[];
-	direct: ToolDefinition[];
-}
-
-function splitCustomTools(tools: readonly AgentSessionTool[]): SplitCustomToolsResult {
-	const harness: AgentSessionTool[] = [];
-	const direct: ToolDefinition[] = [];
-	for (const tool of tools) {
-		if (isHarnessTool(tool)) {
-			harness.push(tool);
-			continue;
-		}
-		if ("definition" in tool) {
-			void tool.definition;
-			throw new TypeError("SDK custom harness tool has an invalid definition");
-		}
-		direct.push(tool);
-	}
-	return { harness, direct };
-}
-
-function discoveryView(host: RuntimeExtensionHost, loader: ResourceLoader) {
-	const maximum = 512;
-	const commands = [
-		...BUILTIN_SLASH_COMMANDS.map((command) => ({
-			kind: "command" as const,
-			source: "builtin" as const,
-			name: command.name,
-			...optionalProperties(command.description === undefined ? undefined : { description: command.description }),
-			...optionalProperties(command.argumentHint === undefined ? undefined : { argumentHint: command.argumentHint }),
-		})),
-		...host.commands().map((command) => ({
-			kind: "command" as const,
-			source: "runtime_extension" as const,
-			name: command.name,
-			extensionId: command.extensionId,
-			...optionalProperties(command.description === undefined ? undefined : { description: command.description }),
-			...optionalProperties(command.argumentHint === undefined ? undefined : { argumentHint: command.argumentHint }),
-		})),
-	];
-	const prompts = loader.getPrompts().prompts.map((prompt) => ({
-		kind: "prompt" as const,
-		name: prompt.name,
-		extensionId: prompt.sourceInfo.source,
-		...optionalProperties(prompt.description === undefined || prompt.description === "" ? undefined : { description: prompt.description }),
-		...optionalProperties(prompt.argumentHint === undefined ? undefined : { argumentHint: prompt.argumentHint }),
-	}));
-	const skills = loader.getSkills().skills.map((skill) => ({
-		kind: "skill" as const,
-		name: skill.name,
-		description: skill.description,
-		scope: skill.sourceInfo.scope === "user" ? "user" as const : "workspace" as const,
-		trusted: true,
-		disableModelInvocation: skill.disableModelInvocation,
-	}));
-	return {
-		resources: [
-			...commands.slice(0, maximum),
-			...prompts.slice(0, maximum),
-			...skills.slice(0, maximum),
-		],
-		truncated: commands.length > maximum || prompts.length > maximum || skills.length > maximum,
-		omitted: {
-			commands: Math.max(0, commands.length - maximum),
-			prompts: Math.max(0, prompts.length - maximum),
-			skills: Math.max(0, skills.length - maximum),
-		},
-	};
-}
-
 /** Create one directly composed AgentSession without terminal ownership. */
 export async function createAgentSession(
 	options: CreateAgentSessionOptions = {},
@@ -228,24 +153,43 @@ export async function createAgentSession(
 		?? SessionManager.create(cwd, settings.getSessionDir() ?? getDefaultSessionDir(cwd, agentDir));
 	const loader = options.resourceLoader ?? new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings });
 	let session: AgentSession | undefined;
-	let extensionsResult: ResourceExtensionsResult | undefined;
+	let pluginsResult: ResourcePluginsResult | undefined;
 	let observability: RuntimeObservability | undefined;
 	const wireCleanups = new Set<() => void>();
-	let ownedExtensionHost: RuntimeExtensionHost | undefined;
+	let ownedPluginHost: RuntimePluginHost | undefined;
+	let servicesDisposed = false;
+	const disposeServices = async (): Promise<void> => {
+		if (servicesDisposed) return;
+		servicesDisposed = true;
+		const failures: unknown[] = [];
+		for (const cleanup of wireCleanups) {
+			try { cleanup(); }
+			catch (error) { failures.push(error); }
+		}
+		wireCleanups.clear();
+		try { await ownedPluginHost?.close(); }
+		catch (error) { failures.push(error); }
+		try { await observability?.close(); }
+		catch (error) { failures.push(error); }
+		try { await ownedModelRuntime?.close(); }
+		catch (error) { failures.push(error); }
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, "SDK session cleanup failed");
+	};
 	try {
 		if (options.providerWireLifecycle !== undefined && options.modelRuntime === undefined) {
 			throw new Error("providerWireLifecycle requires a caller-supplied modelRuntime");
 		}
 		if (options.resourceLoader === undefined) await loader.refresh();
-		extensionsResult = loader.getExtensions();
-		const suppliedHost = getExtensionRuntimeHost(extensionsResult.runtime);
-		const extensionHost = suppliedHost ?? ensureExtensionRuntimeHost(extensionsResult.runtime, cwd);
-		if (options.resourceLoader === undefined || suppliedHost === undefined) ownedExtensionHost = extensionHost;
-		const configureHost = (host: RuntimeExtensionHost): void => {
-			if (options.resourceLoader === undefined) ownedExtensionHost = host;
+		pluginsResult = loader.getPlugins();
+		const suppliedHost = getPluginRuntimeHost(pluginsResult.runtime);
+		const pluginHost = suppliedHost ?? ensurePluginRuntimeHost(pluginsResult.runtime, cwd);
+		if (options.resourceLoader === undefined || suppliedHost === undefined) ownedPluginHost = pluginHost;
+		const configureHost = (host: RuntimePluginHost): void => {
+			if (options.resourceLoader === undefined) ownedPluginHost = host;
 			host.setDirectDiscoveryHandler((signal) => {
 				signal?.throwIfAborted();
-				return discoveryView(host, loader);
+				return runtimeDiscoveryView(host, loader);
 			});
 			if (options.providerWireLifecycle === undefined) return;
 			const cleanup = bindDirectProviderWireLifecycle(host, options.providerWireLifecycle);
@@ -255,7 +199,7 @@ export async function createAgentSession(
 				cleanup();
 			});
 		};
-		configureHost(extensionHost);
+		configureHost(pluginHost);
 		observability = options.observabilitySink === undefined
 			? undefined
 			: new RuntimeObservability(options.observabilitySink, {
@@ -264,7 +208,7 @@ export async function createAgentSession(
 				closeSink: false,
 			});
 		const customInputs = options.customTools ?? [];
-		const custom = splitCustomTools(customInputs);
+		const custom = customToolInventory(customInputs);
 		const harnessTools = customInputs.map((tool) => isHarnessTool(tool)
 			? tool
 			: createHarnessToolFromDefinition(tool, () => {
@@ -274,14 +218,14 @@ export async function createAgentSession(
 		const renderer = directToolRendererBinding(
 			custom.direct,
 			cwd,
-			(diagnostic) => extensionHost?.addDiagnostic({
+			(diagnostic) => pluginHost?.addDiagnostic({
 				extensionId: "sdk",
 				sourcePath: "<sdk:custom-tool>",
 				message: diagnostic.message,
 			}),
 		);
-		const callerNames = customToolNames(customInputs);
-		const extensionToolNames = extensionHost.tools().map((tool) => tool.definition.name);
+		const callerNames = custom.names;
+		const extensionToolNames = pluginHost.tools().map((tool) => tool.definition.name);
 		const explicitToolPolicy = options.tools !== undefined
 			|| options.noTools !== undefined
 			|| options.excludeTools !== undefined;
@@ -298,7 +242,7 @@ export async function createAgentSession(
 			modelRegistry: modelRuntime.internalRegistry(),
 			...optionalProperties(options.providerWireLifecycle === undefined ? undefined : { providerWireLifecycle: options.providerWireLifecycle }),
 			resourceLoader: loader,
-			extensionsResult,
+			pluginsResult,
 			workspace: cwd,
 			agentDirectory: agentDir,
 			settingsManager: settings,
@@ -310,7 +254,7 @@ export async function createAgentSession(
 				initialToolSelection: {
 					names: [...new Set(selectedNames)],
 					excludedNames: [...new Set(options.excludeTools ?? [])],
-					activateExtensionToolsOnBind: options.tools === undefined && options.noTools !== "all",
+					activatePluginToolsOnBind: options.tools === undefined && options.noTools !== "all",
 				},
 			} : undefined),
 			...optionalProperties(options.toolBackend === undefined ? undefined : { toolBackend: options.toolBackend }),
@@ -318,13 +262,14 @@ export async function createAgentSession(
 			...optionalProperties(options.modelScope === undefined ? undefined : { modelScope: options.modelScope }),
 			...optionalProperties(options.sessionStartEvent === undefined ? undefined : { sessionStartEvent: options.sessionStartEvent }),
 			refresh: async () => {
-				const host = getExtensionRuntimeHost(loader.getExtensions().runtime);
+				const host = getPluginRuntimeHost(loader.getPlugins().runtime);
 				if (host !== undefined) configureHost(host);
 			},
-		});
+		}, { dispose: disposeServices });
 		const activeSession = session;
 
-		const persisted = manager.buildSessionContext().model;
+		const persistedSelection = manager.getPersistedSelection();
+		const persisted = persistedSelection.model;
 		const missingPersisted = persisted !== null && session.nativeModel === undefined;
 		const available = modelRuntime.getAvailableSnapshot()
 			.filter((model) => activeSession.isModelInScope(model.provider, model.id));
@@ -341,14 +286,13 @@ export async function createAgentSession(
 		if (selected === undefined && !restoredInScope && session.modelScopeSelectors.length > 0) {
 			throw new Error(`No available model matches the active scope: ${session.modelScopeSelectors.join(", ")}`);
 		}
-		const hasPersistedThinking = manager.getEntries().some((entry) => entry.type === "thinking_level_change");
 		const thinkingModel = selected ?? (restoredInScope ? session.model : undefined);
 		const selectedModelThinking = selected === undefined || thinkingModel === undefined
 			? undefined
 			: settings.getModelThinkingLevel(thinkingModel.provider, thinkingModel.id);
 		const requestedThinking = options.thinkingLevel
 			?? selectedModelThinking
-			?? (hasPersistedThinking
+			?? (persistedSelection.hasPersistedThinking
 				? session.thinkingLevel
 				: thinkingModel === undefined
 					? settings.getDefaultThinkingLevel() ?? "medium"
@@ -371,47 +315,24 @@ export async function createAgentSession(
 				...optionalProperties(requestedThinking === session.thinkingLevel ? undefined : { thinkingLevel: requestedThinking }),
 			});
 		}
-		if (options.resourceLoader === undefined) await session.bindExtensions({ mode: "sdk" });
+		if (options.resourceLoader === undefined) await session.bindPlugins({ mode: "sdk" });
 
-		attachAgentSessionOwner(session, async () => {
-			const failures: unknown[] = [];
-			for (const cleanup of wireCleanups) {
-				try { cleanup(); }
-				catch (error) { failures.push(error); }
-			}
-			wireCleanups.clear();
-			try { await ownedExtensionHost?.close(); }
-			catch (error) { failures.push(error); }
-			try { await observability?.close(); }
-			catch (error) { failures.push(error); }
-			try { await ownedModelRuntime?.close(); }
-			catch (error) { failures.push(error); }
-			if (failures.length === 1) {
-				for (const failure of failures) throw failure;
-			}
-			if (failures.length > 1) throw new AggregateError(failures, "SDK session cleanup failed");
-		});
 		const fallbackModel = session.model ?? (session.suspendedRun === undefined ? undefined : selected);
 		const fallback = missingPersisted && fallbackModel !== undefined
 			? `Could not restore model ${persisted.provider}/${persisted.modelId}. Using ${modelKey(fallbackModel)}.`
 			: undefined;
 		return {
 			session,
-			extensionsResult,
+			pluginsResult,
 			...optionalProperties(fallback === undefined ? undefined : { modelFallbackMessage: fallback }),
 		};
 	} catch (error) {
 		if (session !== undefined) await session.close().catch(() => undefined);
 		else manager.closeV4Store();
 		if (session === undefined) {
-			extensionsResult?.runtime.invalidate("Extension runtime disposed after SDK construction failure");
+			pluginsResult?.runtime.invalidate("Plugin runtime disposed after SDK construction failure");
 		}
-		for (const cleanup of wireCleanups) {
-			try { cleanup(); } catch { /* Preserve the construction failure. */ }
-		}
-		await ownedExtensionHost?.close().catch(() => undefined);
-		await observability?.close().catch(() => undefined);
-		await ownedModelRuntime?.close().catch(() => undefined);
+		await disposeServices().catch(() => undefined);
 		throw error;
 	}
 }
@@ -427,9 +348,12 @@ export type {
 	AgentSessionEventListener,
 	AgentSessionInputImage,
 	AgentSessionModel,
+	AgentSessionModelCycleOptions,
 	AgentSessionModelCycleResult,
 	AgentSessionModelMutationOptions,
 	AgentSessionOptions,
+	AgentSessionOwnership,
+	AgentSessionRefreshOptions,
 	AgentSessionPromptOptions,
 	AgentSessionReplacedContext,
 	AgentSessionRun,
@@ -438,7 +362,7 @@ export type {
 	AgentSessionToolInfo,
 	AgentSessionTreeNavigationResult,
 	AgentSessionUsageBreakdownEntry,
-	ExtensionBindings,
+	PluginBindings,
 	ParsedSkillBlock,
 	PromptOptions,
 	SessionStats,
@@ -447,7 +371,7 @@ export { SessionManager } from "../storage/session-manager.js";
 export type { ReadonlySessionManager } from "../storage/session-manager.js";
 export type { SessionBranchQuery } from "../storage/types.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "../core/resource-loader.js";
-export type { ResourceExtensionsResult, ResourceLoader } from "../core/resource-loader.js";
+export type { ResourcePluginsResult, ResourceLoader } from "../core/resource-loader.js";
 export { loadPromptTemplates } from "../core/prompt-templates.js";
 export type { PromptTemplate } from "../core/prompt-templates.js";
 export { formatSkillsForPrompt, loadSkills, loadSkillsFromDir } from "../core/skills.js";
@@ -463,9 +387,10 @@ export { SettingsManager } from "../core/settings-manager.js";
 export type { FullscreenScrollbar, PersistedSettings, ThinkingLevel } from "../core/settings-manager.js";
 export { ModelRegistry } from "../providers/public-model-registry.js";
 export { ModelRuntime } from "../providers/model-compat.js";
+export { inspectAgentSession, type AgentSessionInspection } from "../service/session-inspection.js";
 export type { ProviderModel } from "../providers/models.js";
 export type { ProviderWireLifecycleHost } from "../providers/wire.js";
-export { defineTool } from "../extensions/direct.js";
+export { defineTool } from "../plugins/direct.js";
 export type {
 	DurableToolEffect,
 	ResourceClaim,
@@ -474,7 +399,7 @@ export type {
 	ToolRecoveryContract,
 	ToolRecoveryMode,
 	ToolRecoveryResult,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 export type { ToolContext } from "../tools/types.js";
 export { createHarnessToolFromDefinition, isHarnessTool } from "../tools/direct-tool.js";
 export type { AgentSessionTool, AgentTool } from "../tools/direct-tool.js";

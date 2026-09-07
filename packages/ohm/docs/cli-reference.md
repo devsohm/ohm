@@ -60,12 +60,19 @@ that message to the editor. `/clone` copies the active branch through its curren
 
 The seven built-ins—`read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`—are active by default in interactive,
 print, JSON, RPC, and serve modes. Interactive, print, JSON, and RPC invocations accept `--tools LIST` as an
-allowlist. `--no-tools` disables every tool. `--no-builtin-tools` keeps only extension tools.
-`--exclude-tools LIST` removes selected names. Serve uses the persisted tool policy. Repeat `--extension`, `--skill`,
+allowlist. `--no-tools` disables every tool. `--no-builtin-tools` keeps only plugin tools.
+`--exclude-tools LIST` removes selected names. Serve uses the persisted tool policy. Repeat `--plugin`, `--skill`,
 `--prompt-template`, or `--theme` to add resources for one ordinary agent invocation; `ohm serve` accepts
-repeatable `--extension` but not the skill, prompt-template, or theme flags.
+repeatable `--plugin` but not the skill, prompt-template, or theme flags.
 
-Automatic discovery can be disabled independently with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes`. `--no-context-files` disables global and project instruction discovery. `--system-prompt TEXT` replaces the built-in prompt; `--append-system-prompt TEXT` adds to it.
+Automatic discovery can be disabled independently with `--no-plugin-code`, `--no-skills`, `--no-prompt-templates`, and `--no-themes`. `--no-context-files` disables global and project instruction discovery. `--system-prompt TEXT` replaces the built-in prompt; `--append-system-prompt TEXT` adds to it.
+
+`--no-plugins` applies all four resource-discovery switches together, including in
+serve mode. Explicit `--plugin`, `--skill`, `--prompt-template`, and `--theme`
+paths still select reviewed contributions. An explicitly selected plugin package
+retains its declared resources; individual `--no-skills`, `--no-prompt-templates`,
+and `--no-themes` switches still suppress those kinds, regardless of flag order. Inline host factories
+remain caller-owned. This controls discovery, not a sandbox or network access.
 
 `--approve` trusts project-local resources for this invocation and `--no-approve` ignores them. Neither option grants an operating-system sandbox.
 
@@ -77,10 +84,14 @@ invocation; a `--` after the command ends option parsing for that administrative
 
 | Command | Purpose |
 | --- | --- |
-| `install SOURCE [-l\|--local]` | Install a user or project package |
-| `remove SOURCE [-l\|--local]` | Remove an installed package |
-| `update [SOURCE] [--all]` | Update installed packages |
-| `list [-l\|--local] [--json]` | List package state |
+| `plugins install SOURCE [-l\|--local]` | Install a user or project plugin |
+| `plugins remove SOURCE [-l\|--local]` | Remove an installed plugin |
+| `plugins update [SOURCE] [--all]` | Update installed plugins |
+| `plugins list [-l\|--local] [--json]` | List configured plugins |
+| `plugins resources` | List discovered contributions |
+| `plugins init DIRECTORY` | Copy a tested starter into a new directory without installing dependencies |
+| `plugins test PACKAGE` | Run the package's explicit test script with bounded output and cancellation |
+| `plugins preview PACKAGE [--json]` | Preview reviewed code in the normal host, or describe its invocation without activation |
 | `config [-l\|--local]` | Select enabled package resources |
 | `config path [--scope user\|project] [--json]` | Print the exact settings path without creating it |
 | `config edit [--scope user\|project]` | Transactionally edit user or trusted-project settings |
@@ -90,10 +101,10 @@ invocation; a `--` after the command ends option parsing for that administrative
 | `packages reconcile` | Restore the exact immutable locked package set without resolving moving sources |
 | `packages update ID...` | Intentionally resolve selected declared packages, rewrite the lock, and reconcile |
 | `packages update --all` | Intentionally resolve and lock project packages |
-| `extensions doctor [--offline]` | Activate already-trusted extensions and diagnose their runtime resources |
-| `extensions author validate\|inspect\|smoke\|refresh\|report PACKAGE` | Run one author check or the combined report described in [Packages](packages.md#author-verification) |
-| `extensions author pack PACKAGE DESTINATION` | Verify and write one reviewed package archive into the destination directory; JSON reports its exact path and SHA-256 |
-| `extensions author index GALLERY.json` | Validate a package-gallery index as described in [Package gallery](package-gallery.md) |
+| `plugins doctor [--offline]` | Activate already-trusted plugins and diagnose their runtime resources |
+| `plugins verify\|validate\|inspect\|smoke\|refresh\|report PACKAGE` | Run one author check, a combined report, or verify a temporary packed installation as described in [Packages](packages.md#author-workflow-and-verification) |
+| `plugins pack PACKAGE DESTINATION` | Verify and write one reviewed package archive into the destination directory; JSON reports its exact path and SHA-256 |
+| `plugins index GALLERY.json` | Validate a package-gallery index as described in [Package gallery](package-gallery.md) |
 | `sessions doctor [--json] [--all] [--workspace DIR] [--session-dir DIR]` | Validate session headers and trees |
 | `diagnostics [FILE]` | Create a bounded redacted support report |
 | `logs [--json]` | Show bounded metadata for local logs, redraw diagnostics, support files, crashes, and sessions without reading contents |
@@ -103,6 +114,9 @@ invocation; a `--` after the command ends option parsing for that administrative
 | `self-update` | Update a source-built private installation; a standalone release reports its installer command |
 | `uninstall --yes` | Fully remove a source-built or standalone installation and its managed state |
 | `self-uninstall --yes` | Alias for `uninstall --yes` |
+
+`plugins list` shows configured packages; `plugins resources` shows their
+discovered contributions.
 
 `-l` and `--local` are equivalent project-scope selectors for `install`,
 `remove`, `list`, and `config`.
@@ -129,7 +143,7 @@ operating-system processes.
 ## Shell completion
 
 Completion generation is static: it reads the same command, option, and fixed-value metadata as the CLI parser and
-does not load providers, models, sessions, extensions, or user-controlled shell data. Load it for the current shell:
+does not load providers, models, sessions, plugins, or user-controlled shell data. Load it for the current shell:
 
 ```sh
 # Bash
@@ -172,10 +186,10 @@ security limits.
 ## Export and model listing
 
 `--list-models [TEXT]` lists connected provider models and exits. With `--mode json`, the model listing is one compact
-JSON array followed by LF; it is metadata output, not a session event stream. `--export SESSION.jsonl [OUTPUT.html]`
+JSON array followed by LF; it is metadata output, not a session event stream. `--export SESSION [OUTPUT.html]`
 creates a standalone HTML transcript. Add `--redact` to produce a sharing copy that still requires human review.
 
 Exit status is zero after success. It is nonzero for invalid arguments, startup failures, or failed administrative
 operations. In JSON and RPC modes, standard output contains only protocol data,
-including bounded `extension_error` records for failed extension callbacks.
+including bounded `extension_error` records for failed plugin callbacks.
 Human diagnostics go to standard error.

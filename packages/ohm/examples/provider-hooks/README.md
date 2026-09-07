@@ -4,7 +4,7 @@ This example adds one non-secret metadata field and one correlation header
 before a provider request.
 
 ```text
-ohm install ./packages/ohm/examples/provider-hooks
+ohm plugins install ./packages/ohm/examples/provider-hooks
 ```
 
 Direct provider hooks are trusted in-process code. Header hooks receive the

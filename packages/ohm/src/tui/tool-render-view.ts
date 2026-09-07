@@ -120,7 +120,7 @@ export function projectRuntimeDirectToolRenderContent(
   return Object.freeze(selected);
 }
 
-function boundedJsonView(value: JsonValue, maximumBytes: number): JsonValue | undefined {
+export function boundedToolRenderJson(value: JsonValue, maximumBytes: number): JsonValue | undefined {
   let nodes = 0;
   const sanitize = (selected: JsonValue, depth: number): JsonValue => {
     nodes += 1;
@@ -201,7 +201,7 @@ export function projectRuntimeToolRenderResult(
   }
   const metadata = source.metadata === undefined
     ? undefined
-    : boundedJsonView(source.metadata, maximumBytes);
+    : boundedToolRenderJson(source.metadata, maximumBytes);
   const usage = safeUsage(source.usage, maximumBytes);
   const nextActions = boundedStrings(source.nextActions, 8, maximumBytes);
   const addedToolNames = boundedStrings(source.addedToolNames, 256, maximumBytes);

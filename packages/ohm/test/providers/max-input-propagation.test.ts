@@ -7,9 +7,9 @@ import test from "node:test";
 import { AuthStorage } from "../../src/auth/auth-storage.js";
 import type { ModelInfo as RootModelInfo } from "../../src/index.js";
 import {
-  extensionModel,
-  extensionModelRegistry,
-} from "../../src/extensions/model-boundary.js";
+  pluginModel,
+  pluginModelRegistry,
+} from "../../src/plugins/model-boundary.js";
 import {
   providerModelFromInfo,
   providerModelToInfo,
@@ -54,7 +54,7 @@ test("public, adapter, and root model views preserve an explicit input ceiling",
   const info = providerModelToInfo(BASE_MODEL);
   assert.equal(info.maxInputTokens, 12_000);
   assert.equal(providerModelFromInfo(info).maxInputTokens, 12_000);
-  assert.equal(extensionModel(BASE_MODEL).maxInputTokens, 12_000);
+  assert.equal(pluginModel(BASE_MODEL).maxInputTokens, 12_000);
 
   const publicAlias: RootModelInfo = {
     provider: BASE_MODEL.provider,
@@ -68,7 +68,7 @@ test("public, adapter, and root model views preserve an explicit input ceiling",
 
 test("direct extension provider registration preserves its optional input ceiling", () => {
   const internal = new ModelRegistry(createModels());
-  const registry = extensionModelRegistry(internal);
+  const registry = pluginModelRegistry(internal);
   registry.registerProvider("extension-ceiling", {
     api: "openai-responses",
     apiKey: "fixture-key",

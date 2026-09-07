@@ -34,12 +34,16 @@ export type AssistantContent = TextContent | ThinkingContent | ToolCall;
 
 export interface UserMessage {
   role: "user";
+  /** Opaque host context identity. Preserve when editing; omit for a new message. */
+  contextId?: string;
   content: string | Array<TextContent | ImageContent>;
   timestamp: number;
 }
 
 export interface AssistantMessage {
   role: "assistant";
+  /** Opaque host context identity. Preserve when editing; omit for a new message. */
+  contextId?: string;
   content: AssistantContent[];
   api: Api;
   provider: string;
@@ -83,6 +87,8 @@ export interface ProviderState {
 
 export interface ToolResultMessage {
   role: "toolResult";
+  /** Opaque host context identity. Preserve when editing; omit for a new message. */
+  contextId?: string;
   toolCallId: string;
   toolName: string;
   content: Array<TextContent | ImageContent>;

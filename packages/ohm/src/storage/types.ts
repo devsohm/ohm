@@ -33,7 +33,7 @@ export interface SessionEntryBase {
 }
 
 /** Immutable identity recorded with state authored by one runtime extension generation. */
-export interface ExtensionSessionProvenance {
+export interface PluginSessionProvenance {
   schemaVersion: 1;
   extensionId: string;
   sourceSha256: string;
@@ -64,7 +64,7 @@ export interface CustomMessage<T = unknown> {
   customType: string;
   details?: T;
   display: boolean;
-  provenance?: ExtensionSessionProvenance;
+  provenance?: PluginSessionProvenance;
   role: "custom";
   timestamp: number;
 }
@@ -141,17 +141,17 @@ export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 export interface CustomEntry<T = unknown> extends SessionEntryBase {
   customType: string;
   data?: T;
-  provenance?: ExtensionSessionProvenance;
+  provenance?: PluginSessionProvenance;
   type: "custom";
 }
 
-/** Extension content that is reconstructed into model context. */
+/** Plugin content that is reconstructed into model context. */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
   content: string | (TextBlock | ImageBlock)[];
   customType: string;
   details?: T;
   display: boolean;
-  provenance?: ExtensionSessionProvenance;
+  provenance?: PluginSessionProvenance;
   type: "custom_message";
 }
 

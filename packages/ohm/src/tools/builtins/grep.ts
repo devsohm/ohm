@@ -4,9 +4,10 @@ import { basename, relative, sep } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 
-import { isJsonObject, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { NUMBER_VALUE } from "../../core/value-schemas.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type StandaloneToolDefinition } from "../direct-tool.js";
 import { booleanInput, inputObject, stringInput } from "../input.js";
 import { safeIntegerInput } from "../integer-input.js";
@@ -37,7 +38,7 @@ const grepParameters = Type.Object({
     maximum: Number.MAX_SAFE_INTEGER,
   })),
   limit: Type.Optional(Type.Integer({
-    description: "Largest match count. The default is 100.",
+    description: `Maximum match count, default ${DEFAULT_LIMIT}. Can be increased; the output byte cap still applies.`,
     minimum: 1,
     maximum: Number.MAX_SAFE_INTEGER,
   })),
@@ -58,29 +59,7 @@ const defaultGrepOperations: GrepOperations = {
   isDirectory: async (path) => (await fsStat(path)).isDirectory(),
 };
 
-const schema = {
-  type: "object",
-  required: ["pattern"],
-  properties: {
-    pattern: { type: "string", description: "Regular expression, or plain text when literal is true." },
-    path: { type: "string", description: "File or directory to inspect. The default is the current directory." },
-    glob: { type: "string", description: "Optional file glob, such as '*.ts' or '**/*.spec.ts'." },
-    ignoreCase: { type: "boolean", description: "Ignore letter case. The default is false." },
-    literal: { type: "boolean", description: "Use pattern as plain text. The default is false." },
-    context: {
-      type: "integer",
-      description: "Lines to show before and after a match. The default is 0.",
-      minimum: 0,
-      maximum: Number.MAX_SAFE_INTEGER,
-    },
-    limit: {
-      type: "integer",
-      description: `Largest match count. The default is ${DEFAULT_LIMIT}.`,
-      minimum: 1,
-      maximum: Number.MAX_SAFE_INTEGER,
-    },
-  },
-} satisfies JsonObject;
+const schema = providerInputSchema(grepParameters);
 
 interface GrepMatch {
   path: string;
@@ -157,8 +136,9 @@ export class GrepTool implements HarnessTool {
 
   readonly definition = {
     name: "grep",
-    description: `Find text inside files. Results identify the file and line number. Git ignore rules apply. Output stops at ${DEFAULT_LIMIT} matches or ${TOOL_MAX_BYTES / 1024} KiB. Each displayed line stops at ${MAX_LINE_CHARACTERS} characters.`,
+    description: `Search file contents with a regular expression or literal text and return file:line matches. Git ignore rules apply. Defaults to ${DEFAULT_LIMIT} matches; limit can be increased. Output is capped at ${TOOL_MAX_BYTES / 1024} KiB, and long displayed lines are shortened after ${MAX_LINE_CHARACTERS} characters.`,
     promptSnippet: "Find text in files with Git ignore rules",
+    promptGuidelines: ["Narrow path or glob to locate relevant matches, then use read for full lines or surrounding code. If results are incomplete, narrow the search or raise limit; the byte cap still applies."],
     inputSchema: schema,
   };
 

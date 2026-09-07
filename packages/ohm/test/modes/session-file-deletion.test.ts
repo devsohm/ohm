@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { access, link, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, link, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   deleteSessionFile,
@@ -107,9 +108,9 @@ test("failed or unavailable native deletion falls back to permanent removal", as
 
 test("session deletion fails closed for active writers and their hard-link aliases", async () => {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-delete-active-"));
-  const path = join(root, "active.jsonl");
+  const manager = SessionManager.create(root, root, { id: "active" });
+  const path = manager.getSessionFile()!;
   const alias = join(root, "active-alias.jsonl");
-  const manager = SessionManager.open(path, root, root);
   try {
     await link(path, alias);
     const runner: ProcessRunner = {
@@ -128,4 +129,47 @@ test("session deletion fails closed for active writers and their hard-link alias
     manager.closeV4Store();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("SQLite recycling checkpoints committed WAL records before moving the main file", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-session-delete-wal-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const manager = SessionManager.create(root, root, { id: "saved" });
+  const path = manager.getSessionFile()!;
+  const db = new DatabaseSync(path);
+  manager.closeV4Store();
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
+  const commit = { record: "commit", sequence: 1, commitId: "wal-name", committedAt: new Date().toISOString(), changes: [{ type: "session_name", name: "from WAL" }] };
+  db.prepare("INSERT INTO session_commits VALUES (?, ?, ?)").run(1, commit.commitId, JSON.stringify(commit));
+  assert.equal(existsSync(path + "-wal"), true);
+  const recycled = join(root, "recycled.sqlite");
+  try {
+    assert.equal(await deleteSessionFile(path, {
+      cwd: root, platform: "linux", processRunner: { async run() {
+        assert.throws(() => acquireSessionWriterLeaseSync(path), /active writer/u);
+        await rename(path, recycled);
+        return result(0);
+      } },
+    }), "trash");
+    assert.equal(SessionManager.openSnapshot(recycled).getSessionName(), "from WAL");
+  } finally { db.close(); }
+});
+
+test("SQLite recycling fails closed when a reader prevents a complete WAL checkpoint", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-session-delete-reader-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const manager = SessionManager.create(root, root, { id: "saved" });
+  const path = manager.getSessionFile()!;
+  manager.closeV4Store();
+  const writer = new DatabaseSync(path);
+  writer.exec("PRAGMA journal_mode = WAL;");
+  const reader = new DatabaseSync(path, { readOnly: true });
+  reader.exec("BEGIN");
+  reader.prepare("SELECT * FROM session_header").all();
+  writer.prepare("INSERT INTO session_commits VALUES (?, ?, ?)").run(1, "wal-name", JSON.stringify({ record: "commit", sequence: 1, commitId: "wal-name", committedAt: new Date().toISOString(), changes: [{ type: "session_name", name: "retained" }] }));
+  try {
+    await assert.rejects(deleteSessionFile(path, { cwd: root, processRunner: { async run() { assert.fail("must not move an uncheckpointed session"); } } }), /active database reader/u);
+    assert.equal(existsSync(path), true);
+  } finally { reader.close(); writer.close(); }
+  assert.equal(SessionManager.openSnapshot(path).getSessionName(), "retained");
 });

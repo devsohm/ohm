@@ -5,8 +5,8 @@ import { defaultSecretRedactor } from "../auth/redaction.js";
 import { errorMessage } from "../core/errors.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import type { ImageBlock } from "../core/types.js";
-import type { ExtensionCommandContextActions } from "../extensions/direct.js";
-import { extensionSessionManager } from "../extensions/session-contract.js";
+import type { PluginCommandContextActions } from "../plugins/direct.js";
+import { pluginSessionManager } from "../plugins/session-contract.js";
 import {
   bindInteractiveSessionPresentation,
   interactiveTranscriptHistory,
@@ -16,6 +16,8 @@ import {
 import { AnthropicApiBearerBillingWarning } from "../interactive/anthropic-warning.js";
 import { REFRESH_RESOURCE_SUMMARY, renderInteractiveCommandHelp } from "../interactive/commands.js";
 import { renderInteractiveResourceReport } from "../interactive/resource-report.js";
+import { runInteractivePresentationAction } from "./interactive-presentation-actions.js";
+import { showInteractiveInspection } from "./interactive-inspection.js";
 import { modelCacheReadPrice } from "../providers/models.js";
 import { providerLoginMethods, type ProviderLoginPath } from "../providers/login-path.js";
 import type { AgentSession, AgentSessionPromptOptions } from "../service/agent-session.js";
@@ -93,7 +95,7 @@ export interface InteractiveModeOptions {
   modelFallbackMessage?: string;
   migratedProviders?: string[];
   /** Optional extension commands and prompts exposed by the active embedding host. */
-  extensionCatalog?: InteractiveResourceCatalog | (() => InteractiveResourceCatalog | undefined);
+  pluginCatalog?: InteractiveResourceCatalog | (() => InteractiveResourceCatalog | undefined);
   /** Optional host-owned startup copy. */
   startup?: { compactText: string; expandedText: string };
   /** Runs after recovery for every newly bound session generation. */
@@ -400,6 +402,10 @@ export class InteractiveMode {
         share: async ({ args }) => {
           await this.#runOperation(async (signal) => await this.#sessionOperations.shareSession(args, signal));
         },
+        actions: async () => await this.#runOperation(async (signal) =>
+          await runInteractivePresentationAction(this.#runtime.session, this.#terminal, signal)),
+        inspect: async () => await this.#runOperation(async (signal) =>
+          await showInteractiveInspection(this.#runtime.session, this.#terminal, signal)),
         context: () => this.#sessionOperations.showContext(),
         resources: () => this.#showResources(),
         copy: async () => await this.#sessionOperations.copyLatestAssistant(),
@@ -417,7 +423,7 @@ export class InteractiveMode {
         const route = resolveInteractiveResourceSlash(
           this.#runtime.session,
           input,
-          this.#extensionCatalog(),
+          this.#pluginCatalog(),
         );
         if (route === undefined) {
           this.#terminal.notify(`Unknown command: /${input.slice(1).trim().split(/\s/u, 1)[0] ?? ""}`, "error");
@@ -426,7 +432,7 @@ export class InteractiveMode {
         if (route.kind === "runtime") {
           const session = this.#runtime.session;
           const result = await this.#runOperation(async (signal) =>
-            await session.extensionRunner.getRuntimeHost().runCommand(route.name, {
+            await session.pluginRunner.getRuntimeHost().runCommand(route.name, {
               args: route.args,
               threadId: session.sessionId,
               signal,
@@ -504,7 +510,7 @@ export class InteractiveMode {
               lifecycleSignal: action.generation,
               interactionSignal: signal,
             });
-            await this.#runtime.session.extensionRunner.getRuntimeHost().runShortcut(action.shortcut, {
+            await this.#runtime.session.pluginRunner.getRuntimeHost().runShortcut(action.shortcut, {
               threadId: this.#runtime.session.sessionId,
               signal: AbortSignal.any([signal, action.generation]),
               ui,
@@ -699,7 +705,7 @@ export class InteractiveMode {
   }
 
   #commandItems(session: AgentSession): PickerItem<string>[] {
-    const commands = session.extensionRunner.getRegisteredCommands().map((command): PickerItem<string> => ({
+    const commands = session.pluginRunner.getRegisteredCommands().map((command): PickerItem<string> => ({
       id: `extension:${command.invocationName}`,
       label: `/${command.invocationName}`,
       value: `/${command.invocationName}`,
@@ -725,13 +731,13 @@ export class InteractiveMode {
     return [...commands, ...prompts, ...skills];
   }
 
-  #commandActions(session: AgentSession): ExtensionCommandContextActions {
+  #commandActions(session: AgentSession): PluginCommandContextActions {
     return {
       waitForIdle: async () => await session.waitForIdle(),
       newSession: async (options = {}, signal) => await this.#runtime.newSession({
         ...optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
         ...optionalProperties(options.setup === undefined ? undefined : {
-          setup: async (manager) => await options.setup?.(extensionSessionManager(manager)),
+          setup: async (manager) => await options.setup?.(pluginSessionManager(manager)),
         }),
         ...optionalProperties(options.withSession === undefined ? undefined : {
           withSession: async (context) => await options.withSession?.(context),
@@ -761,8 +767,8 @@ export class InteractiveMode {
     };
   }
 
-  #extensionCatalog(): InteractiveResourceCatalog | undefined {
-    const catalog = this.#options.extensionCatalog;
+  #pluginCatalog(): InteractiveResourceCatalog | undefined {
+    const catalog = this.#options.pluginCatalog;
     return Check(FUNCTION_VALUE, catalog) ? catalog() : catalog;
   }
 
@@ -787,7 +793,7 @@ export class InteractiveMode {
     catch { this.#terminal.notify(`Configured theme ${configuredTheme} is unavailable`, "warning"); }
     const uiBinding = bindInteractiveRuntimeUi(
       this.#terminal,
-      session.extensionRunner,
+      session.pluginRunner,
       this.#runtime.cwd,
       () => this.#commandItems(session),
       {
@@ -819,20 +825,23 @@ export class InteractiveMode {
       const bindingAbort = new AbortController();
       this.#sessionBindingAbort = bindingAbort;
       try {
-        await session.bindExtensions(extensionBindings, bindingAbort.signal);
+        await session.bindPlugins(extensionBindings, bindingAbort.signal);
       } catch (error) {
         if (bindingAbort.signal.aborted && this.#uiBinding !== uiBinding) return;
         throw error;
       }
       if (this.#uiBinding !== uiBinding) {
-        if (uiBinding.dispose()) session.clearExtensionBindings();
+        if (uiBinding.dispose()) session.clearPluginBindings();
         return;
       }
       uiBinding.restoreDirectContext();
-    } else session.updateExtensionBindings(extensionBindings);
+    } else session.updatePluginBindings(extensionBindings);
     if (sessionStartOnly) return;
     let presentationActive = true;
     const presentationTerminal: InteractiveSessionPresentationTerminal = {
+      setTranscriptHistory: (history) => {
+        if (presentationActive || history === undefined) this.#terminal.setTranscriptHistory(history);
+      },
       render: (event) => { if (presentationActive) this.#terminal.render(event); },
       renderSessionEntry: (entry) => { if (presentationActive) this.#terminal.renderSessionEntry(entry); },
       replaceTranscript: (items, branch, options) => {
@@ -887,7 +896,7 @@ export class InteractiveMode {
     if (this.#pendingSessionPreparation === session) this.#pendingSessionPreparation = undefined;
   }
 
-  #unbindSession(clearExtensionBindings = true): void {
+  #unbindSession(clearPluginBindings = true): void {
     this.#unsubscribe();
     this.#unsubscribe = (): void => undefined;
     this.#sessionBindingAbort?.abort(new Error("Interactive session binding disposed"));
@@ -896,7 +905,7 @@ export class InteractiveMode {
     this.#uiBinding = undefined;
     const session = this.#boundSession;
     this.#boundSession = undefined;
-    if (owned && clearExtensionBindings) session?.clearExtensionBindings();
+    if (owned && clearPluginBindings) session?.clearPluginBindings();
   }
 
   #updateContext(session: AgentSession = this.#runtime.session, includeContextUsage = true): void {
@@ -1266,7 +1275,7 @@ export class InteractiveMode {
         command: request.command,
         hidden: request.hidden,
         workspace: this.#runtime.cwd,
-        host: session.extensionRunner.getRuntimeHost(),
+        host: session.pluginRunner.getRuntimeHost(),
         session,
         signal,
         onPrepared: beginPresentation,
@@ -1320,7 +1329,7 @@ export class InteractiveMode {
       return;
     }
     const resourceRoute = text.trim().startsWith("/")
-      ? resolveInteractiveResourceSlash(session, text, this.#extensionCatalog())
+      ? resolveInteractiveResourceSlash(session, text, this.#pluginCatalog())
       : undefined;
     const classified = classifyActiveSubmission(text, { resourceCommand: resourceRoute !== undefined });
     if (classified.kind === "cancel") { await this.#cancelActiveRun("Cancelled by user"); return; }

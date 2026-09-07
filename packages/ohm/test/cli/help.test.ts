@@ -33,7 +33,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.ok(global.indexOf("Model:") < global.indexOf("Sessions:"));
   assert.ok(global.indexOf("Sessions:") < global.indexOf("Tools and resources:"));
   assert.ok(global.indexOf("Tools and resources:") < global.indexOf("Other:"));
-  assert.match(global, /--extension PATH\s+Load an extension; repeatable/u);
+  assert.match(global, /--plugin PATH\s+Load a plugin package or code; repeatable/u);
   assert.match(global, /--redact\s+With --export, write a review-required/u);
   assert.match(global, /--thinking LEVEL\s+off\|minimal\|low\|medium\|high\|xhigh\|max/u);
   assert.match(global, /--no-browser\s+Print OAuth URLs instead of opening a browser/u);
@@ -43,7 +43,12 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(global, /--max-steps NUMBER\s+Maximum model turns in each run/u);
   assert.match(global, /--max-output-tokens NUMBER\s+Maximum output tokens requested/u);
   assert.doesNotMatch(global, /--alt\b|--ui-mode\b/u);
-  assert.match(renderCliHelp("chat"), /--no-extensions\s+Disable automatic extension discovery/u);
+  assert.match(renderCliHelp("chat"), /--no-plugins\s+Disable automatic code, skill, prompt, and theme discovery/u);
+  assert.match(renderCliHelp("plugins"), /plugins test\|preview\|verify PACKAGE/u);
+  assert.doesNotMatch(`${global}\n${renderCliHelp("plugins")}`, /\bextensions?\b/iu);
+  for (const alias of ["install", "remove", "update", "list"]) {
+    assert.equal(renderCliHelp(alias), renderCliHelp("plugins"));
+  }
   assert.match(global, /read, bash, edit, write, grep, find, and ls tools/u);
   assert.match(global, /config path \[--scope user\|project\]/u);
   assert.match(global, /config validate \[--scope user\|project\]/u);
@@ -51,19 +56,17 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(renderCliHelp("rpc"), /newline-delimited JSON RPC/u);
   assert.match(renderCliHelp("serve"), /authenticated HTTP and SSE service/u);
   assert.match(renderCliHelp("serve"), /OHM_SERVE_TOKEN/u);
-  assert.match(renderCliHelp("extensions"), /extensions \[list\|doctor\|commands\|prompts\]/u);
-  assert.match(renderCliHelp("extensions"), /extensions author validate\|inspect\|smoke\|refresh\|report PACKAGE/u);
-  assert.match(renderCliHelp("extensions"), /extensions remove SOURCE \[-l\]/u);
-  assert.match(renderCliHelp("extensions"), /extensions update SOURCE \[-l\] \[--allow-scripts\]/u);
-  assert.doesNotMatch(renderCliHelp("extensions"), /extensions (?:remove|update) ID/u);
+  assert.match(renderCliHelp("plugins"), /plugins remove SOURCE \[-l\]/u);
+  assert.match(renderCliHelp("plugins"), /plugins update SOURCE \[-l\] \[--allow-scripts\]/u);
   assert.match(renderCliHelp("diagnostics"), /never reads credential values or session content/u);
   assert.match(renderCliHelp("stats"), /metadata-only aggregate snapshots/u);
   assert.match(renderCliHelp("stats"), /nothing is uploaded/u);
-  assert.match(renderCliHelp("sessions"), /validates its header and entry\s+tree/u);
+  assert.match(renderCliHelp("sessions"), /validates its\s+header and entry\s+tree/u);
   assert.match(renderCliHelp("sessions"), /sessions doctor .*--all/u);
-  assert.match(renderCliHelp("sessions"), /there is no database index/u);
+  assert.match(renderCliHelp("sessions"), /SQLite or legacy JSONL/u);
+  assert.match(renderCliHelp("sessions"), /coordination sidecars/u);
   assert.match(renderCliHelp("install"), /disabled unless --allow-scripts/u);
-  assert.match(renderCliHelp("update"), /only to this update transaction/u);
+  assert.match(renderCliHelp("update"), /only to this install or update transaction/u);
   assert.match(renderCliHelp("uninstall"), /saved configuration,\s+credentials, sessions/u);
   assert.match(renderCliHelp("uninstall"), /Fully removes the installed product/iu);
   assert.match(renderCliHelp("self-update"), /latest verified ohm\s+GitHub release/u);
@@ -80,7 +83,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
 test("subcommand --help exits before loading runtime state", () => {
   const install = cli(["install", "--help"]);
   assert.equal(install.status, 0, install.stderr);
-  assert.match(install.stdout, /ohm install SOURCE/u);
+  assert.match(install.stdout, /ohm plugins install SOURCE/u);
   assert.doesNotMatch(install.stdout, /Commands:\n/u);
   assert.equal(install.stderr, "");
 
@@ -89,10 +92,10 @@ test("subcommand --help exits before loading runtime state", () => {
   assert.match(config.stdout, /package resource configuration/u);
   assert.equal(config.stderr, "");
 
-  const extensions = cli(["extensions", "--help"]);
-  assert.equal(extensions.status, 0, extensions.stderr);
-  assert.match(extensions.stdout, /ohm extensions \[list\|doctor\|commands\|prompts\]/u);
-  assert.equal(extensions.stderr, "");
+  const plugins = cli(["plugins", "--help"]);
+  assert.equal(plugins.status, 0, plugins.stderr);
+  assert.match(plugins.stdout, /ohm plugins doctor\|resources\|commands\|prompts/u);
+  assert.equal(plugins.stderr, "");
 
   const globalHelp = cli(["--help"]);
   assert.equal(globalHelp.status, 0, globalHelp.stderr);

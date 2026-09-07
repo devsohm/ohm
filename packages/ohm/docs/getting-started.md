@@ -14,7 +14,7 @@ ohm connects a model to a small set of tools running on your computer:
 
 The default tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. The same default applies to
 interactive, print, JSON, RPC, serve, and direct SDK sessions. These tools run with the permissions of the user who launched
-ohm. Project trust controls whether project-local configuration and executable extensions load. It does not approve
+ohm. Project trust controls whether project-local configuration and executable plugins load. It does not approve
 individual shell commands or create a sandbox.
 
 Model requests leave your machine when you choose a hosted provider. Use a local provider such as Ollama when the model must also run locally.
@@ -27,13 +27,13 @@ does not need Node.js or npm.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.ps1 | iex
 ```
 
 The installer downloads only the matching standalone archive from the latest GitHub release. It verifies the release
@@ -179,35 +179,35 @@ it manually. See [Sessions and context](sessions.md), [Context compaction](compa
 
 ## 6. Add reusable behavior
 
-ohm separates four resource types:
+An ohm plugin can combine four contribution types:
 
 - A **skill** is on-demand instruction content. Only its name and description stay in the base prompt; full guidance loads when relevant.
 - A **prompt template** is a reusable slash command with arguments and defaults.
 - A **theme** is a terminal presentation resource; ohm ships the default operational `signal` and monochrome `mono` themes, and can discover custom themes.
-- A **runtime extension** is trusted code that can add tools, commands, providers, authentication, state, events, shortcuts, and structural UI.
+- **Plugin code** can add tools, commands, providers, authentication, state, events, shortcuts, and structural UI.
 
-A **package** distributes one or more of those resources. Installed runtime extensions activate inside the current
-ohm process and extend that harness. They do not need to launch a second ohm instance.
+A plugin's **package** distributes one or more contributions. Its trusted code
+activates inside the current ohm process; declarative resources need no factory.
 
 Install and inspect a reviewed package with:
 
 ```sh
-ohm install ./my-package
-ohm list
-ohm extensions doctor
-ohm remove my-package
+ohm plugins install ./my-package
+ohm plugins list
+ohm plugins doctor
+ohm plugins remove ./my-package
 ```
 
-Use `ohm --extension ./my-package/extensions/index.mjs` to load an extension for one invocation without installing
-the package. Runtime extensions are ordinary Node.js code with your user's access. Review the package, its runtime
+Use `ohm --plugin ./my-package` to load the same plugin for one invocation without installing
+the package. Plugin factories are ordinary Node.js code with your user's access. Review the package, its runtime
 entries, and its production dependencies first. Enable dependency lifecycle scripts only for a reviewed install or
 update by passing `--allow-scripts`.
 
 To configure or develop ohm, enter `/skill:ohm-dev <request>`. For a package request, use a disposable workspace.
-The single bundled skill uses version-matched installed documentation and verifies extensions through the real
+The single bundled skill uses version-matched installed documentation and verifies plugins through the real
 install, `/refresh`, and remove path. See
-[Extensions](extensions.md), [Package authoring and the local gallery](packages.md), and the
-[Extension TUI](tui.md).
+[Plugins](plugins.md), [Plugin authoring](packages.md), and the
+[Terminal UI](tui.md).
 
 ## 7. Know where data lives
 
@@ -244,7 +244,7 @@ Every installation can run diagnostics:
 
 ```sh
 ohm diagnostics ./ohm-support.json
-ohm extensions doctor
+ohm plugins doctor
 ```
 
 Update a managed standalone installation by rerunning the verified one-line installer. `ohm self-update` prints
@@ -257,9 +257,9 @@ For common failures, see [Troubleshooting](troubleshooting.md), [Platform notes]
 ## Where to go next
 
 - Learn the terminal workflow: [README terminal workflow](../README.md#terminal-workflow) and [Runtime cookbook](cookbook.md).
-- Build structural terminal UI for an extension: [Extension TUI](tui.md).
+- Build structural terminal UI for a plugin: [Plugin TUI](tui.md).
 - Configure providers and models: [Providers and authentication](providers.md).
 - Understand persistence: [Sessions and context](sessions.md) and [Context compaction](compaction.md).
-- Install or author extensions: [Extensions](extensions.md) and [Packages](packages.md).
+- Install or author plugins: [Plugins](plugins.md) and [Packages](packages.md).
 - Automate or embed ohm: [HTTP and SSE service](serve.md), [RPC](rpc.md), [Embedding](embedding.md), and [Public API](public-api.md).
 - Understand the implementation: [Architecture](ARCHITECTURE.md).

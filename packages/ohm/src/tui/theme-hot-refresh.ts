@@ -4,7 +4,7 @@ import { lstat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { errorMessage } from "../core/errors.js";
 import { readTrustedTextFileSync } from "../core/resource-file.js";
-import type { ExtensionTheme } from "../extensions/types.js";
+import type { PluginTheme } from "../plugins/types.js";
 import { readFileBounded } from "../tools/paths.js";
 import { parseThemeDefinition, type ThemeDefinition } from "./theme.js";
 import { byteTruncate, sanitizeTerminalText } from "./unicode.js";
@@ -42,7 +42,7 @@ export class ThemeHotRefresher {
   readonly #callbacks: ThemeHotRefreshCallbacks;
   #watcher: FSWatcher | undefined;
   #timer: NodeJS.Timeout | undefined;
-  #selected: Pick<ExtensionTheme, "name" | "sourcePath"> | undefined;
+  #selected: Pick<PluginTheme, "name" | "sourcePath"> | undefined;
   #signature: string | undefined;
   #generation = 0;
 
@@ -50,7 +50,7 @@ export class ThemeHotRefresher {
     this.#callbacks = callbacks;
   }
 
-  select(theme: Pick<ExtensionTheme, "name" | "sourcePath"> | undefined): void {
+  select(theme: Pick<PluginTheme, "name" | "sourcePath"> | undefined): void {
     if (
       theme !== undefined
       && this.#selected !== undefined

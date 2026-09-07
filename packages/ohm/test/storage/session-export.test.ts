@@ -302,7 +302,7 @@ test("standalone export embeds exact UTF-8 JSONL and needs no provider runtime",
   const document = await readFile(output, "utf8");
   const data = embeddedData(document);
   assert.equal(data.title, "Export 世界 🚀");
-  assert.equal(data.jsonl, await readFile(manager.getSessionFile()!, "utf8"));
+  assert.deepEqual(parseSessionV4Bytes(Buffer.from(data.jsonl, "utf8")).state, manager.getV4State());
   assert.match(data.jsonl, /Inspect <this> safely — café/u);
   assert.match(document, /Content-Security-Policy/u);
   assert.match(document, /Download original JSONL/u);
@@ -977,17 +977,14 @@ test("standalone export bounds and validates its source before creating output",
   await assert.rejects(lstat(directoryOutput), { code: "ENOENT" });
 });
 
-test("session-derived HTML revalidates a backing file that grows after opening", async () => {
+test("session-derived HTML renders its owned journal without rereading a changed backing file", async () => {
   const { manager } = await managerFixture("grown-backing-file");
   manager.appendMessage(message("user", [{ type: "text", text: "before growth" }], "user-growth"));
   const source = manager.getSessionFile();
   assert.ok(source);
   await truncate(source, MAX_SESSION_FILE_BYTES + 1);
 
-  assert.throws(
-    () => renderSessionHtml(manager),
-    new RegExp(`Session file exceeds the limit of ${MAX_SESSION_FILE_BYTES}`, "u"),
-  );
+  assert.match(embeddedData(renderSessionHtml(manager)).jsonl, /before growth/u);
 });
 
 test("redacted export keeps a large tool catalog structurally valid", async () => {

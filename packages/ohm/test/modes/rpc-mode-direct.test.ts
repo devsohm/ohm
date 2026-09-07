@@ -76,6 +76,21 @@ test("public RPC mode owns an existing runtime and serves strict JSONL until std
   }]);
 });
 
+test("malformed extension UI replies are diagnosed without closing the RPC stream", async () => {
+  const { records, stderr } = await runFixture([
+    { type: "extension_ui_response", id: "stale" },
+    { type: "extension_ui_response", id: 123, cancelled: true },
+    { id: "state", type: "get_state" },
+  ]);
+  assert.equal(stderr, "");
+  assert.equal(records.length, 3);
+  assert.deepEqual(records.filter((record) => record.command === "parse"), [
+    { type: "response", command: "parse", success: false, error: "Failed to parse command: RPC extension UI response has an invalid payload" },
+    { type: "response", command: "parse", success: false, error: "Failed to parse command: RPC command ID must be a string" },
+  ]);
+  assert.equal(records.find((record) => record.id === "state")?.success, true);
+});
+
 test("public RPC mode redacts extension errors while preserving structured fields", async () => {
   const secret = "sk-proj-rpc-mode-redaction-1234567890";
   const { records, stderr } = await runFixture(
@@ -245,10 +260,10 @@ test("public RPC mode lets active commands finish after stdin closes", async () 
 
 test("RPC control responses bypass a saturated ordinary-command lane", async () => {
   const dispatcher = new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url).href;
-  const extensionUi = new URL("../../src/interfaces/rpc-extension-ui.ts", import.meta.url).href;
+  const extensionUi = new URL("../../src/interfaces/rpc-plugin-ui.ts", import.meta.url).href;
   const blockedDispatcher = dataImport(`
     const { RpcRuntimeDispatcher } = await import(${JSON.stringify(dispatcher)});
-    const { RpcExtensionUiBridge } = await import(${JSON.stringify(extensionUi)});
+    const { RpcPluginUiBridge } = await import(${JSON.stringify(extensionUi)});
     const dispatch = RpcRuntimeDispatcher.prototype.dispatch;
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
@@ -256,7 +271,7 @@ test("RPC control responses bypass a saturated ordinary-command lane", async () 
       await gate;
       return await dispatch.call(this, command);
     };
-    RpcExtensionUiBridge.prototype.handle = function() {
+    RpcPluginUiBridge.prototype.handle = function() {
       release();
       return true;
     };

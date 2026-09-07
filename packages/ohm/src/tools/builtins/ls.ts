@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { Type, type Static } from "typebox";
 
 import { errorMessage } from "../../core/errors.js";
-import { isJsonObject, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, type JsonValue } from "../../core/json.js";
 import { NUMBER_VALUE } from "../../core/value-schemas.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type StandaloneToolDefinition } from "../direct-tool.js";
 import { inputObject, stringInput } from "../input.js";
 import { safeIntegerInput } from "../integer-input.js";
@@ -20,7 +21,7 @@ const DEFAULT_LIMIT = 500;
 const lsParameters = Type.Object({
   path: Type.Optional(Type.String({ description: "Directory to inspect. The default is the current directory." })),
   limit: Type.Optional(Type.Integer({
-    description: "Largest entry count. The default is 500.",
+    description: `Maximum entry count, default ${DEFAULT_LIMIT}. Can be increased; the output byte cap still applies.`,
     minimum: 1,
     maximum: Number.MAX_SAFE_INTEGER,
   })),
@@ -41,18 +42,7 @@ const defaultLsOperations: LsOperations = {
   readdir: fsReaddir,
 };
 
-const schema = {
-  type: "object",
-  properties: {
-    path: { type: "string", description: "Directory to inspect. The default is the current directory." },
-    limit: {
-      type: "integer",
-      description: `Largest entry count. The default is ${DEFAULT_LIMIT}.`,
-      minimum: 1,
-      maximum: Number.MAX_SAFE_INTEGER,
-    },
-  },
-} satisfies JsonObject;
+const schema = providerInputSchema(lsParameters);
 
 export class LsTool implements HarnessTool {
   readonly recovery = { mode: "repeatable" } as const;
@@ -64,8 +54,9 @@ export class LsTool implements HarnessTool {
 
   readonly definition = {
     name: "ls",
-    description: `Show the direct children of a directory. Results include dotfiles and use alphabetical order. A directory name ends with '/'. Output stops at ${DEFAULT_LIMIT} entries or ${TOOL_MAX_BYTES / 1024} KiB.`,
+    description: `List a directory's direct children, including dotfiles, in alphabetical order. Directories end with '/'. Defaults to ${DEFAULT_LIMIT} entries; limit can be increased. Output is capped at ${TOOL_MAX_BYTES / 1024} KiB.`,
     promptSnippet: "Show files and directories at one path",
+    promptGuidelines: ["Use ls for one directory level and find for recursive file discovery. If the entry limit is reached, raise limit or inspect a more specific directory."],
     inputSchema: schema,
   };
 

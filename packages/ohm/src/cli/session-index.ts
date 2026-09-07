@@ -25,7 +25,7 @@ function comparePath(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** Lists canonical JSONL sessions through their rebuildable metadata snapshot. */
+/** Lists saved sessions through their rebuildable metadata snapshot. */
 export async function listSessionCatalog(query: SessionCatalogQuery): Promise<SessionCatalogPage> {
   const limit = query.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) throw new RangeError("Session catalog limit is invalid");

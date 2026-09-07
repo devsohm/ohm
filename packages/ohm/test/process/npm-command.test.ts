@@ -10,8 +10,8 @@ import { defaultNpmCommand } from "../../src/process/npm-command.js";
 import { DefaultPackageManager } from "../../src/core/package-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.js";
-import { getExtensionRuntimeHost } from "../../src/extensions/compat.js";
-import { PROJECT_PACKAGE_DECLARATION, ProjectPackageManager } from "../../src/extensions/project-packages.js";
+import { getPluginRuntimeHost } from "../../src/plugins/compat.js";
+import { PROJECT_PACKAGE_DECLARATION, ProjectPackageManager } from "../../src/plugins/project-packages.js";
 
 const NPM_INVOCATION_VALUE = Type.Object({
   execPath: Type.String(),
@@ -177,7 +177,7 @@ test("normal resource refresh propagates the configured npm argv to project-pack
   await writeFile(log, "");
 
   const loader = new DefaultResourceLoader({ cwd: workspace, agentDir, settingsManager: settings });
-  t.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  t.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   await loader.refresh();
   const calls = (await readFile(log, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
   if (!Value.Check(STRING_ARRAYS_VALUE, calls)) throw new Error("Invalid configured npm argv fixture records");

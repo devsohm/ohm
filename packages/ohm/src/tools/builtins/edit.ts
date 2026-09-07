@@ -6,9 +6,9 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 
 import { errorMessage } from "../../core/errors.js";
-import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../../core/json.js";
+import { isJsonObject, isJsonValue, type JsonValue } from "../../core/json.js";
 import { NUMBER_VALUE, STRING_VALUE } from "../../core/value-schemas.js";
-import { generateDiffString, generateUnifiedPatch, normalizeToLF } from "../edit-diff.js";
+import { detectLineEnding, generateDiffString, generateUnifiedPatch, normalizeToLF, restoreLineEndings } from "../edit-diff.js";
 import { withFileMutation } from "../file-mutation-queue.js";
 import { createHarnessToolDefinition, wrapToolDefinition, type AgentTool, type StandaloneToolDefinition } from "../direct-tool.js";
 import { inputObject, stringInput } from "../input.js";
@@ -21,26 +21,8 @@ import {
   snapshotRegularFile,
 } from "../paths.js";
 import { assertSchema } from "../schema.js";
+import { providerInputSchema } from "../parameter-schema.js";
 import type { HarnessTool, ResourceClaim, ToolContext, ToolResult } from "../types.js";
-
-const schema = {
-  type: "object",
-  required: ["path", "edits"],
-  properties: {
-    path: { type: "string", description: "Target file path. It can be absolute or relative to the workspace." },
-    edits: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["oldText", "newText"],
-        properties: {
-          oldText: { type: "string" },
-          newText: { type: "string" },
-        },
-      },
-    },
-  },
-} satisfies JsonObject;
 
 const replacementParameters = Type.Object({
   oldText: Type.String({ description: "Text that identifies one unique region in the original file." }),
@@ -49,9 +31,10 @@ const replacementParameters = Type.Object({
 const editParameters = Type.Object({
   path: Type.String({ description: "Target file path. It can be absolute or relative to the workspace." }),
   edits: Type.Array(replacementParameters, {
-    description: "Replacements that are all matched against the original file.",
+    description: "Nonempty batch of replacements matched against the original file. Each oldText must select one unique region; regions must not overlap.",
   }),
 });
+const schema = providerInputSchema(editParameters);
 
 const INVALID_EDITS_MESSAGE = "At least one edit replacement is required.";
 
@@ -167,16 +150,6 @@ function normalizedRanges(value: NormalizedText, needle: string): TextRange[] {
   return result;
 }
 
-function lineEnding(value: string): "\r\n" | "\n" {
-  const firstLf = value.indexOf("\n");
-  return firstLf > 0 && value[firstLf - 1] === "\r" ? "\r\n" : "\n";
-}
-
-function restoreLineEndings(value: string, ending: "\r\n" | "\n"): string {
-  const normalized = value.replace(/\r\n?|\n/gu, "\n");
-  return ending === "\r\n" ? normalized.replaceAll("\n", "\r\n") : normalized;
-}
-
 function replaceRanges(value: string, plan: readonly PlannedRange[]): string {
   let output = value;
   for (let index = plan.length - 1; index >= 0; index -= 1) {
@@ -233,13 +206,11 @@ export class EditTool implements HarnessTool {
 
   readonly definition = {
     name: "edit",
-    description: "Change one file by replacing selected text. Each oldText value must identify one region in the original file. Selected regions cannot overlap. Combine nearby changes when they affect the same region. Keep separate replacements small when their locations are far apart.",
+    description: "Apply a batch of text replacements to one existing file. Every nonempty oldText must identify one unique region in the original file, and regions must not overlap. All replacements are checked before writing; a missing, ambiguous, or overlapping match rejects the whole batch.",
     promptSnippet: "Replace one or more separate text regions in a file",
     promptGuidelines: [
       "Use edit when only part of an existing file must change.",
-      "Put separate changes for one file in the same edits array.",
-      "Match every oldText value against the file before any replacement. Combine entries that would overlap.",
-      "Use the smallest oldText value that selects only one location.",
+      "Put separate changes for one file in the same edits array, using only enough original text to identify each location uniquely. Combine entries that would overlap; later entries cannot match text introduced by earlier ones.",
     ],
     inputSchema: schema,
   };
@@ -305,14 +276,14 @@ export class EditTool implements HarnessTool {
       throwIfAborted();
       const bom = raw.startsWith("\ufeff") ? "\ufeff" : "";
       const content = bom === "" ? raw : raw.slice(1);
-      const ending = lineEnding(content);
-      const normalized = normalizedText(content);
+      const ending = detectLineEnding(content);
+      let normalized: NormalizedText | undefined;
       const plan: PlannedRange[] = [];
 
       for (const edit of edits) {
         const exact = ranges(content, edit.oldText);
         const mode = exact.length > 0 ? "exact" as const : "normalized" as const;
-        const matches = exact.length > 0 ? exact : normalizedRanges(normalized, edit.oldText);
+        const matches = exact.length > 0 ? exact : normalizedRanges(normalized ??= normalizedText(content), edit.oldText);
         if (matches.length === 0) {
           throw new Error(edits.length === 1
             ? `No region in ${requested} matched oldText exactly. Include every space and line break.`

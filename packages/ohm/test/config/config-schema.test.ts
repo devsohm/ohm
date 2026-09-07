@@ -6,6 +6,7 @@ import { IsSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
 import { InMemorySettingsStorage, SETTINGS_KEYS, SettingsManager } from "../../src/core/settings-manager.js";
+import { isJsonObject, type JsonObject, type JsonValue } from "../../src/core/json.js";
 import { CONFIG_SCHEMA_URI, hasNullValue, PORTABLE_CONFIG_SCAFFOLD } from "../helpers/config-scaffold.js";
 
 const CONFIG_SCHEMA_METADATA_VALUE = Type.Object({
@@ -19,6 +20,11 @@ const EFFECTIVE_SETTINGS_VALUE = Type.Object({
   theme: Type.String(),
 }, { additionalProperties: true });
 
+function schemaNodeProperties(value: JsonValue | undefined): JsonObject {
+  if (!isJsonObject(value) || !isJsonObject(value.properties)) return {};
+  return value.properties;
+}
+
 test("the versioned config schema accepts the portable installed scaffold and describes every core setting", async () => {
   const schema: unknown = JSON.parse(
     await readFile(new URL("../../resources/schemas/config-v1.json", import.meta.url), "utf8"),
@@ -26,7 +32,7 @@ test("the versioned config schema accepts the portable installed scaffold and de
   const template: unknown = JSON.parse(
     await readFile(new URL("../../resources/config.example.json", import.meta.url), "utf8"),
   );
-  if (!IsSchema(schema) || !Value.Check(CONFIG_SCHEMA_METADATA_VALUE, schema)) {
+  if (!isJsonObject(schema) || !IsSchema(schema) || !Value.Check(CONFIG_SCHEMA_METADATA_VALUE, schema)) {
     assert.fail("The bundled config schema must be a JSON schema with the expected metadata");
   }
 
@@ -35,10 +41,30 @@ test("the versioned config schema accepts the portable installed scaffold and de
   assert.deepEqual(template, PORTABLE_CONFIG_SCAFFOLD);
   assert.equal(hasNullValue(template), false);
   assert.deepEqual(
-    Object.keys(schema.properties).filter((key) => key !== "$schema"),
+    Object.keys(schema.properties).filter((key) => key !== "$schema" && key !== "packages"),
     SETTINGS_KEYS,
   );
+  const properties = schemaNodeProperties(schema);
+  const keys = (name: string): string[] => Object.keys(schemaNodeProperties(properties[name]));
+  assert.deepEqual(keys("compaction"), ["enabled", "triggerPercent", "reserveTokens", "recentTokens"]);
+  assert.deepEqual(keys("branchSummary"), ["reserveTokens", "skipPrompt"]);
+  assert.deepEqual(keys("retry"), ["enabled", "maxRetries", "baseDelayMs", "provider"]);
+  assert.deepEqual(Object.keys(schemaNodeProperties(schemaNodeProperties(properties.retry).provider)), [
+    "timeoutMs", "maxRetries", "maxRetryDelayMs",
+  ]);
+  assert.deepEqual(keys("tools"), ["enabled", "excluded"]);
+  assert.deepEqual(keys("terminal"), ["showImages", "imageWidthCells", "clearOnShrink", "showTerminalProgress"]);
+  assert.deepEqual(keys("images"), ["autoResize", "blockImages"]);
+  assert.deepEqual(keys("thinkingBudgets"), ["minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(keys("markdown"), ["codeBlockIndent"]);
+  assert.deepEqual(keys("warnings"), ["anthropicExtraUsage"]);
+  assert.deepEqual(keys("observability"), ["level"]);
+  const { $schema: _schema, ...expectedSettings } = PORTABLE_CONFIG_SCAFFOLD;
+  assert.deepEqual(SettingsManager.inMemory(template).getSettings(), expectedSettings);
   assert.equal(Value.Check(schema, template), true);
+  assert.equal(Value.Check(schema, { plugins: [{ source: "./review", entrypoints: ["index.ts"], skills: ["skills"] }] }), true);
+  assert.equal(Value.Check(schema, { packages: [{ source: "./review", extensions: ["index.ts"] }] }), true);
+  assert.equal(Value.Check(schema, { plugins: [{ source: "./review", entrypoints: "index.ts" }] }), false);
   assert.equal(Value.Check(schema, {
     $schema: CONFIG_SCHEMA_URI,
     defaultModel: null,

@@ -7,7 +7,7 @@ Live provider discovery remains authoritative. User configuration overrides a ma
 
 Execution is still bounded when a selected model omits or reports malformed context metadata: ohm uses a conservative 128,000-token context window internally without inserting that value into the registry, picker, session metadata, or statistics. Reviewed or live maximum-input ceilings independently constrain the provider projection, including when a caller supplies an explicit total context window. Reviewed or live output ceilings clamp explicit requests and remain enforced after completion. Provider limits that are genuinely dynamic or unpublished stay unknown instead of being inferred.
 
-Generation is closed over the 12 built-in provider identities documented in [Providers and authentication](providers.md). A provider shard can be empty when its catalog is routed or entirely live, such as OpenCode Go or local Ollama discovery. Generic protocol transports and extension-registered providers are not default catalog providers.
+Generation is closed over the 12 built-in provider identities documented in [Providers and authentication](providers.md). A provider shard can be empty when its catalog is routed or entirely live, such as OpenCode Go or local Ollama discovery. Generic protocol transports and plugin-registered providers are not default catalog providers.
 
 After an intentional catalog change, run this command from the repository root:
 

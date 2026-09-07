@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 
 import {
   ProviderRegistry,
@@ -756,14 +756,37 @@ async function runCrashRecoveryProbe(root: string): Promise<BenchmarkReport["pro
   session.appendMessage({ id: "benchmark-recovery-assistant", role: "assistant", content: [{ type: "text", text: "durable checkpoint" }], createdAt: new Date().toISOString() });
   const path = session.getSessionFile();
   if (path === undefined) throw new Error("Recovery benchmark session was not persisted");
+  const committed = session.getV4State();
   session.closeV4Store();
-  await appendFile(path, '{"type":"message","id":"partial"');
   try {
+    const child = `
+      import { DatabaseSync } from "node:sqlite";
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL; PRAGMA cache_size = 1; BEGIN IMMEDIATE;");
+      const sequence = db.prepare("SELECT MAX(sequence) AS sequence FROM session_commits").get().sequence + 1;
+      const commit = { record: "commit", sequence, commitId: "uncommitted-crash-probe",
+        committedAt: new Date().toISOString(), changes: [{ type: "session_name", name: "uncommitted".repeat(16384) }] };
+      db.prepare("INSERT INTO session_commits VALUES (?, ?, ?)").run(sequence, commit.commitId, JSON.stringify(commit));
+      process.stdout.write("uncommitted\\n", () => {
+        if (process.platform === "win32") process.exit(86);
+        else process.kill(process.pid, "SIGKILL");
+      });
+    `;
+    let interrupted = false;
+    try {
+      await execute(process.execPath, ["--input-type=module", "--eval", child, path], { timeout: 5000 });
+    } catch (error) {
+      interrupted = error instanceof Error && "stdout" in error && error.stdout === "uncommitted\n"
+        && (process.platform === "win32" ? "code" in error && error.code === 86 : "signal" in error && error.signal === "SIGKILL");
+      if (!interrupted) throw error;
+    }
     const recovered = SessionManager.open(path, sessionDirectory);
     try {
       const retained = recovered.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "checkpoint");
+      const preserved = isDeepStrictEqual(recovered.getV4State(), committed);
+      recovered.appendCustomEntry("after-recovery", { writable: true });
       return {
-        passed: retained.length === 1,
+        passed: interrupted && preserved && retained.length === 1,
         recoveredRuns: retained.length,
         repairedToolCalls: 0,
         inDoubtToolCalls: 0,

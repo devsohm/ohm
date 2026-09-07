@@ -1,19 +1,19 @@
 # Provider authoring
 
-Trusted direct extensions can:
+Trusted direct plugins can:
 
 - add a provider;
-- replace a provider for one extension generation;
+- replace a provider for one plugin generation;
 - add a custom streaming implementation.
 
 Provider declarations are executable trusted code. They do not belong in `config.json`. Never embed credentials in a package, model row, log, session entry, or diagnostic.
 
 ![Provider authentication, request, transport, and response boundaries](assets/provider-request-boundary.svg)
 
-Use the public extension and model packages:
+Use the public plugin and model packages:
 
 ```ts
-import type { ExtensionAPI, ProviderConfig } from "ohm/extensions";
+import type { PluginAPI, ProviderConfig } from "ohm/plugins";
 import {
   createAssistantMessageEventStream,
   type Context,
@@ -28,7 +28,7 @@ import {
 The compact form composes a `ProviderConfig` over the provider currently registered under the same ID:
 
 ```ts
-export default function activate(ohm: ExtensionAPI): void {
+export default function activate(ohm: PluginAPI): void {
   ohm.registerProvider("local-chat", {
     name: "Local chat",
     api: "openai-completions",
@@ -74,9 +74,9 @@ Successive named registrations by the same active provider facade merge only fie
 | `streamSimple?` | `(model, context, options?) => AssistantMessageEventStream` | Replaces both ordinary and simplified generation for this provider. Required for a custom API identifier that has no built-in transport. |
 | `headers` | `Record<string, string>?` | Static provider headers applied to API-key and OAuth requests. Later authentication, model, and per-call headers can override them. |
 | `authHeader` | `boolean?` | When `true`, the named API-key resolver adds `Authorization: Bearer <resolved key>`. It does not rewrite a native provider's authentication contract. |
-| `oauth` | `ExtensionOAuthConfig?` | Managed login, refresh, request-key derivation, and optional credential-conditioned model filtering. |
+| `oauth` | `PluginOAuthConfig?` | Managed login, refresh, request-key derivation, and optional credential-conditioned model filtering. |
 | `models` | `ProviderModelConfig[]?` | Exact static catalog. A new provider must supply it. |
-| `refreshModels?` | `(context) => Promise<ProviderModelConfig[]>` | Refreshes the catalog. The returned array replaces the extension's current dynamic rows after validation. |
+| `refreshModels?` | `(context) => Promise<ProviderModelConfig[]>` | Refreshes the catalog. The returned array replaces the plugin's current dynamic rows after validation. |
 
 ### Provider configuration values
 
@@ -84,7 +84,7 @@ Successive named registrations by the same active provider facade merge only fie
 
 Configuration commands run only while resolving authentication for a request. Catalog listing, availability checks, and status reporting never execute them, and configured commands are not cached between requests. They inherit the ambient process environment, then apply the stored provider credential's `env` values as overrides. Unsafe process-loader overrides are rejected. The host uses its configured shell when one is available, limits a command to 10 seconds and 64 KiB of output, trims outer stdout whitespace, and omits command output from failures. Internal newlines are preserved for keys, but resolved header values must remain single-line.
 
-A durable API-key credential may store an `env` map and a key expression such as `$SCOPED_KEY`. Its saved environment takes precedence over the ambient environment. A successful stored command key result is cached only for that composed provider generation and shell policy; in-flight commands and provider-configuration commands are not shared. Resolved keys and configured secret headers are registered for redaction and stay outside the run-loop `ProviderRequest`. Host-owned adapters add private configured headers after extension-visible wire lifecycle interception at the final transport boundary.
+A durable API-key credential may store an `env` map and a key expression such as `$SCOPED_KEY`. Its saved environment takes precedence over the ambient environment. A successful stored command key result is cached only for that composed provider generation and shell policy; in-flight commands and provider-configuration commands are not shared. Resolved keys and configured secret headers are registered for redaction and stay outside the run-loop `ProviderRequest`. Host-owned adapters add private configured headers after plugin-visible wire lifecycle interception at the final transport boundary.
 
 A new provider requires `models`. Every resulting model must resolve an API and base URL from:
 
@@ -98,11 +98,11 @@ For an overlay of an existing provider:
 
 - omitted fields inherit the original registration;
 - a supplied `models` array replaces its catalog rather than appending rows;
-- a supplied `refreshModels` runs after the inherited refresh and replaces the extension-owned dynamic rows;
+- a supplied `refreshModels` runs after the inherited refresh and replaces the plugin-owned dynamic rows;
 - a supplied `streamSimple` handles every model selected through the composed provider;
 - unloading restores the exact original provider and its previously available model snapshot.
 
-The public low-level protocol identifiers are `openai-completions`, `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, and `google-vertex`. These identifiers describe wire adapters; they do not add provider identities to the built-in model picker. The direct boundary also recognizes the explicit protocol aliases `openai-chat-completions`, `bedrock-converse`, `gemini-generate-content`, `gemini-interactions`, and `ollama-chat`. `Api` permits a custom string; use one only with a matching custom stream. The core records an extension-owned custom stream as `extension-stream`; this is an internal continuation family, not a built-in network protocol.
+The public low-level protocol identifiers are `openai-completions`, `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, and `google-vertex`. These identifiers describe wire adapters; they do not add provider identities to the built-in model picker. The direct boundary also recognizes the explicit protocol aliases `openai-chat-completions`, `bedrock-converse`, `gemini-generate-content`, `gemini-interactions`, and `ollama-chat`. `Api` permits a custom string; use one only with a matching custom stream. The core records a plugin-owned custom stream as `extension-stream`; this is an internal continuation family, not a built-in network protocol.
 
 ## Model rows
 
@@ -194,7 +194,7 @@ additional provider-owned values under other string keys.
 | Callback | Contract |
 | --- | --- |
 | `onAuth({ url, instructions? })` | Announces a browser authorization URL. |
-| `onDeviceCode({ userCode, verificationUri, intervalSeconds?, expiresInSeconds? })` | Announces a device flow. The extension owns bounded polling and cancellation. |
+| `onDeviceCode({ userCode, verificationUri, intervalSeconds?, expiresInSeconds? })` | Announces a device flow. The plugin owns bounded polling and cancellation. |
 | `onPrompt({ message, placeholder?, allowEmpty? })` | Requests text. |
 | `onProgress?(message)` | Emits progress without credentials. |
 | `onManualCodeInput?()` | Requests a pasted authorization code. |
@@ -203,7 +203,7 @@ additional provider-owned values under other string keys.
 
 Never log callback answers, access tokens, refresh tokens, authorization codes, client secrets, or derived headers. Validate authorization, token, and callback endpoints before connecting. Bound device polling by both expiry and cancellation.
 
-An extension that needs a loopback callback server must own its server lifecycle, state verification, port bounds, timeout, and `onDispose` cleanup.
+A plugin that needs a loopback callback server must own its server lifecycle, state verification, port bounds, timeout, and `onDispose` cleanup.
 
 Automatic named `refreshToken` calls carry the requesting operation's optional
 cancellation signal. Honor that signal and keep the provider request bounded.
@@ -351,7 +351,7 @@ Emit exactly one terminal `done` or `error`, and replace `"pending"` with the ma
 
 ## Author checklist
 
-Before shipping a provider extension, verify:
+Before shipping a provider plugin, verify:
 
 1. every model has an exact protocol, endpoint, modality, reasoning map, cost, and token limit;
 2. authentication resolution and refresh never expose secrets through output or session state;

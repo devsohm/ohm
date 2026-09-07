@@ -1,10 +1,11 @@
 import { optionalProperties } from "../core/optional-properties.js";
+import { createServeSessionRuntime } from "../serve/session-runtime.js";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { defaultSecretRedactor } from "../auth/redaction.js";
-import type { ExtensionCommandContextActions } from "../extensions/direct.js";
-import type { RuntimeInlineExtension } from "../extensions/runtime.js";
+import type { PluginCommandContextActions } from "../plugins/direct.js";
+import type { RuntimeInlinePlugin } from "../plugins/runtime.js";
 import {
   withGracefulTermination,
   type GracefulTerminationContext,
@@ -16,9 +17,13 @@ import {
   type ServeSessionRuntime,
 } from "../serve/server.js";
 import { SessionManager } from "../storage/session-manager.js";
-import type { ExtensionBindings } from "../service/agent-session.js";
+import type { AgentSession, PluginBindings } from "../service/agent-session.js";
 import type { ToolAuthorizationHandler } from "../tools/approval.js";
 import { writeMachineOutput } from "../interfaces/output-guard.js";
+import {
+  portablePresentationRemoveEvent,
+  type PortablePresentationEvent,
+} from "../interfaces/portable-presentation.js";
 import {
   flagBoolean,
   flagPositiveSafeInteger,
@@ -28,6 +33,7 @@ import {
 } from "./management-args.js";
 import type { ProjectTrustResolver } from "./project-trust.js";
 import { loadRuntime } from "./runtime.js";
+import { pluginResourceOptions } from "./plugin-flags.js";
 import { resolveStartupSessionDirectory } from "./session-startup.js";
 
 const DEFAULT_SERVE_HOST = "127.0.0.1";
@@ -35,7 +41,7 @@ const DEFAULT_SERVE_PORT = 4_317;
 const LOOPBACK_SERVE_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 export interface ServeCommandOptions {
-  extensionFactories?: readonly RuntimeInlineExtension[];
+  pluginFactories?: readonly RuntimeInlinePlugin[];
   projectTrustResolver?: ProjectTrustResolver;
   environment?: NodeJS.ProcessEnv;
   /** Optional caller-owned gate for model-requested tool effects in every served session. */
@@ -45,9 +51,13 @@ export interface ServeCommandOptions {
 interface ProductServeFactoryOptions {
   baseWorkspace: string;
   environment: NodeJS.ProcessEnv;
-  extensionFactories: readonly RuntimeInlineExtension[];
-  extensionPaths: readonly string[];
-  extensions: boolean;
+  pluginFactories: readonly RuntimeInlinePlugin[];
+  pluginPaths: readonly string[];
+  pluginCode: boolean;
+  skills: boolean;
+  promptTemplates: boolean;
+  themes: boolean;
+  explicitPluginResources: { skills: boolean; prompts: boolean; themes: boolean };
   offline: boolean;
   toolAuthorizationHandler?: ToolAuthorizationHandler;
   projectTrustResolver?: ProjectTrustResolver;
@@ -57,11 +67,12 @@ interface ProductServeFactoryOptions {
 
 type ProductServeRuntime = Awaited<ReturnType<typeof loadRuntime>>;
 
-function serveExtensionBindings(
+function servePluginBindings(
   runtime: ProductServeRuntime,
   requestShutdown: () => void,
-): ExtensionBindings {
-  const commandContextActions: ExtensionCommandContextActions = {
+  rebindSubscriptions: (session: AgentSession) => void,
+): PluginBindings {
+  const commandContextActions: PluginCommandContextActions = {
     async waitForIdle(signal) {
       signal?.throwIfAborted();
       await runtime.session.waitForIdle();
@@ -88,12 +99,17 @@ function serveExtensionBindings(
     },
     async refresh(signal) {
       signal?.throwIfAborted();
-      await runtime.refresh({
-        ...optionalProperties(signal === undefined ? undefined : { signal }),
-        beforeSessionStart(session) {
-          session.updateExtensionBindings(serveExtensionBindings(runtime, requestShutdown));
-        },
-      });
+      try {
+        await runtime.refresh({
+          ...optionalProperties(signal === undefined ? undefined : { signal }),
+          beforeSessionStart(session) {
+            rebindSubscriptions(session);
+            session.updatePluginBindings(servePluginBindings(runtime, requestShutdown, rebindSubscriptions));
+          },
+        });
+      } finally {
+        rebindSubscriptions(runtime.session);
+      }
       signal?.throwIfAborted();
     },
   };
@@ -103,7 +119,7 @@ function serveExtensionBindings(
     shutdownHandler: requestShutdown,
     onError(error) {
       process.stderr.write(
-        `${defaultSecretRedactor.redact(`Extension error (${error.extensionPath}): ${error.error}`)}\n`,
+        `${defaultSecretRedactor.redact(`Plugin error (${error.extensionPath}): ${error.error}`)}\n`,
       );
     },
   };
@@ -199,14 +215,15 @@ async function createProductServeSessionFactory(
         workspace: manager.getCwd(),
         sessionManager: manager,
         ...optionalProperties(sessionDirectory === undefined ? undefined : { sessionDirectory }),
-        extensions: options.extensions,
-        extensionPaths: options.extensionPaths,
-        extensionFactories: options.extensionFactories,
+        pluginCode: options.pluginCode,
+        pluginPaths: options.pluginPaths,
+        pluginFactories: options.pluginFactories,
         ...optionalProperties(options.projectTrustResolver === undefined ? undefined : { projectTrustResolver: options.projectTrustResolver }),
-        skills: true,
-        promptTemplates: true,
-        themes: true,
-        extensionRuntime: true,
+        skills: options.skills,
+        promptTemplates: options.promptTemplates,
+        themes: options.themes,
+        explicitPluginResources: options.explicitPluginResources,
+        pluginRuntime: true,
         offline: options.offline,
         ...optionalProperties(options.toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler: options.toolAuthorizationHandler }),
       });
@@ -222,10 +239,26 @@ async function createProductServeSessionFactory(
       throw error;
     }
     try {
-      runtime.setExtensionShutdownHandler(options.requestShutdown);
+      runtime.setPluginShutdownHandler(options.requestShutdown);
       let modelReady = false;
       let modelSelection: Promise<void> | undefined;
       let closeFlight: Promise<void> | undefined;
+      const subscriptionRebinds = new Set<(session: AgentSession) => void>();
+      const subscriptions = new Set<() => void>();
+      const retainSubscription = (rebind: (session: AgentSession) => void, detach: () => void) => {
+        const unsubscribe = () => {
+          if (!subscriptions.delete(unsubscribe)) return;
+          subscriptionRebinds.delete(rebind);
+          detach();
+        };
+        subscriptionRebinds.add(rebind);
+        subscriptions.add(unsubscribe);
+        return unsubscribe;
+      };
+      const rebindSubscriptions = (session: AgentSession) => {
+        if (closeFlight !== undefined) return;
+        for (const rebind of subscriptionRebinds) rebind(session);
+      };
       const ensureModel = async (signal: AbortSignal): Promise<void> => {
         if (modelReady) return;
         modelSelection ??= selectConfiguredServeModel(runtime, signal);
@@ -239,8 +272,11 @@ async function createProductServeSessionFactory(
       const close = (): Promise<void> => {
         closeFlight ??= (async () => {
           const failures: unknown[] = [];
+          for (const unsubscribe of subscriptions) {
+            try { unsubscribe(); } catch (error) { failures.push(error); }
+          }
           try {
-            await runtime.runtimeExtensions.dispatch("session_shutdown", { reason: "quit" });
+            await runtime.runtimePlugins.dispatch("session_shutdown", { reason: "quit" });
           } catch (error) {
             failures.push(error);
           }
@@ -256,55 +292,52 @@ async function createProductServeSessionFactory(
         })();
         return closeFlight;
       };
-      return {
-        get sessionId() {
-          return runtime.session.sessionId;
-        },
-        get suspendedRun() {
-          return runtime.session.suspendedRun;
-        },
-        get summary() {
-          const state = runtime.session.state;
-          return {
-            ...optionalProperties(state.model === undefined ? undefined : {
-                  model: {
-                    provider: state.model.provider,
-                    api: state.model.api,
-                    id: state.model.id,
-                  },
-                }),
-            thinkingLevel: state.thinkingLevel,
-            isStreaming: state.isStreaming,
-            isCompacting: runtime.session.isCompacting,
-            isRetrying: runtime.session.isRetrying,
-            pendingMessageCount: runtime.session.pendingMessageCount,
-            hasSuspendedRun: state.suspendedRun !== undefined,
-            messageCount: state.messages.length,
-            toolCount: state.tools.length,
-          };
-        },
+      return createServeSessionRuntime(() => runtime.session, {
         onEvent(listener) {
-          return runtime.session.onEvent(listener);
+          let session = runtime.session;
+          let detach = session.onEvent(listener);
+          return retainSubscription((replacement) => {
+            if (session === replacement) return;
+            const nextDetach = replacement.onEvent(listener);
+            detach();
+            session = replacement;
+            detach = nextDetach;
+          }, () => detach());
         },
         onPortablePresentation(listener) {
-          return runtime.session.onPortablePresentation(listener);
-        },
-        listPortablePresentations() {
-          return runtime.session.listPortablePresentations();
-        },
-        async invokePortablePresentationAction(request, signal) {
-          return await runtime.session.invokePortablePresentationAction(request, signal);
-        },
-        listExtensionWireServices() {
-          return runtime.session.listExtensionWireServices();
-        },
-        async invokeExtensionWireService(request, signal) {
-          return await runtime.session.invokeExtensionWireService(request, signal);
+          let session = runtime.session;
+          const views = new Map<string, { owner: string; id: string; revision: number }>();
+          const remember = (event: PortablePresentationEvent) => {
+            const id = event.operation === "show" ? event.presentation.id : event.presentationId;
+            const key = `${event.owner}\u0000${id}`;
+            if (event.operation === "remove") views.delete(key);
+            else views.set(key, { owner: event.owner, id, revision: event.presentation.revision });
+          };
+          const forward = (event: PortablePresentationEvent) => {
+            remember(event);
+            listener(event);
+          };
+          let detach = session.onPortablePresentation(forward);
+          for (const event of session.listPortablePresentations()) remember(event);
+          return retainSubscription((replacement) => {
+            if (session === replacement) return;
+            const nextDetach = replacement.onPortablePresentation(forward);
+            detach();
+            session = replacement;
+            detach = nextDetach;
+            // Generation revisions can restart. Remove old views before publishing
+            // replacement snapshots, retaining only their identity metadata here.
+            for (const view of views.values()) {
+              listener(portablePresentationRemoveEvent(view.owner, view.id, view.revision));
+            }
+            views.clear();
+            for (const event of replacement.listPortablePresentations()) forward(event);
+          }, () => { detach(); views.clear(); });
         },
         async start(startSignal) {
           startSignal.throwIfAborted();
-          await runtime.session.bindExtensions(
-            serveExtensionBindings(runtime, options.requestShutdown),
+          await runtime.session.bindPlugins(
+            servePluginBindings(runtime, options.requestShutdown, rebindSubscriptions),
             startSignal,
           );
           startSignal.throwIfAborted();
@@ -316,9 +349,6 @@ async function createProductServeSessionFactory(
           startSignal.throwIfAborted();
           await ensureModel(startSignal);
         },
-        async prompt(text, promptOptions) {
-          return await runtime.session.prompt(text, promptOptions);
-        },
         async recoverInterruptedRun(recoveryOptions = {}) {
           const recovery = await runtime.session.recoverInterruptedRun(recoveryOptions);
           if (runtime.session.suspendedRun === undefined) {
@@ -326,13 +356,8 @@ async function createProductServeSessionFactory(
           }
           return recovery;
         },
-        async abort(reason) {
-          await runtime.session.abort(reason);
-        },
-        async close() {
-          await close();
-        },
-      };
+        close,
+      });
     } catch (error) {
       await runtime.close().catch(() => undefined);
       throw error;
@@ -394,9 +419,12 @@ async function runServeOperation(
   const sessionFactory = await createProductServeSessionFactory({
     baseWorkspace: flagString(argumentsValue, "workspace") ?? process.cwd(),
     environment,
-    extensionFactories: options.extensionFactories ?? [],
-    extensionPaths: flagStrings(argumentsValue, "extension"),
-    extensions: !flagBoolean(argumentsValue, "no-extensions"),
+    pluginFactories: options.pluginFactories ?? [],
+    pluginPaths: flagStrings(argumentsValue, "plugin"),
+    ...pluginResourceOptions({
+      noPlugins: flagBoolean(argumentsValue, "no-plugins"),
+      noPluginCode: flagBoolean(argumentsValue, "no-plugin-code"),
+    }),
     offline: flagBoolean(argumentsValue, "offline")
       || /^(?:1|true|yes)$/iu.test(environment.OHM_OFFLINE ?? ""),
     ...optionalProperties(options.toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler: options.toolAuthorizationHandler }),

@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import { errorMessage } from "../core/errors.js";
 import type { EventEnvelope, RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
-import type { RuntimeExtensionEventMap, RuntimeExtensionHost } from "../extensions/runtime.js";
+import type { RuntimePluginEventMap, RuntimePluginHost } from "../plugins/runtime.js";
 import type { AgentSession, AgentSessionBashResult } from "../service/agent-session.js";
 import { WorkspaceBoundary } from "../tools/paths.js";
 import { normalizeShellTerminalState } from "../tools/shell-result.js";
@@ -21,10 +21,10 @@ export interface InteractiveShellOptions {
 }
 
 export interface InteractiveShellHost {
-  reduceBeforeUserShell: RuntimeExtensionHost["reduceBeforeUserShell"];
+  reduceBeforeUserShell: RuntimePluginHost["reduceBeforeUserShell"];
   dispatch(
     event: "event",
-    value: RuntimeExtensionEventMap["event"],
+    value: RuntimePluginEventMap["event"],
     signal?: AbortSignal,
   ): Promise<void>;
 }

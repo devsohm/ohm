@@ -56,12 +56,12 @@ const ordinarySnapshot: OhmTuiSnapshot = {
 };
 
 test("native renderer renders the exact ordinary-width frame", () => {
-  assert.equal(rendered(ordinarySnapshot, 72), [
+  assert.equal(rendered(ordinarySnapshot, 72).split("\n").map((line) => line.trimEnd()).join("\n"), [
     "",
     " Check the renderer.",
     "",
     "",
-    "I will inspect the active state.",
+    "ohm   I will inspect the active state.",
     "",
     "",
     " Keep the update stable.",
@@ -71,28 +71,22 @@ test("native renderer renders the exact ordinary-width frame", () => {
     "",
     "✦ Thinking",
     "",
-    "○ read · pending",
-    "  ↳ Waiting for a slot",
-    "● test · running",
-    "  ↳ Focused checks",
-    "  … Ctrl+O details",
-    "✓ inspect · done",
-    "  ↳ Two files",
-    "× probe · failed",
-    "  ↳ Unavailable",
+    "○ read  Waiting for a slot  pending",
+    "● test  Focused checks  running",
+    "✓ inspect  Two files  done",
+    "× probe  Unavailable  failed",
     "",
-    "The first pass is ready.",
+    "ohm   The first pass is ready.",
     "",
     "Queued · 1",
     "  Run the narrow check next.",
     "",
-  "─ Ask ohm · manual ────────────────────────────────────────────────────",
+    "─ Ask ohm · manual ────────────────────────────────────────────────────",
     "› Add an update test.",
-    "───────────────────────────────────────────────────────────────────────",
     "",
-    "● connected · model-x · max · testing",
-    "  ctx 47.2%/100k · in 12k · out 860 · R11k · W800 · cache hit 91.0%",
-    "  $0.125 (sub)",
+    "● model-x · think max · testing",
+    "  ctx 47.2%/100k · cache hit 91.0% · in 12k · out 860 · cache read 11k",
+    "  cache write 800 · $0.125 (sub)",
   ].join("\n"));
 });
 
@@ -109,7 +103,7 @@ test("native renderer renders the exact narrow frame without overflowing", () =>
     telemetry: { inputTokens: 12, outputTokens: 3, cacheReadTokens: 8, cacheHitPercent: 50 },
   };
   const frame = rendered(snapshot, 12, { thinkingExpanded: true });
-  assert.equal(frame, [
+  assert.equal(frame.split("\n").map((line) => line.trimEnd()).join("\n"), [
     "",
     " tiny frame",
     "",
@@ -117,20 +111,18 @@ test("native renderer renders the exact narrow frame without overflowing", () =>
     "✦ Thinking",
     "  still safe",
     "",
-    "✓ read",
-    "  done",
+    "✓ read  done",
     "  ↳ one file",
     "",
     "─ Prompt ──",
     "› go",
-    "───────────",
     "",
-    "● connected",
-    "  in 12",
-    "  out 3",
-    "  R8",
+    "● configured",
     "  cache hit",
     "  50.0%",
+    "  in 12/out",
+    "  3",
+    "  read 8",
   ].join("\n"));
   for (const line of frame.split("\n")) assert.ok(line.length <= 12, line);
 });
@@ -182,9 +174,8 @@ test("notice rows render exact distinct status, warning, and error tones", () =>
     "",
     "─ Prompt ──────────────────────────────",
     "› ",
-    "───────────────────────────────────────",
     "",
-    "✓ connected",
+    "✓ configured",
   ].join("\n"));
   const lines = frame.split("\n");
   assert.ok(lines[0]?.includes(theme.getFgAnsi("muted")));
@@ -229,81 +220,22 @@ test("thinking and tool details project independently", () => {
     telemetry: {},
   };
   const collapsed = [
-    "◇ Thinking",
-    "",
-    "✦ Thinking",
-    "",
-    "✓ read · done",
-    "  ↳ one file",
-    "  … Ctrl+O details",
-    "",
-    "─ Prompt ──────────────────────────────",
-    "› ",
-    "───────────────────────────────────────",
-    "",
-    "● connected",
+    "◇ Thinking", "", "✦ Thinking", "", "✓ read  one file  done", "",
+    "─ Prompt ──────────────────────────────", "› ", "", "● configured",
   ].join("\n");
+  const withThinking = collapsed.replace("◇ Thinking", "◇ Thinking\n  Past reasoning.")
+    .replace("✦ Thinking", "✦ Thinking\n  Current reasoning.");
+  const toolBody = "\n  ↳ Input\n    notes.md\n  ↳ Output\n    ready";
   assert.equal(rendered(snapshot, 40), collapsed);
-
-  assert.equal(rendered(snapshot, 40, { thinkingExpanded: true }), [
-    "◇ Thinking",
-    "  Past reasoning.",
-    "",
-    "✦ Thinking",
-    "  Current reasoning.",
-    "",
-    "✓ read · done",
-    "  ↳ one file",
-    "  … Ctrl+O details",
-    "",
-    "─ Prompt ──────────────────────────────",
-    "› ",
-    "───────────────────────────────────────",
-    "",
-    "● connected",
-  ].join("\n"));
-
-  assert.equal(rendered(snapshot, 40, { thinkingExpanded: true, toolDetailsExpanded: true }), [
-    "◇ Thinking",
-    "  Past reasoning.",
-    "",
-    "✦ Thinking",
-    "  Current reasoning.",
-    "",
-    "✓ read · done",
-    "  ↳ one file",
-    "  ↳ Input",
-    "    notes.md",
-    "  ↳ Output",
-    "    ready",
-    "  … Ctrl+O collapse",
-    "",
-    "─ Prompt ──────────────────────────────",
-    "› ",
-    "───────────────────────────────────────",
-    "",
-    "● connected",
-  ].join("\n"));
-
-  assert.equal(rendered(snapshot, 40, { toolDetailsExpanded: true }), [
-    "◇ Thinking",
-    "",
-    "✦ Thinking",
-    "",
-    "✓ read · done",
-    "  ↳ one file",
-    "  ↳ Input",
-    "    notes.md",
-    "  ↳ Output",
-    "    ready",
-    "  … Ctrl+O collapse",
-    "",
-    "─ Prompt ──────────────────────────────",
-    "› ",
-    "───────────────────────────────────────",
-    "",
-    "● connected",
-  ].join("\n"));
+  assert.equal(rendered(snapshot, 40, { thinkingExpanded: true }), withThinking);
+  assert.equal(
+    rendered(snapshot, 40, { toolDetailsExpanded: true }),
+    collapsed.replace("✓ read  one file  done", "✓ read  one file  done" + toolBody),
+  );
+  assert.equal(
+    rendered(snapshot, 40, { thinkingExpanded: true, toolDetailsExpanded: true }),
+    withThinking.replace("✓ read  one file  done", "✓ read  one file  done" + toolBody),
+  );
 });
 
 test("tool-detail row budgets retain useful heads and tails with exact omission counts", () => {
@@ -313,7 +245,7 @@ test("tool-detail row budgets retain useful heads and tails with exact omission 
       id: "tool",
       kind: "tool",
       name: "read",
-      status: "completed",
+      status: "running",
       details: [
         { kind: "output", label: "Head", value, preview: true },
         { kind: "progress", label: "Tail", value, preview: true, tail: true },
@@ -497,7 +429,7 @@ test("normalization sanitizes terminal text, retains history, and replaces dupli
   });
 });
 
-test("every user message keeps the exact full-width padded color treatment", () => {
+test("every user message uses its theme-owned card colors", () => {
   const theme = createTheme("user-message-rows", { color: true, unicode: true }, {
     schemaVersion: 1,
     name: "user-message-rows",
@@ -518,19 +450,13 @@ test("every user message keeps the exact full-width padded color treatment", () 
     telemetry: {},
   };
   const frame = rendered(snapshot, 20, { theme });
-  const coloredRows = frame.split("\n").filter((line) => (
-    line.includes(theme.getFgAnsi("userMessageText"))
-    && line.includes(theme.getBgAnsi("userMessageBg"))
-  ));
-  assert.equal(coloredRows.length, 6);
-  assert.deepEqual(coloredRows.map(stripAnsi), [
-    " ".repeat(20),
-    " one".padEnd(20),
-    " ".repeat(20),
-    " ".repeat(20),
-    " two".padEnd(20),
-    " ".repeat(20),
-  ]);
+  const coloredRows = frame.split("\n").filter((line) => ["one", "two"].includes(stripAnsi(line).trim()));
+  assert.deepEqual(coloredRows.map((line) => stripAnsi(line).trimEnd()), [" one", " two"]);
+  for (const line of coloredRows) {
+    assert.match(line, terminalPattern("\\u001b\\[38;5;255m", "u"));
+    assert.match(line, terminalPattern("\\u001b\\[48;5;236m", "u"));
+    assert.equal(cellWidth(line), 20);
+  }
 });
 
 test("the pure frame projector returns one-based composer cursor coordinates", () => {
@@ -542,18 +468,18 @@ test("the pure frame projector returns one-based composer cursor coordinates", (
     telemetry: {},
   };
   const wrapped = projectOhmNativeFrame({ snapshot, columns: 8 });
-  assert.deepEqual(wrapped.cursor, { row: 4, column: 1 });
+  assert.deepEqual(wrapped.cursor, { row: 4, column: 3 });
   assert.equal(wrapped.text.split("\n")[2], "› word");
-  assert.equal(wrapped.text.split("\n")[3], "next");
+  assert.equal(wrapped.text.split("\n")[3], "  next");
   assert.doesNotMatch(wrapped.text, /[\u2063\ue000]/u);
 
   const fullLine = projectOhmNativeFrame({
-    snapshot: { ...snapshot, composer: { value: "abcdef", cursor: 6, label: "Prompt" } },
+    snapshot: { ...snapshot, composer: { value: "abcdefgh", cursor: 8, label: "Prompt" } },
     columns: 8,
   });
-  assert.deepEqual(fullLine.cursor, { row: 4, column: 1 });
+  assert.deepEqual(fullLine.cursor, { row: 4, column: 5 });
   assert.equal(fullLine.text.split("\n")[2], "› abcdef");
-  assert.equal(fullLine.text.split("\n")[3], "");
+  assert.equal(fullLine.text.split("\n")[3], "  gh");
 
   const wide = projectOhmNativeFrame({
     snapshot: { ...snapshot, composer: { value: "A界🙂 Z", cursor: 3, label: "Prompt" } },
@@ -589,18 +515,18 @@ test("a bounded composer keeps a cursor-local draft window inside a 60x12 frame"
   const composer = lines.slice(frame.composer.top, frame.composer.bottom);
 
   assert.ok(lines.length <= 12);
-  assert.deepEqual(composer.slice(1, -1), [
-    "draft 23",
-    "draft 24",
-    "draft 25",
-    "draft 26",
-    "draft 27",
-    "draft 28",
+  assert.deepEqual(composer.slice(1), [
+    "› draft 23",
+    "  draft 24",
+    "  draft 25",
+    "  draft 26",
+    "  draft 27",
+    "  draft 28",
   ]);
   assert.ok(frame.cursor.row - 1 >= frame.composer.top);
   assert.ok(frame.cursor.row - 1 < frame.composer.bottom);
-  assert.equal(lines[frame.cursor.row - 1], "draft 25");
-  assert.equal(frame.cursor.column, 4);
+  assert.equal(lines[frame.cursor.row - 1], "  draft 25");
+  assert.equal(frame.cursor.column, 6);
 });
 
 test("bounded prompts keep their useful tail and bounded queues keep the latest receipts", () => {
@@ -630,7 +556,7 @@ test("bounded prompts keep their useful tail and bounded queues keep the latest 
   assert.match(text, /message 097[\s\S]*message 098[\s\S]*message 099[\s\S]*message 100/u);
   assert.doesNotMatch(text, /prompt 06/u);
   assert.match(text, /prompt 07\nprompt 08\nprompt 09\nprompt 10/u);
-  assert.equal(frame.composer.bottom - frame.composer.top, 7);
+  assert.equal(frame.composer.bottom - frame.composer.top, 6);
   assert.ok(frame.cursor.row - 1 >= frame.composer.top);
   assert.ok(frame.cursor.row - 1 < frame.composer.bottom);
 });
@@ -660,7 +586,7 @@ test("bounded projection remains cursor-safe at a one-cell terminal width", () =
   for (const line of lines) assert.ok(cellWidth(line) <= 1, line);
 });
 
-test("composer padding preserves full-width rails and shifts prompt, draft, and cursor", () => {
+test("composer padding preserves its single boundary and shifts prompt, draft, and cursor", () => {
   const snapshot: OhmTuiSnapshot = {
     transcript: [],
     queuedMessages: [],
@@ -673,7 +599,7 @@ test("composer padding preserves full-width rails and shifts prompt, draft, and 
   const composer = lines.slice(frame.composer.top, frame.composer.bottom);
 
   assert.equal(cellWidth(composer[0] ?? ""), 19);
-  assert.equal(cellWidth(composer.at(-1) ?? ""), 19);
+  assert.equal(composer.length, 3);
   assert.equal(composer[1], "  question");
   assert.equal(composer[2], "  › draft");
   assert.equal(frame.cursor.column, 7);
@@ -715,12 +641,13 @@ test("a supplied theme owns semantic colors and glyphs while preserving frame ge
 
   const projected = projectOhmNativeFrame({ snapshot, columns: 60, theme, unicode: true }).text;
   assert.match(projected, terminalPattern("\\u001b\\[38;5;196m◆ Thinking", "u"));
-  assert.match(projected, terminalPattern("\\u001b\\[38;5;15m\\u001b\\[48;5;22m Inspect it\\.", "u"));
-  assert.match(projected, terminalPattern("\\u001b\\[48;5;235m\\u001b\\[38;5;208m▸", "u"));
+  assert.ok(projected.includes(theme.fg("userMessageText", "Inspect it.")));
+  assert.ok(projected.includes(theme.getBgAnsi("userMessageBg")));
+  assert.match(projected, terminalPattern("\\u001b\\[38;5;208m▸", "u"));
   assert.match(projected, terminalPattern("\\u001b\\[38;5;33m─ Prompt", "u"));
 });
 
-test("completed tool blocks use the success background with semantic header foregrounds", () => {
+test("completed tool ledger uses semantic foregrounds without background slabs", () => {
   const theme = createTheme("completed-tool", { color: true, unicode: true }, {
     schemaVersion: 1,
     name: "completed-tool",
@@ -748,14 +675,13 @@ test("completed tool blocks use the success background with semantic header fore
 
   const header = projectOhmNativeFrame({ snapshot, columns: 60, theme }).text
     .split("\n")
-    .find((line) => stripAnsi(line).includes("✓ read · done · 6ms"));
+    .find((line) => stripAnsi(line).includes("✓ read  done · 6ms"));
   assert.ok(header);
   assert.match(header, terminalPattern("\\u001b\\[38;5;46m✓", "u"));
   assert.match(header, terminalPattern("\\u001b\\[38;5;252m read", "u"));
-  assert.match(header, terminalPattern("\\u001b\\[38;5;247m · done · 6ms", "u"));
-  assert.ok(header.includes(theme.getBgAnsi("toolSuccessBg")));
-  assert.equal(cellWidth(header), 60);
-  assert.doesNotMatch(header, /48;5;(?:52|53)/u);
+  assert.match(header, terminalPattern("\\u001b\\[38;5;247m  done · 6ms", "u"));
+  assert.equal(stripAnsi(header), "✓ read  done · 6ms");
+  assert.doesNotMatch(header, terminalPattern("\\u001b\\[[0-9;]*48;", "u"));
 });
 
 test("failed tool headers and details use error foregrounds without theme backgrounds", () => {
@@ -805,7 +731,7 @@ test("failed tool headers and details use error foregrounds without theme backgr
     const frame = projectOhmNativeFrame({ snapshot, columns: 80, theme }).text;
     const relevant = frame.split("\n").filter((line) => {
       const plain = stripAnsi(line);
-      return plain.includes(`${theme.glyphs.failure} ${name} · failed · exit 7 · 8ms`)
+      return plain.includes(`${theme.glyphs.failure} ${name}  failed · exit 7 · 8ms`)
         || plain.includes(`plain failure from ${name}`)
         || plain.includes(`formatted failure from ${name}`)
         || plain.includes("-removed");
@@ -845,13 +771,14 @@ test("a no-color ASCII theme emits no ANSI and uses only ASCII renderer chrome",
 
   assert.doesNotMatch(projected.text, terminalPattern("\\u001b", "u"));
   assert.match(projected.text, /^A Thinking$/mu);
-  assert.match(projected.text, /^\+ read \| done$/mu);
-  assert.match(projected.text, /^\+ skill \| done$/mu);
+  assert.match(projected.text, /^\+ read  done$/mu);
+  assert.match(projected.text, /^\+ skill  done$/mu);
   assert.match(projected.text, /^    Use safe code\.$/mu);
   assert.doesNotMatch(projected.text, /\*\*safe\*\*|`code`/u);
   assert.match(projected.text, /^x error failed$/mu);
   assert.match(projected.text, /^- Ask ohm \| manual -+$/mu);
   assert.match(projected.text, /^> go$/mu);
-  assert.match(projected.text, /^\+ connected \| model \| in 2 \| out 1 \| R1 \| cache hit 50\.0%$/mu);
+  assert.match(projected.text, /^\+ model \| configured$/mu);
+  assert.match(projected.text, /^  cache hit 50\.0% \| in 2 \| out 1 \| cache read 1$/mu);
   assert.doesNotMatch(projected.text, /[✦◇○●✓×›─—…·]/u);
 });

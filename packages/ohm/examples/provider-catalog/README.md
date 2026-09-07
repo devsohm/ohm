@@ -4,7 +4,7 @@ This example registers a custom provider with a refreshable model catalog and
 managed OAuth callbacks.
 
 ```text
-ohm install ./packages/ohm/examples/provider-catalog
+ohm plugins install ./packages/ohm/examples/provider-catalog
 ```
 
 The callback bodies are safe placeholders:

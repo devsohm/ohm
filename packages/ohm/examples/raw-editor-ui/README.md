@@ -1,10 +1,10 @@
-# Raw editor UI extension
+# Raw editor UI plugin
 
 This trusted TUI-only package imports `Editor` from the stable `ohm/tui`
 host module.
 
 ```text
-ohm install ./packages/ohm/examples/raw-editor-ui
+ohm plugins install ./packages/ohm/examples/raw-editor-ui
 ```
 
 - `/example-editor-enable` replaces the primary editor.

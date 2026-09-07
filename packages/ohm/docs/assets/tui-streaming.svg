@@ -83,5 +83,5 @@
   <text class="detail" x="734" y="904">stream · editor · footer · overlays · widgets</text>
 
   <path class="edge" d="M1300 730v30h-176v30"/>
-  <text class="small" x="56" y="952">One viewport keeps reasoning, tools, resize, refresh, and extension surfaces in a single render order.</text>
+  <text class="small" x="56" y="952">One viewport keeps reasoning, tools, resize, refresh, and plugin surfaces in a single render order.</text>
 </svg>

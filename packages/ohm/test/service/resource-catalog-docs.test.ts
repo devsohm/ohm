@@ -15,6 +15,6 @@ test("resource catalog documentation names every canonical projection and its sa
   assert.doesNotMatch(documentation, /HarnessRuntime\.resourceCatalog\(\)|resources\.list|HarnessService\.resourceCatalog\(\)/u);
   assert.match(documentation, /never contains command or tool callbacks/u);
   assert.match(documentation, /prompt\/template contents/u);
-  assert.match(documentation, /Blocked or untrusted extensions/u);
+  assert.match(documentation, /Blocked or untrusted plugins/u);
   assert.match(documentation, /bounds\.omitted/u);
 });

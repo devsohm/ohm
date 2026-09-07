@@ -39,28 +39,28 @@ import { InMemorySettingsStorage, SettingsManager } from "../../src/core/setting
 import type { BuildSystemPromptOptions } from "../../src/core/system-prompt.js";
 import { NUMBER_VALUE, STRING_VALUE } from "../../src/core/value-schemas.js";
 import {
-  getExtensionRuntimeHost,
-  projectLoadedExtensionHost,
-  type ExtensionRunner,
-} from "../../src/extensions/compat.js";
+  getPluginRuntimeHost,
+  projectLoadedPluginHost,
+  type PluginRunner,
+} from "../../src/plugins/compat.js";
 import type {
   CompactionPreparation,
-  ExtensionAPI,
-  ExtensionSessionDelivery,
+  PluginAPI,
+  PluginSessionDelivery,
   MessageUpdateEvent,
   ToolExecutionEndEvent,
   ToolExecutionUpdateEvent,
-} from "../../src/extensions/direct.js";
+} from "../../src/plugins/direct.js";
 import {
-  extensionModelRegistry,
-  type ExtensionModelRegistry,
-  type ExtensionProviderConfig,
-} from "../../src/extensions/model-boundary.js";
+  pluginModelRegistry,
+  type PluginModelRegistry,
+  type PluginProviderConfig,
+} from "../../src/plugins/model-boundary.js";
 import {
-  loadDirectExtensions,
-  type RuntimeExtensionListenerContext,
-} from "../../src/extensions/runtime.js";
-import { extensionUsage } from "../../src/extensions/session-contract.js";
+  loadDirectPlugins,
+  type RuntimePluginListenerContext,
+} from "../../src/plugins/runtime.js";
+import { extensionUsage } from "../../src/plugins/session-contract.js";
 import {
   providerAdapterFromModels,
   providerModelFromInfo,
@@ -83,7 +83,6 @@ import {
   type AgentSessionOptions,
   type AgentSessionPromptOptions,
 } from "../../src/service/agent-session.js";
-import { closeAgentSessionForReplacement } from "../../src/service/agent-session-owner.js";
 import { SessionManager } from "../../src/storage/index.js";
 import type { BashOperations } from "../../src/tools/builtins/shell.js";
 import type { HarnessTool } from "../../src/tools/types.js";
@@ -118,12 +117,12 @@ const QUEUED_TEXT_VALUE = Type.Object({ text: Type.Optional(Type.String()) }, { 
 
 interface DirectProviderFixture {
   id: string;
-  config: ExtensionProviderConfig;
+  config: PluginProviderConfig;
   model: Model<Api>;
 }
 
 interface CapturedExtensionContext {
-  context: RuntimeExtensionListenerContext;
+  context: RuntimePluginListenerContext;
   directCalls: Array<() => void>;
   sessionCall: () => string;
   modelCall: () => Model<Api>[];
@@ -822,7 +821,7 @@ test("extension callbacks observe live session-owned scoped models", async (cont
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "scope-observer",
       factory(api) {
         api.registerCommand("capture-scope", {
@@ -839,7 +838,7 @@ test("extension callbacks observe live session-owned scoped models", async (cont
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const session = await AgentSession.create({
     sessionManager: SessionManager.inMemory(cwd),
     providers: new ProviderRegistry([provider]),
@@ -848,7 +847,7 @@ test("extension callbacks observe live session-owned scoped models", async (cont
     resourceLoader: loader,
   });
   context.after(async () => await session.close());
-  await session.bindExtensions({ reason: "startup" });
+  await session.bindPlugins({ reason: "startup" });
 
   await session.prompt("/capture-scope");
   session.setModelScope(["fixture/two"]);
@@ -1710,19 +1709,19 @@ test("AgentSession snapshots implicit tool deltas and completion without a start
   const provider = new AbortableImplicitToolStreamProvider();
   const manager = SessionManager.inMemory(cwd, { id: "implicit-tool-stream-state" });
   const directUpdates: MessageUpdateEvent[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [(api) => {
+    inlinePlugins: [(api) => {
       api.on("message_update", (event) => { directUpdates.push(structuredClone(event)); });
     }],
   });
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   const publicUpdates: Array<Extract<AgentSessionEvent, { type: "message_update" }>> = [];
   let sawCompletedToolCall!: () => void;
@@ -1772,10 +1771,10 @@ test("tool-call deltas redact payloads and retain cumulative snapshots across mi
   const directDeltas: string[] = [];
   let resolveCompleted!: () => void;
   const completed = new Promise<void>((resolve) => { resolveCompleted = resolve; });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "stream-snapshot-probe",
       factory(api) {
         api.on("message_update", (event) => {
@@ -1792,7 +1791,7 @@ test("tool-call deltas redact payloads and retain cumulative snapshots across mi
   host.hasListeners = (event) => event === "message_update" ? observeDirectUpdates : hasListeners(event);
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   const publicDeltas: string[] = [];
   const publicMessages: Array<Extract<AgentSessionEvent, { type: "message_update" }>> = [];
@@ -1828,7 +1827,7 @@ test("tool-call deltas redact payloads and retain cumulative snapshots across mi
     observeDirectUpdates = true;
     if (publicDeltas.length === provider.fragments) resolveCompleted();
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
 
   const running = session.prompt("stream direct structured blocks", { allowedTools: [] });
@@ -1948,19 +1947,19 @@ test("AgentSession public and direct streaming events omit provider-private reas
   const provider = new AbortableStructuredStreamProvider();
   const manager = SessionManager.inMemory(cwd, { id: "private-structured-stream-state" });
   const directUpdates: MessageUpdateEvent[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [(api) => {
+    inlinePlugins: [(api) => {
       api.on("message_update", (event) => { directUpdates.push(structuredClone(event)); });
     }],
   });
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   const updates: Array<Extract<AgentSessionEvent, { type: "message_update" }>> = [];
   let sawCompletedToolCall!: () => void;
@@ -2188,11 +2187,12 @@ test("Codex SSE write arguments update one TUI card before the write executes", 
   assert.match(livePreviews[2]!, /first line\n\+ second line$/u);
   const expectedArgumentBytes = [41, 54, 61];
   liveFrames.forEach((frame, index) => {
-    assert.equal((frame.match(/write · receiving input/gu)?.length ?? 0), 1);
+    assert.equal((frame.match(/write\s+live-write\.txt · receiving \d+ argument bytes\s+receiving input/gu)?.length ?? 0), 1, frame);
     assert.match(
       frame,
       new RegExp(`live-write\\.txt · receiving ${expectedArgumentBytes[index]} argument bytes`, "u"),
     );
+    assert.doesNotMatch(frame, /"content"|"path"/u);
   });
   assert.equal(await readFile(target, "utf8"), "first line\nsecond line");
   const toolEntries = tui.entries.filter((entry) => entry.kind === "tool");
@@ -2699,7 +2699,7 @@ test("AgentSession keeps durable provider selections exact when credentials over
   await session.close();
 });
 
-test("AgentSession preserves benign provider-state fields in durable JSONL while omitting private state from runtime observers", async () => {
+test("AgentSession preserves benign provider-state fields in durable storage while omitting private state from runtime observers", async () => {
   const cwd = await workspace();
   const ordinaryEventSecret = "registered-ordinary-event-credential";
   defaultSecretRedactor.register(ordinaryEventSecret);
@@ -2746,12 +2746,13 @@ test("AgentSession preserves benign provider-state fields in durable JSONL while
   assert.match(JSON.stringify(assistant.content), /\[REDACTED\]/u);
   const sessionFile = manager.getSessionFile();
   assert.ok(sessionFile);
-  const jsonl = await readFile(sessionFile, "utf8");
+  const snapshot = SessionManager.open(sessionFile, undefined, undefined, { readOnly: true });
+  const journal = JSON.stringify([...snapshot.getV4State().commits.values()]);
   assert.match(
-    jsonl,
+    journal,
     /"assistantMessage":\{"token":"opaque cursor","secret":"provider label","password":"continuation marker"\}/u,
   );
-  assert.doesNotMatch(jsonl, new RegExp(ordinaryEventSecret, "u"));
+  assert.doesNotMatch(journal, new RegExp(ordinaryEventSecret, "u"));
   assert.equal(observed.length, 1);
   assert.doesNotMatch(JSON.stringify(observed[0]), new RegExp(ordinaryEventSecret, "u"));
   assert.equal("providerState" in observed[0]!, false);
@@ -2759,7 +2760,7 @@ test("AgentSession preserves benign provider-state fields in durable JSONL while
   await session.close();
 });
 
-test("AgentSession redacts every user Bash string before memory and JSONL persistence", async () => {
+test("AgentSession redacts every user Bash string before memory and durable persistence", async () => {
   const cwd = await workspace();
   const secrets = {
     command: "bash-command-registered-secret",
@@ -2793,9 +2794,10 @@ test("AgentSession redacts every user Bash string before memory and JSONL persis
   await session.close();
   const sessionFile = manager.getSessionFile();
   assert.ok(sessionFile);
-  const jsonl = await readFile(sessionFile, "utf8");
-  for (const secret of Object.values(secrets)) assert.doesNotMatch(jsonl, new RegExp(secret, "u"));
-  assert.match(jsonl, /\[REDACTED\]/u);
+  const snapshot = SessionManager.open(sessionFile, undefined, undefined, { readOnly: true });
+  const journal = JSON.stringify([...snapshot.getV4State().commits.values()]);
+  for (const secret of Object.values(secrets)) assert.doesNotMatch(journal, new RegExp(secret, "u"));
+  assert.match(journal, /\[REDACTED\]/u);
 });
 
 test("AgentSession drops credential-bearing provider state but still appends and observes the assistant message", async (context) => {
@@ -3121,6 +3123,46 @@ test("model cycling follows the active scope without rewriting saved defaults", 
   session.setModelScope(["fixture/one"]);
   assert.equal(await session.cycleModel(), undefined);
   await session.close();
+});
+
+test("invocation-local model cycling preserves eligibility and settings", async (context) => {
+  const cwd = await workspace();
+  const provider = new RecordingProvider();
+  const registry = await recordingModelRegistry(provider, ["one", "two", "three"]);
+  const settings = SettingsManager.inMemory({
+    defaultProvider: "fixture", defaultModel: "one", defaultThinkingLevel: "medium",
+  });
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(cwd), providers: new ProviderRegistry([provider]),
+    modelRegistry: registry, settingsManager: settings,
+  });
+  context.after(() => session.close());
+  await session.setNativeModel(registry.find("fixture", "one")!);
+  const models = [
+    { selector: "fixture/two", thinkingLevel: "low" as const },
+    { selector: "fixture/three", thinkingLevel: "high" as const },
+  ];
+  assert.equal((await session.cycleModel("forward", { models }))?.model.id, "two");
+  assert.equal(session.thinkingLevel, "low");
+  assert.equal(settings.getDefaultModel(), "one");
+  assert.equal(settings.getDefaultThinkingLevel(), "medium");
+  assert.deepEqual(session.modelScopeSelectors, []);
+  assert.equal((await session.cycleModel("forward", { models, persist: true }))?.model.id, "three");
+  assert.equal(session.thinkingLevel, "high");
+  assert.equal(settings.getDefaultModel(), "three");
+  assert.equal(settings.getDefaultThinkingLevel(), "high");
+  session.cycleThinkingLevel({ persist: false });
+  assert.equal(settings.getDefaultThinkingLevel(), "high");
+  await session.setNativeModel(registry.find("fixture", "one")!);
+  assert.equal((await session.cycleModel("backward", { models }))?.model.id, "three");
+  settings.setDefaultThinkingLevel("medium");
+  await session.setNativeModel(registry.find("fixture", "one")!);
+  session.setThinkingLevel("high", "restore");
+  await session.cycleModel("backward", { models, persist: true });
+  assert.equal(settings.getDefaultThinkingLevel(), "high", "explicit persistence applies even when the level is unchanged");
+  session.setModelScope(["fixture/three"]);
+  assert.equal(await session.cycleModel("forward", { models: [{ selector: "fixture/two" }] }), undefined);
+  await assert.rejects(session.cycleModel("forward", { models: [{ selector: "fixture/*" }] }), /exact provider\/model/u);
 });
 
 test("model mutations are session-only unless persistence is requested", async () => {
@@ -4996,7 +5038,7 @@ test("AgentSession attaches exact prompt composition metadata to runs and before
     settingsManager: SettingsManager.inMemory(),
     noSkills: true,
     additionalSkillPaths: [skillDir],
-    extensionFactories: [{
+    pluginFactories: [{
       name: "composition-observer",
       factory(api) {
         api.on("before_agent_start", (event) => {
@@ -5006,7 +5048,7 @@ test("AgentSession attaches exact prompt composition metadata to runs and before
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
 
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
@@ -5018,7 +5060,7 @@ test("AgentSession attaches exact prompt composition metadata to runs and before
   session.onEvent((envelope) => {
     if (envelope.event.type === "run_started") startedComposition = envelope.event.promptComposition;
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({
     provider: provider.id,
     api: "openai-chat-completions",
@@ -5070,10 +5112,10 @@ test("AgentSession owns the direct extension run, stream, message, and session l
   const provider = new LifecycleOrderProvider(events);
   const providers = new ProviderRegistry([provider]);
   const manager = SessionManager.inMemory(cwd, { id: "extension-session" });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "lifecycle",
       factory(api) {
         api.on("session_start", () => { events.push("session_start"); });
@@ -5117,9 +5159,9 @@ test("AgentSession owns the direct extension run, stream, message, and session l
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, providers),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({
     provider: provider.id,
     api: "openai-chat-completions",
@@ -5168,10 +5210,10 @@ test("direct tool_call listeners preserve the stable run lineage while built-in 
   const cwd = await workspace();
   await writeFile(join(cwd, "direct-tool-call.txt"), "direct tool call executed\n", "utf8");
   let listenerCalls = 0;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "allow-builtins",
       factory(api) {
         api.on("tool_call", () => {
@@ -5216,10 +5258,10 @@ test("direct tool_call listeners preserve the stable run lineage while built-in 
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
     modelRegistry: await recordingModelRegistry(provider),
-    extensionRunner: host,
+    pluginRunner: host,
     allowedToolNames: ["read"],
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({
     provider: provider.id,
     api: "openai-chat-completions",
@@ -5288,10 +5330,10 @@ test("message_end usage replacements stay consistent across persistence, events,
     cacheWrite: 0,
     total: 0.75,
   };
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "usage-owner",
       factory(api) {
         api.on("message_end", (event) => {
@@ -5312,9 +5354,9 @@ test("message_end usage replacements stay consistent across persistence, events,
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({
     provider: provider.id,
     api: "openai-chat-completions",
@@ -5390,11 +5432,11 @@ test("custom messages append or trigger exactly once while idle", async () => {
 
 test("callback session delivery acknowledges the exact live session and rejects after disposal", async (context) => {
   const cwd = await workspace();
-  let delivery: ExtensionSessionDelivery | undefined;
-  const host = await loadDirectExtensions([], {
+  let delivery: PluginSessionDelivery | undefined;
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "acknowledged-session-delivery",
       factory(ohm) {
         ohm.on("session_start", (_event, extensionContext) => {
@@ -5407,10 +5449,10 @@ test("callback session delivery acknowledges the exact live session and rejects 
   const manager = SessionManager.inMemory(cwd, { id: "acknowledged-session" });
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
-  await session.bindExtensions();
+  await session.bindPlugins();
   const captured = delivery;
   assert.notEqual(captured, undefined);
   assert.equal(captured!.sessionId, "acknowledged-session");
@@ -5447,15 +5489,15 @@ test("callback session delivery acknowledges the exact live session and rejects 
 
 test("callback session delivery cannot resume a queued user message in a replacement session", async (context) => {
   const cwd = await workspace();
-  let delivery: ExtensionSessionDelivery | undefined;
+  let delivery: PluginSessionDelivery | undefined;
   let deliveryOutcome: Promise<"resolved" | Error> | undefined;
   let replacementCancelled: boolean | undefined;
   let activeSession: AgentSession | undefined;
   const innerSessions: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "session-delivery-replacement-race",
       factory(ohm) {
         ohm.on("session_start", (_event, extensionContext) => {
@@ -5481,11 +5523,11 @@ test("callback session delivery cannot resume a queued user message in a replace
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd, { id: "delivery-session-a" }), new ProviderRegistry([])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   activeSession = session;
   context.after(async () => await session.close());
-  await session.bindExtensions();
+  await session.bindPlugins();
 
   await session.prompt("/outer-delivery-race");
   const outcome = await deliveryOutcome;
@@ -5499,12 +5541,12 @@ test("callback session delivery cannot resume a queued user message in a replace
 
 test("callback session delivery rejects command prompt continuation after public replacement", async (context) => {
   const cwd = await workspace();
-  let delivery: ExtensionSessionDelivery | undefined;
+  let delivery: PluginSessionDelivery | undefined;
   const observedInputs: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "session-delivery-command-replacement",
       factory(ohm) {
         ohm.on("session_start", (_event, extensionContext) => {
@@ -5527,10 +5569,10 @@ test("callback session delivery rejects command prompt continuation after public
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd, { id: "delivery-command-source" }), new ProviderRegistry([])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
-  await session.bindExtensions();
+  await session.bindPlugins();
 
   await assert.rejects(
     delivery!.sendUserMessage("/replace-and-return-prompt", { expandPromptTemplates: true }),
@@ -5544,15 +5586,16 @@ test("callback session delivery rejects command prompt continuation after public
 test("callback session delivery rejects command prompt continuation after same-id switch", async (context) => {
   const cwd = await workspace();
   const targetManager = SessionManager.create(cwd, join(cwd, "sessions"), { id: "delivery-switch-id" });
+  targetManager.appendSessionInfo("Saved switch target");
   const targetPath = targetManager.getSessionFile();
   targetManager.closeV4Store();
   if (targetPath === undefined) assert.fail("Expected a persisted delivery switch target");
-  let delivery: ExtensionSessionDelivery | undefined;
+  let delivery: PluginSessionDelivery | undefined;
   const observedInputs: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "session-delivery-command-switch",
       factory(ohm) {
         ohm.on("session_start", (_event, extensionContext) => {
@@ -5576,10 +5619,10 @@ test("callback session delivery rejects command prompt continuation after same-i
   const sourceManager = SessionManager.inMemory(cwd, { id: "delivery-switch-id" });
   const session = await AgentSession.create({
     ...sessionOptions(sourceManager, new ProviderRegistry([])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
-  await session.bindExtensions();
+  await session.bindPlugins();
 
   await assert.rejects(
     delivery!.sendUserMessage("/switch-and-return-prompt", { expandPromptTemplates: true }),
@@ -5587,7 +5630,8 @@ test("callback session delivery rejects command prompt continuation after same-i
   );
 
   assert.equal(session.sessionId, "delivery-switch-id");
-  assert.equal(session.sessionFile, targetPath);
+  assert.equal(session.sessionFile, undefined);
+  assert.equal(session.sessionName, "Saved switch target");
   assert.equal(observedInputs.includes("prompt-returned-after-same-id-switch"), false);
 });
 
@@ -5609,17 +5653,17 @@ test("path extension custom writes retain their generation provenance", async (c
       });
     });
   }\n`);
-  const host = await loadDirectExtensions([sourcePath], {
+  const host = await loadDirectPlugins([sourcePath], {
     workspace: cwd,
     activationFailure: "throw",
   });
   context.after(async () => await host.close());
-  const owner = host.extensions()[0]!;
+  const owner = host.plugins()[0]!;
   const manager = SessionManager.inMemory(cwd, { id: "extension-provenance" });
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   const publicProvenance: object[] = [];
   session.subscribe((event) => {
@@ -5630,7 +5674,7 @@ test("path extension custom writes retain their generation provenance", async (c
     ) publicProvenance.push(event.entry.provenance);
   });
 
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({
     provider: provider.id,
     api: "openai-chat-completions",
@@ -5768,10 +5812,10 @@ test("nextTurn capacity includes a full batch leased by an active run", async (c
   let releaseHook!: () => void;
   const hookEntered = new Promise<void>((resolve) => { markHookEntered = resolve; });
   const hookRelease = new Promise<void>((resolve) => { releaseHook = resolve; });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "next-turn-leased-capacity",
       factory(api) {
         api.on("before_agent_start", async () => {
@@ -5784,9 +5828,9 @@ test("nextTurn capacity includes a full batch leased by an active run", async (c
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   for (let index = 0; index < 100; index += 1) {
     await session.sendCustomMessage({
@@ -5878,7 +5922,7 @@ test("AgentSession rejects a reopened journal with 101 queued next-run entries w
       };
     },
   });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
   });
@@ -5906,7 +5950,7 @@ test("AgentSession rejects a reopened journal with 101 queued next-run entries w
     await assert.rejects(async () => {
       reopenedSession = await AgentSession.create({
         ...sessionOptions(reopened, new ProviderRegistry([provider])),
-        extensionRunner: host,
+        pluginRunner: host,
       });
     }, /Run message queue exceeds 100 messages/u);
     assert.equal([...reopened.getV4State().queue.values()].filter((entry) =>
@@ -5970,7 +6014,7 @@ test("AgentSession rejects restored next-run metadata over the aggregate bound",
 
 test("AgentSession validates model scope before binding an extension runner", async (context) => {
   const cwd = await workspace();
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
   });
@@ -5995,14 +6039,14 @@ test("AgentSession validates model scope before binding an extension runner", as
 
   await assert.rejects(AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
     modelScope: ["invalid"],
   }), /provider\/model/u);
   assert.equal(hostErrorSubscriptions, 0);
 
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   assert.equal(hostErrorSubscriptions, 1);
   await session.close();
@@ -6141,13 +6185,13 @@ test("active custom messages preserve identity without entering the visible text
   await session.close();
 });
 
-test("AgentSession bindExtensions preserves the replacement start reason", async (context) => {
+test("AgentSession bindPlugins preserves the replacement start reason", async (context) => {
   const cwd = await workspace();
   const starts: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "start-reason",
       factory(api) {
         api.on("session_start", (event) => {
@@ -6159,24 +6203,24 @@ test("AgentSession bindExtensions preserves the replacement start reason", async
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
-  await session.bindExtensions({ reason: "resume", previousSessionFile: "/tmp/previous.jsonl" });
+  await session.bindPlugins({ reason: "resume", previousSessionFile: "/tmp/previous.jsonl" });
 
   assert.deepEqual(starts, ["resume"]);
   await session.close();
 });
 
-test("AgentSession bindExtensions forwards host cancellation to startup listeners", async (context) => {
+test("AgentSession bindPlugins forwards host cancellation to startup listeners", async (context) => {
   const cwd = await workspace();
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   let listenerSignal: AbortSignal | undefined;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "cancel-start",
       factory(api) {
         api.on("session_start", (_event, extensionContext) => {
@@ -6200,11 +6244,11 @@ test("AgentSession bindExtensions forwards host cancellation to startup listener
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
   const controller = new AbortController();
-  const binding = session.bindExtensions({ mode: "serve" }, controller.signal);
+  const binding = session.bindPlugins({ mode: "serve" }, controller.signal);
   await started;
   controller.abort(new Error("serve startup stopped"));
 
@@ -6233,10 +6277,10 @@ for (const action of ["abort", "close"] as const) {
     let markStarted!: () => void;
     let commandSignal: AbortSignal | undefined;
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
-    const host = await loadDirectExtensions([], {
+    const host = await loadDirectPlugins([], {
       workspace: cwd,
       activationFailure: "throw",
-      inlineExtensions: [{
+      inlinePlugins: [{
         name: `${action}-preflight`,
         factory(api) {
           api.registerCommand("block-preflight", {
@@ -6252,9 +6296,9 @@ for (const action of ["abort", "close"] as const) {
     context.after(async () => await host.close());
     const session = await AgentSession.create({
       ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-      extensionRunner: host,
+      pluginRunner: host,
     });
-    await session.bindExtensions({ mode: "print" });
+    await session.bindPlugins({ mode: "print" });
 
     const prompt = assert.rejects(
       session.prompt("/block-preflight"),
@@ -6279,10 +6323,10 @@ test("AgentSession replacement close aborts active and queued prompt preflights 
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   context.after(() => releaseFirst());
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "replacement-close-prompt-admission",
       factory(api) {
         api.on("input", async (event) => {
@@ -6297,14 +6341,14 @@ test("AgentSession replacement close aborts active and queued prompt preflights 
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
   const first = assert.rejects(session.prompt("first"), /AgentSession closed/u);
   await started;
   const second = assert.rejects(session.prompt("second"), /AgentSession closed/u);
 
-  await settleWithin(closeAgentSessionForReplacement(session), "AgentSession replacement close");
+  await settleWithin(session.close({ reason: "replacement" }), "AgentSession replacement close");
   await settleWithin(Promise.all([first, second]), "replacement prompt preflights");
   assert.equal(session.isIdle, true);
   releaseFirst();
@@ -6319,10 +6363,10 @@ test("AgentSession replacement close preserves its command preflight and aborts 
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const replacementGate = new Promise<void>((resolve) => { releaseReplacement = resolve; });
   context.after(() => releaseReplacement());
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "replacement-command-preflight",
       factory(api) {
         api.registerCommand("replace-preflight", {
@@ -6330,7 +6374,7 @@ test("AgentSession replacement close preserves its command preflight and aborts 
             commandSignal = commandContext.signal;
             markStarted();
             await replacementGate;
-            await closeAgentSessionForReplacement(session);
+            await session.close({ reason: "replacement" });
           },
         });
       },
@@ -6339,7 +6383,7 @@ test("AgentSession replacement close preserves its command preflight and aborts 
   context.after(async () => await host.close());
   session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
   const command = session.prompt("/replace-preflight");
@@ -6360,10 +6404,10 @@ test("AgentSession removes an aborted queued prompt admission without breaking F
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const observed: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "prompt-admission-order",
       factory(api) {
         api.on("input", async (event) => {
@@ -6380,7 +6424,7 @@ test("AgentSession removes an aborted queued prompt admission without breaking F
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
 
@@ -6424,10 +6468,10 @@ test("AgentSession snapshots queued prompt model metadata and tool filters at ad
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   context.after(() => releaseFirst());
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "prompt-admission-snapshot",
       factory(api) {
         api.on("input", async (event) => {
@@ -6443,7 +6487,7 @@ test("AgentSession snapshots queued prompt model metadata and tool filters at ad
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
@@ -6500,10 +6544,10 @@ test("AgentSession includes bounded model metadata in aggregate prompt admission
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   context.after(() => releaseFirst());
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "prompt-admission-model-metadata",
       factory(api) {
         api.on("input", async (event) => {
@@ -6519,7 +6563,7 @@ test("AgentSession includes bounded model metadata in aggregate prompt admission
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   const first = session.prompt("first");
   await started;
@@ -6559,7 +6603,7 @@ test("AgentSession includes bounded model metadata in aggregate prompt admission
     }),
   ]);
 
-  await closeAgentSessionForReplacement(session);
+  await session.close({ reason: "replacement" });
   releaseFirst();
   await Promise.all([first, ...queued].map(async (operation) => await operation.catch(() => undefined)));
   const capacityError = await overflow;
@@ -6593,10 +6637,10 @@ test("AgentSession bounds concurrent prompt admission count", async (context) =>
   let releaseFirst!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "prompt-admission-capacity",
       factory(api) {
         api.on("input", async (event) => {
@@ -6612,7 +6656,7 @@ test("AgentSession bounds concurrent prompt admission count", async (context) =>
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
 
@@ -6643,10 +6687,10 @@ test("AgentSession bounds concurrent prompt admission count", async (context) =>
 test("AgentSession binds extension context before start and discovers resources afterward", async (context) => {
   const cwd = await workspace();
   const lifecycle: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "bound-resource-discovery",
       factory(api) {
         api.on("session_start", (event, extensionContext) => {
@@ -6664,10 +6708,10 @@ test("AgentSession binds extension context before start and discovers resources 
     }],
   });
   context.after(async () => await host.close());
-  const extensionsResult = projectLoadedExtensionHost(host);
+  const pluginsResult = projectLoadedPluginHost(host);
   const extended: string[][] = [];
   const loader = {
-    getExtensions() { return extensionsResult; },
+    getPlugins() { return pluginsResult; },
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -6687,23 +6731,23 @@ test("AgentSession binds extension context before start and discovers resources 
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     resourceLoader: loader,
-    extensionRunner: host,
+    pluginRunner: host,
     sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile: "/tmp/previous.jsonl" },
   });
 
   const errors: string[] = [];
-  await session.bindExtensions({
+  await session.bindPlugins({
     mode: "rpc",
     onError(error) { errors.push(`${error.event}:${error.error}`); },
   });
-  session.extensionRunner.emitError({ extensionPath: "<test>", event: "probe", error: "bound" });
+  session.pluginRunner.emitError({ extensionPath: "<test>", event: "probe", error: "bound" });
 
   assert.deepEqual(lifecycle, ["start:resume:rpc", "discover", "extend"]);
   assert.deepEqual(extended, [["dynamic-skill", "dynamic-prompt", "dynamic-theme"]]);
-  assert.equal(session.extensionRunner.createContext().cwd, cwd);
-  assert.equal(session.extensionRunner.createContext().mode, "rpc");
-  assert.equal(session.extensionRunner.createContext().isIdle(), true);
-  assert.equal(session.extensionRunner.createCommandContext().getSystemPromptOptions().cwd, cwd);
+  assert.equal(session.pluginRunner.createContext().cwd, cwd);
+  assert.equal(session.pluginRunner.createContext().mode, "rpc");
+  assert.equal(session.pluginRunner.createContext().isIdle(), true);
+  assert.equal(session.pluginRunner.createCommandContext().getSystemPromptOptions().cwd, cwd);
   assert.deepEqual(errors, ["probe:bound"]);
   await session.close();
 });
@@ -6725,7 +6769,7 @@ test("AgentSession refresh swaps extension generations and routes later commands
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "refresh-generation",
       factory(api) {
         const current = ++generation;
@@ -6754,8 +6798,8 @@ test("AgentSession refresh swaps extension generations and routes later commands
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
-  const initialHost = getExtensionRuntimeHost(loader.getExtensions().runtime)!;
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
+  const initialHost = getPluginRuntimeHost(loader.getPlugins().runtime)!;
   initialHost.setFlagValue("refresh-value", "preserved");
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
@@ -6763,9 +6807,9 @@ test("AgentSession refresh swaps extension generations and routes later commands
     providers: new ProviderRegistry([provider]),
     settingsManager: settings,
     resourceLoader: loader,
-    extensionRunner: initialHost,
+    pluginRunner: initialHost,
   });
-  const initialRunner = session.extensionRunner;
+  const initialRunner = session.pluginRunner;
   assert.equal(initialRunner.getFlagValues().get("refresh-value"), "preserved");
   await session.setModel({
     provider: provider.id,
@@ -6773,7 +6817,7 @@ test("AgentSession refresh swaps extension generations and routes later commands
     id: "one",
     info: provider.models[0]!,
   });
-  await session.bindExtensions({ reason: "startup" });
+  await session.bindPlugins({ reason: "startup" });
 
   await session.prompt("/generation");
   await session.prompt("before refresh", { allowedTools: [] });
@@ -6783,11 +6827,11 @@ test("AgentSession refresh swaps extension generations and routes later commands
     },
   });
 
-  const refreshedHost = getExtensionRuntimeHost(loader.getExtensions().runtime)!;
+  const refreshedHost = getPluginRuntimeHost(loader.getPlugins().runtime)!;
   assert.notEqual(refreshedHost, initialHost);
-  assert.notEqual(session.extensionRunner, initialRunner);
+  assert.notEqual(session.pluginRunner, initialRunner);
   assert.throws(() => initialRunner.createContext().isIdle(), /stale after AgentSession refresh/u);
-  assert.equal(session.extensionRunner.getFlagValues().get("refresh-value"), "preserved");
+  assert.equal(session.pluginRunner.getFlagValues().get("refresh-value"), "preserved");
   assert.equal(refreshedHost.flagValues().get("refresh-value"), "preserved");
   await session.prompt("/generation");
   assert.deepEqual(await session.prompt("intercept"), { sessionId: session.sessionId, results: [] });
@@ -6806,7 +6850,7 @@ test("AgentSession refresh swaps extension generations and routes later commands
   assert.deepEqual(inputs, [2]);
   assert.deepEqual(agentStarts, [1, 2]);
   assert.equal(provider.requests.length, 2);
-  const finalRunner = session.extensionRunner;
+  const finalRunner = session.pluginRunner;
   await session.close();
   assert.throws(() => finalRunner.createContext().isIdle(), /stale after AgentSession close/u);
 });
@@ -6836,7 +6880,7 @@ test("AgentSession disables a committed generation when session_start is cancell
     }],
   });
   const registerTool = (
-    api: ExtensionAPI,
+    api: PluginAPI,
     name: string,
   ): void => {
     api.registerTool({
@@ -6854,7 +6898,7 @@ test("AgentSession disables a committed generation when session_start is cancell
   const failedStart = new Promise<void>((resolve) => { markFailedStart = resolve; });
   const starts: string[] = [];
   const commands: number[] = [];
-  let failedContext: RuntimeExtensionListenerContext | undefined;
+  let failedContext: RuntimePluginListenerContext | undefined;
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -6862,7 +6906,7 @@ test("AgentSession disables a committed generation when session_start is cancell
     noSkills: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "incomplete-generation",
       factory(api) {
         const current = ++generation;
@@ -6890,7 +6934,7 @@ test("AgentSession disables a committed generation when session_start is cancell
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const provider = new RecordingProvider();
   const providers = new ProviderRegistry([provider]);
   const modelRegistry = await recordingModelRegistry(provider);
@@ -6909,7 +6953,7 @@ test("AgentSession disables a committed generation when session_start is cancell
     info: provider.models[0]!,
   });
   const extensionErrors: string[] = [];
-  await session.bindExtensions({
+  await session.bindPlugins({
     mode: "print",
     onError(error) { extensionErrors.push(error.error); },
   });
@@ -6920,12 +6964,12 @@ test("AgentSession disables a committed generation when session_start is cancell
   assert.deepEqual(commands, [1]);
 
   const controller = new AbortController();
-  let failedRunner: ExtensionRunner | undefined;
+  let failedRunner: PluginRunner | undefined;
   const refresh = assert.rejects(
     session.refresh({
       signal: controller.signal,
       beforeSessionStart() {
-        failedRunner = session.extensionRunner;
+        failedRunner = session.pluginRunner;
       },
     }),
     /cancel incomplete generation/u,
@@ -6941,10 +6985,10 @@ test("AgentSession disables a committed generation when session_start is cancell
     /incomplete after session_start failed/u,
   );
   assert.throws(
-    () => session.extensionRunner,
+    () => session.pluginRunner,
     /did not finish starting.*fresh generation/u,
   );
-  assert.equal(session.hasExtensionHandlers("session_start"), false);
+  assert.equal(session.hasPluginHandlers("session_start"), false);
   const toolNames = session.getTools().map((tool) => tool.definition.name);
   assert.equal(toolNames.includes("read"), true);
   assert.equal(toolNames.includes("bash"), true);
@@ -6955,7 +6999,7 @@ test("AgentSession disables a committed generation when session_start is cancell
   assert.equal(modelRegistry.find("partial-provider-2", "partial-model-2"), undefined);
   assert.equal(loader.getPrompts().prompts.some((prompt) => prompt.name === "dynamic-2"), false);
   assert.throws(() => failedContext?.isIdle(), /Runtime extension host is closed/u);
-  const failedHost = getExtensionRuntimeHost(loader.getExtensions().runtime)!;
+  const failedHost = getPluginRuntimeHost(loader.getPlugins().runtime)!;
   const errorCount = extensionErrors.length;
   failedHost.addDiagnostic({
     extensionId: "detached-generation",
@@ -6964,7 +7008,7 @@ test("AgentSession disables a committed generation when session_start is cancell
   });
   assert.equal(extensionErrors.length, errorCount);
 
-  await session.bindExtensions({ reason: "refresh" });
+  await session.bindPlugins({ reason: "refresh" });
   assert.deepEqual(starts, ["1:startup", "2:refresh"]);
   const requestsBeforeDisabledCommand = provider.requests.length;
   await session.prompt("/generation-2", { allowedTools: [] });
@@ -6975,7 +7019,7 @@ test("AgentSession disables a committed generation when session_start is cancell
 
   assert.equal(generation, 3);
   assert.deepEqual(starts, ["1:startup", "2:refresh", "3:refresh"]);
-  assert.equal(session.extensionRunner.createContext().isIdle(), true);
+  assert.equal(session.pluginRunner.createContext().isIdle(), true);
   assert.equal(session.getTools().some((tool) => tool.definition.name === "generation_3_tool"), true);
   assert.equal(providers.has("generation-provider-3"), true);
   assert.equal(modelRegistry.find("generation-provider-3", "generation-model-3")?.id, "generation-model-3");
@@ -6990,10 +7034,10 @@ test("AgentSession disables a committed generation when session_start is cancell
 test("AgentSession refresh aborts a staged resource generation without committing it", { timeout: 10_000 }, async (context) => {
   const cwd = await workspace();
   let shutdownSignal: AbortSignal | undefined;
-  const initialHost = await loadDirectExtensions([], {
+  const initialHost = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "refresh-abort-initial",
       factory(api) {
         api.on("session_shutdown", (_event, extensionContext) => {
@@ -7002,17 +7046,17 @@ test("AgentSession refresh aborts a staged resource generation without committin
       },
     }],
   });
-  const candidateHost = await loadDirectExtensions([], {
+  const candidateHost = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{ name: "refresh-abort-candidate", factory() {} }],
+    inlinePlugins: [{ name: "refresh-abort-candidate", factory() {} }],
   });
   context.after(async () => {
     await candidateHost.close();
     await initialHost.close();
   });
-  const initialResult = projectLoadedExtensionHost(initialHost);
-  const candidateResult = projectLoadedExtensionHost(candidateHost);
+  const initialResult = projectLoadedPluginHost(initialHost);
+  const candidateResult = projectLoadedPluginHost(candidateHost);
   let published = initialResult;
   let commits = 0;
   let refreshSignal: AbortSignal | undefined;
@@ -7020,7 +7064,7 @@ test("AgentSession refresh aborts a staged resource generation without committin
   const refreshStarted = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
   const loader = {
     supportsTransactionalRefresh: true as const,
-    getExtensions: () => published,
+    getPlugins: () => published,
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -7030,7 +7074,7 @@ test("AgentSession refresh aborts a staged resource generation without committin
     extendResources() {},
     async refresh(options = {}) {
       refreshSignal = options.signal;
-      const prepared = options.prepareExtensions?.(candidateResult);
+      const prepared = options.preparePlugins?.(candidateResult);
       const rollback = prepared === undefined ? undefined : prepared;
       markRefreshStarted();
       try {
@@ -7051,10 +7095,10 @@ test("AgentSession refresh aborts a staged resource generation without committin
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     resourceLoader: loader,
-    extensionRunner: initialHost,
+    pluginRunner: initialHost,
   });
-  const initialRunner = session.extensionRunner;
-  await session.bindExtensions({ reason: "startup" });
+  const initialRunner = session.pluginRunner;
+  await session.bindPlugins({ reason: "startup" });
   const controller = new AbortController();
   const refresh = assert.rejects(
     session.refresh({ signal: controller.signal }),
@@ -7068,8 +7112,8 @@ test("AgentSession refresh aborts a staged resource generation without committin
   assert.equal(refreshSignal, controller.signal);
   assert.equal(shutdownSignal?.aborted, false);
   assert.equal(commits, 0);
-  assert.equal(loader.getExtensions(), initialResult);
-  assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(loader.getPlugins(), initialResult);
+  assert.equal(session.pluginRunner, initialRunner);
   await session.close();
 });
 
@@ -7078,7 +7122,7 @@ test("AgentSession refresh keeps the active runner when resources republish the 
   const settings = SettingsManager.inMemory();
   const lifecycle: string[] = [];
   let generation = 0;
-  let stable: ReturnType<DefaultResourceLoader["getExtensions"]> | undefined;
+  let stable: ReturnType<DefaultResourceLoader["getPlugins"]> | undefined;
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: join(cwd, "agent-home"),
@@ -7087,7 +7131,7 @@ test("AgentSession refresh keeps the active runner when resources republish the 
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "stable-runtime",
       factory(api) {
         const current = ++generation;
@@ -7097,7 +7141,7 @@ test("AgentSession refresh keeps the active runner when resources republish the 
         api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
       },
     }],
-    extensionsOverride(base) {
+    pluginsOverride(base) {
       if (stable === undefined) {
         stable = base;
         return base;
@@ -7109,20 +7153,20 @@ test("AgentSession refresh keeps the active runner when resources republish the 
     },
   });
   await loader.refresh();
-  const initialResult = loader.getExtensions();
+  const initialResult = loader.getPlugins();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     settingsManager: settings,
     resourceLoader: loader,
   });
-  await session.bindExtensions({ reason: "startup" });
-  const initialRunner = session.extensionRunner;
+  await session.bindPlugins({ reason: "startup" });
+  const initialRunner = session.pluginRunner;
 
   await session.refresh();
 
-  assert.notEqual(loader.getExtensions(), initialResult);
-  assert.equal(loader.getExtensions().runtime, initialResult.runtime);
-  assert.equal(session.extensionRunner, initialRunner);
+  assert.notEqual(loader.getPlugins(), initialResult);
+  assert.equal(loader.getPlugins().runtime, initialResult.runtime);
+  assert.equal(session.pluginRunner, initialRunner);
   assert.equal(initialRunner.createContext().isIdle(), true);
   assert.deepEqual(lifecycle, [
     "1:activate",
@@ -7140,7 +7184,7 @@ test("AgentSession rejects a changed projection on the active runtime without cl
   const settings = SettingsManager.inMemory();
   const lifecycle: string[] = [];
   let generation = 0;
-  let stable: ReturnType<DefaultResourceLoader["getExtensions"]> | undefined;
+  let stable: ReturnType<DefaultResourceLoader["getPlugins"]> | undefined;
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: join(cwd, "agent-home"),
@@ -7149,7 +7193,7 @@ test("AgentSession rejects a changed projection on the active runtime without cl
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "changed-projection",
       factory(api) {
         const current = ++generation;
@@ -7159,31 +7203,31 @@ test("AgentSession rejects a changed projection on the active runtime without cl
         api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
       },
     }],
-    extensionsOverride(base) {
+    pluginsOverride(base) {
       if (stable === undefined) {
         stable = base;
         return base;
       }
-      return { ...stable, extensions: [] };
+      return { ...stable, plugins: [] };
     },
   });
   await loader.refresh();
-  const initialResult = loader.getExtensions();
+  const initialResult = loader.getPlugins();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     settingsManager: settings,
     resourceLoader: loader,
   });
-  await session.bindExtensions({ reason: "startup" });
-  const initialRunner = session.extensionRunner;
+  await session.bindPlugins({ reason: "startup" });
+  const initialRunner = session.pluginRunner;
 
   await assert.rejects(
     session.refresh(),
     /cannot change the extension projection without a new runtime generation/u,
   );
 
-  assert.equal(loader.getExtensions(), initialResult);
-  assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(loader.getPlugins(), initialResult);
+  assert.equal(session.pluginRunner, initialRunner);
   assert.equal(initialRunner.createContext().isIdle(), true);
   assert.deepEqual(lifecycle, [
     "1:activate",
@@ -7224,7 +7268,7 @@ test("AgentSession refresh atomically adds, removes, and replaces direct provide
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-generation",
       factory(api) {
         const current = ++generation;
@@ -7238,7 +7282,7 @@ test("AgentSession refresh atomically adds, removes, and replaces direct provide
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const providers = new ProviderRegistry();
   const modelRegistry = new ModelRegistry(createModels());
   const session = await AgentSession.create({
@@ -7249,7 +7293,7 @@ test("AgentSession refresh atomically adds, removes, and replaces direct provide
     resourceLoader: loader,
   });
 
-  await session.bindExtensions({ reason: "startup" });
+  await session.bindPlugins({ reason: "startup" });
   assert.equal(providers.has("removed-provider"), true);
   assert.equal(providers.has("replaced-provider"), true);
   assert.equal(modelRegistry.find("removed-provider", "removed-model")?.id, "removed-model");
@@ -7283,7 +7327,7 @@ test("direct provider install removes its adapter when display-name binding fail
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-display-failure",
       factory(api) {
         api.registerProvider("display-failure-provider", {
@@ -7305,7 +7349,7 @@ test("direct provider install removes its adapter when display-name binding fail
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const providers = new ProviderRegistry();
   const modelRegistry = new ModelRegistry(createModels());
   const displayFailure = new Error("display-name binding failed");
@@ -7359,10 +7403,10 @@ test("direct provider replacement refreshes selected metadata during its live ru
     return stream;
   };
   let replaceProvider!: () => void;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "live-provider-refresh",
       factory(api) {
         api.registerProvider(fixture.id, fixture.config);
@@ -7376,7 +7420,7 @@ test("direct provider replacement refreshes selected metadata during its live ru
     providers: new ProviderRegistry(),
     modelRegistry: new ModelRegistry(createModels()),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => await session.close());
   await session.setModel(fixture.model);
@@ -7394,7 +7438,7 @@ test("session_start context surfaces and providers expire across refresh generat
   const cwd = await workspace();
   const agentDir = join(cwd, "agent-home");
   const settings = SettingsManager.inMemory();
-  const capturedRegistries: ExtensionModelRegistry[] = [];
+  const capturedRegistries: PluginModelRegistry[] = [];
   const capturedContexts: CapturedExtensionContext[] = [];
   const selectedModels: boolean[] = [];
   let generation = 0;
@@ -7406,7 +7450,7 @@ test("session_start context surfaces and providers expire across refresh generat
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "context-provider-generation",
       factory(api) {
         const current = ++generation;
@@ -7443,7 +7487,7 @@ test("session_start context surfaces and providers expire across refresh generat
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const providers = new ProviderRegistry();
   const modelRegistry = new ModelRegistry(createModels());
   const session = await AgentSession.create({
@@ -7454,7 +7498,7 @@ test("session_start context surfaces and providers expire across refresh generat
     resourceLoader: loader,
   });
 
-  await session.bindExtensions({ reason: "startup" });
+  await session.bindPlugins({ reason: "startup" });
   assert.deepEqual(selectedModels, [true]);
   assert.equal(settings.getDefaultModel(), undefined);
   assert.equal(providers.has("context-provider-1"), true);
@@ -7493,7 +7537,7 @@ test("session_start context surfaces and providers expire across refresh generat
   assert.throws(closedContext.modelCall, stalePattern);
   await assert.rejects(async () => await closedContext.asyncModelCall(), stalePattern);
   assert.throws(closedContext.uiCall, stalePattern);
-  await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close();
+  await getPluginRuntimeHost(loader.getPlugins().runtime)?.close();
 });
 
 test("command context modelRegistry overrides, streams, unregisters, and restores a provider", async (context) => {
@@ -7501,16 +7545,16 @@ test("command context modelRegistry overrides, streams, unregisters, and restore
   const original = directProvider("context-replacement", "original-model", "original-response");
   const replacement = directProvider("context-replacement", "replacement-model", "replacement-response");
   const modelRegistry = new ModelRegistry(createModels());
-  extensionModelRegistry(modelRegistry).registerProvider(original.id, original.config);
+  pluginModelRegistry(modelRegistry).registerProvider(original.id, original.config);
   const providers = new ProviderRegistry([
     providerAdapterFromModels(modelRegistry.models(), original.id),
   ]);
   const setModelResults: boolean[] = [];
-  let capturedRegistry: ExtensionModelRegistry | undefined;
-  const host = await loadDirectExtensions([], {
+  let capturedRegistry: PluginModelRegistry | undefined;
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "context-provider-commands",
       factory(api) {
         api.registerCommand("context-provider-override", {
@@ -7537,10 +7581,10 @@ test("command context modelRegistry overrides, streams, unregisters, and restore
     providers,
     modelRegistry,
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   await session.setModel(modelRegistry.find(original.id, original.model.id)!);
-  await session.bindExtensions({ reason: "startup" });
+  await session.bindPlugins({ reason: "startup" });
 
   assert.equal((await session.prompt("original", { allowedTools: [] })).results.at(-1)?.finalText, "original-response");
   await session.prompt("/context-provider-override");
@@ -7595,7 +7639,7 @@ test("AgentSession refresh rolls back every provider from a partially activated 
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "provider-rollback",
       factory(api) {
         generation += 1;
@@ -7609,7 +7653,7 @@ test("AgentSession refresh rolls back every provider from a partially activated 
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const providers = new ProviderRegistry([], { maxProviders: 1 });
   const modelRegistry = new ModelRegistry(createModels());
   const session = await AgentSession.create({
@@ -7619,9 +7663,9 @@ test("AgentSession refresh rolls back every provider from a partially activated 
     settingsManager: settings,
     resourceLoader: loader,
   });
-  await session.bindExtensions({ reason: "startup" });
-  const previousRuntime = loader.getExtensions().runtime;
-  const previousRunner = session.extensionRunner;
+  await session.bindPlugins({ reason: "startup" });
+  const previousRuntime = loader.getPlugins().runtime;
+  const previousRunner = session.pluginRunner;
   assert.equal(providers.has("previous-provider"), true);
 
   await assert.rejects(session.refresh(), /cannot exceed 1 adapters/u);
@@ -7632,8 +7676,8 @@ test("AgentSession refresh rolls back every provider from a partially activated 
   assert.equal(modelRegistry.find("previous-provider", "previous-model")?.id, "previous-model");
   assert.equal(modelRegistry.find("candidate-one", "candidate-one-model"), undefined);
   assert.equal(modelRegistry.find("candidate-two", "candidate-two-model"), undefined);
-  assert.equal(loader.getExtensions().runtime, previousRuntime);
-  assert.equal(session.extensionRunner, previousRunner);
+  assert.equal(loader.getPlugins().runtime, previousRuntime);
+  assert.equal(session.pluginRunner, previousRunner);
   await session.close();
 });
 
@@ -7643,7 +7687,7 @@ test("AgentSession rejects an invalid extension projection before resource publi
   const settings = SettingsManager.inMemory();
   const lifecycle: string[] = [];
   let generation = 0;
-  let originalExtensions: ReturnType<DefaultResourceLoader["getExtensions"]>["extensions"] | undefined;
+  let originalPlugins: ReturnType<DefaultResourceLoader["getPlugins"]>["plugins"] | undefined;
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -7652,7 +7696,7 @@ test("AgentSession rejects an invalid extension projection before resource publi
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "projection-generation",
       factory(api) {
         const current = ++generation;
@@ -7662,29 +7706,29 @@ test("AgentSession rejects an invalid extension projection before resource publi
         api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
       },
     }],
-    extensionsOverride(base) {
-      if (originalExtensions === undefined) {
-        originalExtensions = base.extensions;
+    pluginsOverride(base) {
+      if (originalPlugins === undefined) {
+        originalPlugins = base.plugins;
         return base;
       }
-      return { ...base, extensions: originalExtensions };
+      return { ...base, plugins: originalPlugins };
     },
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     settingsManager: settings,
     resourceLoader: loader,
   });
-  await session.bindExtensions({ reason: "startup" });
-  const originalRuntime = loader.getExtensions().runtime;
-  const originalRunner = session.extensionRunner;
+  await session.bindPlugins({ reason: "startup" });
+  const originalRuntime = loader.getPlugins().runtime;
+  const originalRunner = session.pluginRunner;
 
-  await assert.rejects(session.refresh(), /Extension projection belongs to another host generation/u);
+  await assert.rejects(session.refresh(), /Plugin projection belongs to another host generation/u);
 
-  assert.equal(loader.getExtensions().runtime, originalRuntime);
-  assert.equal(session.extensionRunner, originalRunner);
+  assert.equal(loader.getPlugins().runtime, originalRuntime);
+  assert.equal(session.pluginRunner, originalRunner);
   assert.equal(originalRunner.createContext().isIdle(), true);
   assert.deepEqual(lifecycle, [
     "1:activate",
@@ -7714,18 +7758,18 @@ test("AgentSession rejects a legacy loader before it can publish an unprepared e
       maxTokens: 512,
     }],
   });
-  const previousHost = await loadDirectExtensions([], {
+  const previousHost = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "previous-provider",
       factory(api) { api.registerProvider("previous-provider", config("previous-model")); },
     }],
   });
-  const candidateHost = await loadDirectExtensions([], {
+  const candidateHost = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "candidate-providers",
       factory(api) {
         api.registerProvider("candidate-one", config("candidate-one-model"));
@@ -7737,11 +7781,11 @@ test("AgentSession rejects a legacy loader before it can publish an unprepared e
     await candidateHost.close();
     await previousHost.close();
   });
-  let extensionsResult = projectLoadedExtensionHost(previousHost);
-  const initialExtensionsResult = extensionsResult;
+  let pluginsResult = projectLoadedPluginHost(previousHost);
+  const initialExtensionsResult = pluginsResult;
   let refreshCalls = 0;
   const loader = {
-    getExtensions() { return extensionsResult; },
+    getPlugins() { return pluginsResult; },
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -7751,7 +7795,7 @@ test("AgentSession rejects a legacy loader before it can publish an unprepared e
     extendResources() {},
     async refresh() {
       refreshCalls += 1;
-      extensionsResult = projectLoadedExtensionHost(candidateHost);
+      pluginsResult = projectLoadedPluginHost(candidateHost);
     },
   } satisfies ResourceLoader;
   const providers = new ProviderRegistry([], { maxProviders: 1 });
@@ -7763,15 +7807,15 @@ test("AgentSession rejects a legacy loader before it can publish an unprepared e
     resourceLoader: loader,
     settingsManager: SettingsManager.inMemory(),
   });
-  const previousRunner = session.extensionRunner;
+  const previousRunner = session.pluginRunner;
   assert.equal(providers.has("previous-provider"), true);
 
   await assert.rejects(session.refresh(), /does not support transactional refresh/u);
 
   assert.equal(refreshCalls, 0);
-  assert.equal(loader.getExtensions(), initialExtensionsResult);
-  assert.equal(getExtensionRuntimeHost(loader.getExtensions().runtime), previousHost);
-  assert.equal(session.extensionRunner, previousRunner);
+  assert.equal(loader.getPlugins(), initialExtensionsResult);
+  assert.equal(getPluginRuntimeHost(loader.getPlugins().runtime), previousHost);
+  assert.equal(session.pluginRunner, previousRunner);
   assert.equal(providers.has("previous-provider"), true);
   assert.equal(modelRegistry.find("previous-provider", "previous-model")?.id, "previous-model");
   assert.equal(providers.has("candidate-one"), false);
@@ -7788,10 +7832,10 @@ test("AgentSession refresh restarts the current extension host when resource loa
   const settings = SettingsManager.fromStorage(settingsStorage);
   const lifecycle: string[] = [];
   const commands: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "refresh-recovery",
       factory(api) {
         api.on("session_start", (event) => {
@@ -7807,10 +7851,10 @@ test("AgentSession refresh restarts the current extension host when resource loa
     }],
   });
   context.after(async () => await host.close());
-  const extensionsResult = projectLoadedExtensionHost(host);
+  const pluginsResult = projectLoadedPluginHost(host);
   const loader = {
     supportsTransactionalRefresh: true as const,
-    getExtensions() { return extensionsResult; },
+    getPlugins() { return pluginsResult; },
     getSkills() { return { skills: [], diagnostics: [] }; },
     getPrompts() { return { prompts: [], diagnostics: [] }; },
     getThemes() { return { themes: [], diagnostics: [] }; },
@@ -7824,17 +7868,17 @@ test("AgentSession refresh restarts the current extension host when resource loa
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
     settingsManager: settings,
     resourceLoader: loader,
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  const initialRunner = session.extensionRunner;
-  await session.bindExtensions({ reason: "startup" });
+  const initialRunner = session.pluginRunner;
+  await session.bindPlugins({ reason: "startup" });
 
   settingsStorage.withLock("global", () => JSON.stringify({
     retry: { provider: { timeoutMs: 200 } },
   }));
   await assert.rejects(session.refresh(), /refresh fixture failed/u);
 
-  assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(session.pluginRunner, initialRunner);
   assert.equal(settings.getProviderRetrySettings().timeoutMs, 100);
   assert.equal(session.agent.timeoutMs, 100);
   assert.equal(initialRunner.createContext().isIdle(), true);
@@ -7854,7 +7898,7 @@ test("AgentSession refresh uses one validated settings snapshot with the default
     cwd,
     agentDir,
     settingsManager: settings,
-    noExtensions: true,
+    noPluginCode: true,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
@@ -7879,15 +7923,15 @@ test("AgentSession refresh uses one validated settings snapshot with the default
   assert.equal(redundantRefreshes, 0);
   assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
   assert.equal(session.agent.timeoutMs, 200);
-  const activeRuntime = loader.getExtensions().runtime;
-  const activeRunner = session.extensionRunner;
+  const activeRuntime = loader.getPlugins().runtime;
+  const activeRunner = session.pluginRunner;
   storage.withLock("global", () => JSON.stringify({
     tools: "bad",
     retry: { provider: { timeoutMs: 300 } },
   }));
   await assert.rejects(session.refresh(), /settings\.tools must be an object/iu);
-  assert.equal(loader.getExtensions().runtime, activeRuntime);
-  assert.equal(session.extensionRunner, activeRunner);
+  assert.equal(loader.getPlugins().runtime, activeRuntime);
+  assert.equal(session.pluginRunner, activeRunner);
   assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
   assert.equal(session.agent.timeoutMs, 200);
   await session.close();
@@ -7902,7 +7946,7 @@ test("AgentSession does not suppress a distinct resource loader settings manager
     cwd,
     agentDir,
     settingsManager: loaderSettings,
-    noExtensions: true,
+    noPluginCode: true,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
@@ -7939,12 +7983,12 @@ test("AgentSession keeps settings coherent when a post-resource refresh hook fai
     cwd,
     agentDir,
     settingsManager: settings,
-    noExtensions: true,
+    noPluginCode: true,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "committed-refresh-recovery",
       factory(api) {
         api.on("session_start", () => { starts += 1; });
@@ -7958,9 +8002,9 @@ test("AgentSession keeps settings coherent when a post-resource refresh hook fai
     settingsManager: settings,
     resourceLoader: loader,
   });
-  await session.bindExtensions({ reason: "startup" });
-  const initialRuntime = loader.getExtensions().runtime;
-  const initialRunner = session.extensionRunner;
+  await session.bindPlugins({ reason: "startup" });
+  const initialRuntime = loader.getPlugins().runtime;
+  const initialRunner = session.pluginRunner;
   storage.withLock("global", () => JSON.stringify({ retry: { provider: { timeoutMs: 200 } } }));
 
   await assert.rejects(session.refresh({
@@ -7973,11 +8017,11 @@ test("AgentSession keeps settings coherent when a post-resource refresh hook fai
     return true;
   });
 
-  assert.notEqual(loader.getExtensions().runtime, initialRuntime);
-  assert.notEqual(session.extensionRunner, initialRunner);
+  assert.notEqual(loader.getPlugins().runtime, initialRuntime);
+  assert.notEqual(session.pluginRunner, initialRunner);
   assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
   assert.equal(session.agent.timeoutMs, 200);
-  assert.equal(session.extensionRunner.createContext().isIdle(), true);
+  assert.equal(session.pluginRunner.createContext().isIdle(), true);
   assert.equal(starts, 2);
   assert.equal(discoveries, 2);
   await session.close();
@@ -7987,10 +8031,10 @@ test("AgentSession owns extension commands and input interception before model v
   const cwd = await workspace();
   const commands: string[] = [];
   const inputs: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "input-preflight",
       factory(api) {
         api.registerCommand("probe", {
@@ -8007,7 +8051,7 @@ test("AgentSession owns extension commands and input interception before model v
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
   assert.deepEqual(await session.prompt("/probe exact args"), { sessionId: session.sessionId, results: [] });
@@ -8021,10 +8065,10 @@ test("AgentSession owns extension commands and input interception before model v
 test("extension commands inspect the same live system prompt options object", async (context) => {
   const cwd = await workspace();
   const seen: BuildSystemPromptOptions[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "prompt-options",
       factory(api) {
         api.registerCommand("inspect-options", {
@@ -8041,7 +8085,7 @@ test("extension commands inspect the same live system prompt options object", as
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
 
   await session.prompt("/inspect-options");
@@ -8086,7 +8130,7 @@ test("AgentSession expands transformed skill commands and prompt templates for d
     cwd,
     agentDir,
     settingsManager: settings,
-    extensionFactories: [{
+    pluginFactories: [{
       name: "aliases",
       factory(api) {
         api.registerCommand("probe", {
@@ -8101,14 +8145,14 @@ test("AgentSession expands transformed skill commands and prompt templates for d
     }],
   });
   await loader.refresh();
-  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  context.after(async () => await getPluginRuntimeHost(loader.getPlugins().runtime)?.close());
   const provider = new RecordingProvider();
   const session = await AgentSession.create({
     sessionManager: SessionManager.inMemory(cwd),
     providers: new ProviderRegistry([provider]),
     settingsManager: settings,
     resourceLoader: loader,
-    extensionsResult: loader.getExtensions(),
+    pluginsResult: loader.getPlugins(),
   });
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
 
@@ -8143,10 +8187,10 @@ test("AgentSession executes commands during streaming and expands queued input",
   const provider = new GatedProvider();
   const commands: string[] = [];
   const observedStreaming: Array<"steer" | "followUp" | undefined> = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "stream-input",
       factory(api) {
         api.registerCommand("probe", { async handler(args) { commands.push(args); } });
@@ -8160,7 +8204,7 @@ test("AgentSession executes commands during streaming and expands queued input",
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   const active = session.prompt("first", { allowedTools: [] });
@@ -8206,10 +8250,10 @@ test("extension-origin queued slash follow-ups remain raw model input", async (c
   const cwd = await workspace();
   const provider = new GatedProvider();
   const commands: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "queued-slash",
       factory(api) {
         api.registerCommand("probe", {
@@ -8223,7 +8267,7 @@ test("extension-origin queued slash follow-ups remain raw model input", async (c
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   await session.setModel({
     provider: provider.id,
@@ -8256,10 +8300,10 @@ test("AgentSession serializes preparing input before ordered extension delivery"
   const preparationEntered = new Promise<void>((resolve) => { enterPreparation = resolve; });
   const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
   const observed: Array<[string, "steer" | "followUp" | undefined]> = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "ordered-input",
       factory(api) {
         api.on("input", async (event) => {
@@ -8276,7 +8320,7 @@ test("AgentSession serializes preparing input before ordered extension delivery"
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   context.after(async () => {
     releasePreparation();
@@ -8415,10 +8459,10 @@ test("AgentSession persists extension-selected compaction boundaries and token t
     });
     if (turn === 4) selectedEntryId = userEntry;
   }
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "compaction-owner",
       factory(api) {
         api.on("session_before_compact", () => ({
@@ -8436,7 +8480,7 @@ test("AgentSession persists extension-selected compaction boundaries and token t
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -8560,10 +8604,10 @@ test("AgentSession separates a split-turn prefix for compaction extensions", asy
     stopReason: "stop",
   });
   let observed: CompactionPreparation | undefined;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "observe-split-turn",
       factory(api) {
         api.on("session_before_compact", (event) => {
@@ -8576,7 +8620,7 @@ test("AgentSession separates a split-turn prefix for compaction extensions", asy
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 100,
   });
@@ -8643,10 +8687,10 @@ test("AgentSession rejects an explicitly aborted manual compaction and reports i
   seedCompactableHistory(manager, provider);
   let entered!: () => void;
   const listenerEntered = new Promise<void>((resolve) => { entered = resolve; });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "wait-for-compaction-abort",
       factory(api) {
         api.on("session_before_compact", async (event) => {
@@ -8659,7 +8703,7 @@ test("AgentSession rejects an explicitly aborted manual compaction and reports i
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -8699,10 +8743,10 @@ test("AgentSession generic abort cancels an active manual compaction", async (co
   seedCompactableHistory(manager, provider);
   let entered!: () => void;
   const listenerEntered = new Promise<void>((resolve) => { entered = resolve; });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "wait-for-generic-abort",
       factory(api) {
         api.on("session_before_compact", async (event) => {
@@ -8715,7 +8759,7 @@ test("AgentSession generic abort cancels an active manual compaction", async (co
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -8747,10 +8791,10 @@ test("manual compaction participates in idle state and blocks overlapping work",
   const gate = new Promise<{ cancel: true }>((resolve) => {
     releaseCompaction = () => resolve({ cancel: true });
   });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "hold-manual-compaction",
       factory(api) {
         api.on("session_before_compact", async () => {
@@ -8763,7 +8807,7 @@ test("manual compaction participates in idle state and blocks overlapping work",
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -8879,11 +8923,11 @@ test("standalone AgentSession binds direct extension compaction to the full resu
   const provider = new RecordingProvider();
   const manager = SessionManager.inMemory(cwd, { id: "direct-compaction" });
   seedCompactableHistory(manager, provider);
-  let completed: import("../../src/extensions/direct.js").CompactionResult | undefined;
-  const host = await loadDirectExtensions([], {
+  let completed: import("../../src/plugins/direct.js").CompactionResult | undefined;
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "direct-compaction",
       factory(api) {
         api.registerCommand("compact-direct", {
@@ -8932,7 +8976,7 @@ test("standalone AgentSession binds direct extension compaction to the full resu
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
     modelRegistry,
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -8962,10 +9006,10 @@ test("AgentSession compacts a successful over-budget response without retrying i
   const manager = SessionManager.inMemory(cwd, { id: "successful-overflow" });
   const selectedEntryId = seedCompactableHistory(manager, provider);
   const compactedSummary = "successful overflow compacted";
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "overflow-summary",
       factory(api) {
         api.on("session_before_compact", () => ({
@@ -8981,7 +9025,7 @@ test("AgentSession compacts a successful over-budget response without retrying i
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -9044,10 +9088,10 @@ test("AgentSession reserves an explicit output request before the first provider
     reserveTokens: number;
     maxInputTokens: number;
   }> = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "output-aware-summary",
       factory(api) {
         api.on("session_before_compact", (event) => {
@@ -9071,7 +9115,7 @@ test("AgentSession reserves an explicit output request before the first provider
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -9425,10 +9469,10 @@ test("AgentSession treats cancelled post-response compaction as nonfatal", async
   const manager = SessionManager.inMemory(cwd, { id: "cancelled-threshold" });
   seedCompactableHistory(manager, provider);
   const compactionFailures: unknown[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "cancel-compaction",
       factory(api) {
         api.on("session_before_compact", () => ({ cancel: true }));
@@ -9442,7 +9486,7 @@ test("AgentSession treats cancelled post-response compaction as nonfatal", async
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -9483,10 +9527,10 @@ test("AgentSession uses the fallback budget when sparse metadata overflows and r
   const provider = new ContextLimitProvider();
   const manager = SessionManager.inMemory(cwd, { id: "cancelled-overflow-recovery" });
   seedCompactableHistory(manager, provider);
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "cancel-overflow-recovery",
       factory(api) {
         api.on("session_before_compact", () => ({ cancel: true }));
@@ -9496,7 +9540,7 @@ test("AgentSession uses the fallback budget when sparse metadata overflows and r
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -9531,10 +9575,10 @@ test("AgentSession does not reuse a usage baseline after an error response from 
   const manager = SessionManager.inMemory(cwd, { id: "error-threshold" });
   const selectedEntryId = seedCompactableHistory(manager, provider, 9_799);
   const compactionProviderRequestCounts: number[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "error-summary",
       factory(api) {
         api.on("session_before_compact", () => {
@@ -9553,7 +9597,7 @@ test("AgentSession does not reuse a usage baseline after an error response from 
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });
@@ -9654,10 +9698,10 @@ test("AgentSession lets extensions guard and summarize direct JSONL tree navigat
     createdAt: "2026-07-20T00:00:02.000Z",
   });
   const observed: string[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "tree",
       factory(api) {
         api.on("session_before_tree", (event) => {
@@ -9680,7 +9724,7 @@ test("AgentSession lets extensions guard and summarize direct JSONL tree navigat
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   const runtimeEvents: RuntimeEvent[] = [];
   session.onEvent((envelope) => { runtimeEvents.push(envelope.event); });
@@ -10613,10 +10657,10 @@ test("AgentSession normalizes reducer and provider-native branch-summary cancell
     content: [{ type: "text", text: "abandoned" }],
     createdAt: "2026-07-20T00:00:01.000Z",
   });
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "cancel-tree",
       factory(api) { api.on("session_before_tree", () => ({ cancel: true })); },
     }],
@@ -10624,7 +10668,7 @@ test("AgentSession normalizes reducer and provider-native branch-summary cancell
   context.after(async () => await host.close());
   const reducerSession = await AgentSession.create({
     ...sessionOptions(reducerManager, new ProviderRegistry([new RecordingProvider()])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
   assert.deepEqual(
     await reducerSession.navigateTree(reducerTarget, { summarize: true }),
@@ -10989,10 +11033,10 @@ test("AgentSession isolates certified message updates between direct listeners a
   let firstListenerTopLevelFrozen = true;
   let secondListenerSawOriginal = true;
   let secondListenerSnapshotsSynchronized = true;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [
+    inlinePlugins: [
       {
         name: "certified-stream-mutator",
         factory(api) {
@@ -11027,9 +11071,9 @@ test("AgentSession isolates certified message updates between direct listeners a
   context.after(async () => await host.close());
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   let publicListenerCalls = 0;
   let publicListenerSawOriginal = true;
@@ -11090,10 +11134,10 @@ test("AgentSession bounds terminal assistant content before durable or observed 
       let directSnapshotsSynchronized = true;
       let firstDirectUpdate: MessageUpdateEvent | undefined;
       let lastDirectUpdate: MessageUpdateEvent | undefined;
-      const host = await loadDirectExtensions([], {
+      const host = await loadDirectPlugins([], {
         workspace: cwd,
         activationFailure: "throw",
-        inlineExtensions: [(api) => {
+        inlinePlugins: [(api) => {
           api.on("message_update", (event) => {
             directUpdateCount += 1;
             if (event.message.role === "assistant") directAccumulatedContentBlocks += event.message.content.length;
@@ -11112,9 +11156,9 @@ test("AgentSession bounds terminal assistant content before durable or observed 
       nested.after(async () => await host.close());
       const session = await AgentSession.create({
         ...sessionOptions(manager, new ProviderRegistry([provider])),
-        extensionRunner: host,
+        pluginRunner: host,
       });
-      await session.bindExtensions();
+      await session.bindPlugins();
       await session.setModel({
         provider: provider.id,
         api: "openai-chat-completions",
@@ -11309,10 +11353,10 @@ test("AgentSession publishes the exact mixed terminal block boundary to direct a
   const directLifecycle: string[] = [];
   let directSnapshotsSynchronized = true;
   let largestDirect: MessageUpdateEvent | undefined;
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [(api) => {
+    inlinePlugins: [(api) => {
       api.on("message_update", (event) => {
         directLifecycle.push(event.assistantMessageEvent.type);
         directSnapshotsSynchronized &&= "partial" in event.assistantMessageEvent
@@ -11330,11 +11374,11 @@ test("AgentSession publishes the exact mixed terminal block boundary to direct a
   const manager = SessionManager.inMemory(cwd, { id: "terminal-content-exact-mixed" });
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: [tool],
     allowedToolNames: ["echo"],
   });
-  await session.bindExtensions();
+  await session.bindPlugins();
   await session.setModel({ provider: provider.id, api: "openai-chat-completions", id: "one", info: provider.models[0]! });
   const publicLifecycle: string[] = [];
   let largestPublic: Extract<AgentSessionEvent, { type: "message_update" }> | undefined;
@@ -11396,10 +11440,10 @@ test("AgentSession redacts tool payloads without changing a secret-shaped tool n
   defaultSecretRedactor.registerAll([toolName, callId, payloadSecret, payloadKey]);
   let executions = 0;
   const extensionToolEvents: object[] = [];
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "public-tool-redaction",
       factory(api) {
         api.on("tool_execution_start", (event) => { extensionToolEvents.push(structuredClone(event)); });
@@ -11480,7 +11524,7 @@ test("AgentSession redacts tool payloads without changing a secret-shaped tool n
   const manager = SessionManager.inMemory(cwd, { id: "structural-tool-redaction" });
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: [tool],
     allowedToolNames: [toolName],
   });
@@ -11781,10 +11825,10 @@ test("AgentSession redacts a compaction payload without changing its secret-shap
   const firstKeptMessageId = "seed-user-4";
   const payloadSecret = "redaction-compaction-payload-secret";
   defaultSecretRedactor.registerAll([firstKeptMessageId, payloadSecret]);
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: cwd,
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "structural-compaction-redaction",
       factory(api) {
         api.on("session_before_compact", () => ({
@@ -11799,7 +11843,7 @@ test("AgentSession redacts a compaction payload without changing its secret-shap
   });
   const session = await AgentSession.create({
     ...sessionOptions(manager, new ProviderRegistry([provider])),
-    extensionRunner: host,
+    pluginRunner: host,
     compactionReserveTokens: 200,
     compactionRecentTokens: 200,
   });

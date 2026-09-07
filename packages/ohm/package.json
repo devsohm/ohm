@@ -1,6 +1,6 @@
 {
   "name": "ohm",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A local-first, extensible agent harness for terminals and embedded applications",
@@ -20,7 +20,7 @@
     "cli",
     "terminal",
     "developer-tools",
-    "extensions"
+    "plugins"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -49,10 +49,6 @@
       "types": "./dist/embedding/index.d.ts",
       "import": "./dist/embedding/index.js"
     },
-    "./extensions": {
-      "types": "./dist/extensions/index.d.ts",
-      "import": "./dist/extensions/index.js"
-    },
     "./images": {
       "types": "./dist/images/index.d.ts",
       "import": "./dist/images/index.js"
@@ -71,6 +67,10 @@
     "./net": {
       "types": "./dist/net/index.d.ts",
       "import": "./dist/net/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "import": "./dist/plugins/index.js"
     },
     "./process": {
       "types": "./dist/process/index.d.ts",
@@ -137,7 +137,7 @@
   },
   "scripts": {
     "benchmark:compare": "tsx benchmarks/compare-live.ts",
-    "benchmark:extensions": "tsx benchmarks/extension-authoring.ts",
+    "benchmark:plugins": "tsx benchmarks/plugin-authoring.ts",
     "benchmark:offline": "tsx benchmarks/offline.ts",
     "benchmark:release-offline": "node --import ./benchmarks/offline-network-guard.mjs --import tsx benchmarks/offline-release.ts",
     "benchmark:runtime": "tsx benchmarks/runtime-performance.ts",
@@ -172,9 +172,9 @@
     "typecheck:test": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@ohm/kernel": "0.1.1",
-    "@ohm/models": "0.1.1",
-    "@ohm/terminal": "0.1.1",
+    "@ohm/kernel": "0.2.0",
+    "@ohm/models": "0.2.0",
+    "@ohm/terminal": "0.2.0",
     "@anthropic-ai/sdk": "0.120.0",
     "@aws-sdk/client-bedrock-runtime": "3.1116.0",
     "@aws-sdk/credential-providers": "3.1116.0",

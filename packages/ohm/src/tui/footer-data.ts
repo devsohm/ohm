@@ -60,7 +60,7 @@ export interface FooterDataSnapshot {
 export interface ReadonlyFooterDataProvider {
   getSnapshot(): Readonly<FooterDataSnapshot>;
   getGitBranch(): string | null;
-  getExtensionStatuses(): ReadonlyMap<string, string>;
+  getPluginStatuses(): ReadonlyMap<string, string>;
   getAvailableProviderCount(): number;
   onBranchChange(callback: () => void): () => void;
 }

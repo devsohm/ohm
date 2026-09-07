@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "description": "Terminal input, editor, and theme API example for ohm",
-  "ohm": { "extensions": ["extensions/index.mjs"] }
+  "ohm": { "entrypoints": ["src/index.mjs"] }
 }

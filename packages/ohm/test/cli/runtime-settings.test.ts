@@ -18,6 +18,53 @@ function skillManifest(name: string, description: string): string {
   return `---\nname: ${name}\ndescription: ${description}\n---\n\n# Instructions\n`;
 }
 
+test("configured session refresh uses the runtime owner and preserves its writer across rollback and replacement", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-owned-session-refresh-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const agentDirectory = join(root, "agent");
+  await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
+  await writeFile(join(agentDirectory, "config.json"), JSON.stringify({ defaultModel: "original" }));
+  const runtime = await loadRuntime({
+    workspace, agentDirectory, credentialStore: new InMemoryCredentialStore(),
+    projectTrusted: false, offline: true, pluginCode: false, pluginRuntime: false,
+    skills: false, promptTemplates: false, themes: false,
+  });
+  context.after(async () => await runtime.close());
+  const original = runtime.session;
+  const manager = runtime.sessionManager;
+  const file = manager.getSessionFile()!;
+  const id = manager.getSessionId();
+  await writeFile(join(agentDirectory, "config.json"), JSON.stringify({ defaultModel: "refreshed" }));
+  await assert.rejects(original.refresh({
+    validateSettings(settings) {
+      assert.equal(settings.defaultModel, "refreshed");
+      throw new Error("host validation rejected candidate");
+    },
+  }), /host validation rejected candidate/u);
+  assert.equal(runtime.session, original);
+  assert.equal(runtime.settings.getDefaultModel(), "original");
+  manager.appendCustomEntry("after-failed-refresh", {});
+  assert.throws(() => SessionManager.open(file), /active writer/u);
+
+  let rebound = false;
+  await original.refresh({
+    beforeSessionStart() { rebound = runtime.session !== original; },
+  });
+  assert.equal(rebound, true);
+  assert.notEqual(runtime.session, original);
+  assert.equal(runtime.sessionManager, manager);
+  assert.equal(manager.getSessionId(), id);
+  assert.equal(runtime.settings.getDefaultModel(), "refreshed");
+  await assert.rejects(original.refresh(), /closed/u);
+  manager.appendCustomEntry("after-successful-refresh", {});
+  assert.throws(() => SessionManager.open(file), /active writer/u);
+  await runtime.close();
+  const reopened = SessionManager.open(file);
+  assert.equal(reopened.getEntries().length, 2);
+  reopened.closeV4Store();
+});
+
 test("runtime accepts a SessionManager cwd that resolves to the same workspace", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-runtime-session-workspace-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
@@ -38,8 +85,8 @@ test("runtime accepts a SessionManager cwd that resolves to the same workspace",
       sessionManager,
       projectTrusted: false,
       offline: true,
-      extensions: false,
-      extensionRuntime: false,
+      pluginCode: false,
+      pluginRuntime: false,
       skills: false,
       promptTemplates: false,
       themes: false,
@@ -65,8 +112,8 @@ test("runtime cannot activate project scope when it is the ohm home", async (con
     ephemeral: true,
     projectTrusted: true,
     offline: true,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -97,8 +144,8 @@ test("runtime startup failure releases the selected persistent session writer", 
       sessionDirectory,
       projectTrusted: false,
       offline: true,
-      extensions: false,
-      extensionRuntime: false,
+      pluginCode: false,
+      pluginRuntime: false,
       skills: false,
       promptTemplates: false,
       themes: false,
@@ -107,7 +154,7 @@ test("runtime startup failure releases the selected persistent session writer", 
     AgentSession.create = create;
   }
 
-  const journals = (await readdir(sessionDirectory)).filter((name) => name.endsWith(".jsonl"));
+  const journals = (await readdir(sessionDirectory)).filter((name) => name.endsWith(".sqlite"));
   assert.equal(journals.length, 1);
   const reopened = SessionManager.open(join(sessionDirectory, journals[0]!));
   reopened.closeV4Store();
@@ -132,9 +179,9 @@ test("runtime validates and forwards process-wide cache retention", async (conte
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted: true,
-      extensions: false,
-      extensionRuntime: true,
-      extensionFactories: [{
+      pluginCode: false,
+      pluginRuntime: true,
+      pluginFactories: [{
         name: "cache-retention-probe",
         factory(api) {
           api.registerProvider("cache-retention-probe", {
@@ -200,8 +247,8 @@ test("runtime validates and forwards process-wide cache retention", async (conte
         credentialStore: new InMemoryCredentialStore(),
         ephemeral: true,
         projectTrusted: false,
-        extensions: false,
-        extensionRuntime: false,
+        pluginCode: false,
+        pluginRuntime: false,
         skills: false,
         promptTemplates: false,
         themes: false,
@@ -245,8 +292,8 @@ test("runtime startup, refresh, and project trust use one SettingsManager author
     credentialStore: new InMemoryCredentialStore(),
     ephemeral: true,
     offline: true,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills: false,
     promptTemplates: false,
     themes: false,
@@ -309,9 +356,9 @@ test("runtime startup and candidate refresh apply persistent tool policy", async
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted: true,
-      extensions: false,
-      extensionRuntime: true,
-      extensionFactories: [{
+      pluginCode: false,
+      pluginRuntime: true,
+      pluginFactories: [{
         name: "runtime-tool-policy",
         factory(api) {
           api.registerTool({
@@ -403,8 +450,8 @@ test("other-harness skill roots are never loaded automatically", async (context)
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted: true,
-      extensions: false,
-      extensionRuntime: false,
+      pluginCode: false,
+      pluginRuntime: false,
       skills: true,
       promptTemplates: false,
       themes: false,
@@ -451,8 +498,8 @@ test("runtime loads other-harness skill roots only through explicit settings pat
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted,
-      extensions: false,
-      extensionRuntime: false,
+      pluginCode: false,
+      pluginRuntime: false,
       skills: true,
       promptTemplates: false,
       themes: false,
@@ -525,8 +572,8 @@ test("runtime loads configured resource paths from their trusted settings scope"
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted,
-      extensions: true,
-      extensionRuntime: true,
+      pluginCode: true,
+      pluginRuntime: true,
       skills: false,
       promptTemplates: true,
       themes: true,
@@ -534,7 +581,7 @@ test("runtime loads configured resource paths from their trusted settings scope"
     });
     try {
       return {
-        commands: new Set(runtime.resourceLoader.getExtensions().extensions.flatMap((extension) =>
+        commands: new Set(runtime.resourceLoader.getPlugins().plugins.flatMap((extension) =>
           [...extension.commands.keys()])),
         prompts: new Set(runtime.resourceLoader.getPrompts().prompts.map((prompt) => prompt.name)),
         themes: new Set(runtime.resourceLoader.getThemes().themes.map((theme) => theme.name)),
@@ -574,8 +621,8 @@ test("explicit invocation skill paths stay additive when automatic skills are di
     credentialStore: new InMemoryCredentialStore(),
     ephemeral: true,
     projectTrusted: false,
-    extensions: false,
-    extensionRuntime: false,
+    pluginCode: false,
+    pluginRuntime: false,
     skills: false,
     skillPaths: [skill],
     promptTemplates: false,
@@ -607,8 +654,8 @@ test("runtime refresh rejects invalid candidate settings without replacing the a
       credentialStore: new InMemoryCredentialStore(),
       ephemeral: true,
       projectTrusted: false,
-      extensions: false,
-      extensionRuntime: false,
+      pluginCode: false,
+      pluginRuntime: false,
       skills: false,
       promptTemplates: false,
       themes: false,

@@ -4,7 +4,7 @@ import type { Api } from "@ohm/models";
 import { isJsonObject, isJsonValue, type JsonObject, type JsonValue } from "../core/json.js";
 import type { ModelProtocolFamily } from "../core/types.js";
 import { BOOLEAN_VALUE, NUMBER_VALUE, STRING_VALUE } from "../core/value-schemas.js";
-import { protocolFromPublicApi } from "../extensions/model-boundary.js";
+import { protocolFromPublicApi } from "../plugins/model-boundary.js";
 import { OHM_VERSION } from "../version.js";
 import type { Provider, ProviderModel, ProviderRefreshContext } from "./models.js";
 import { parseStoredProviderModels } from "./registry.js";

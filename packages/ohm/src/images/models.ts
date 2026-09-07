@@ -205,15 +205,31 @@ export function createImagesModels(options: CreateImagesModelsOptions = {}): Mut
       const provider = providers.get(providerId);
       if (provider === undefined) return undefined;
       const requested = overrides.apiKey;
+      if (provider.auth.apiKey === undefined) {
+        if (requested !== undefined) {
+          const apiKey = secret(requested, "Image API key");
+          return { auth: { apiKey }, apiKey, source: "request" };
+        }
+        for (const name of provider.auth.environmentVariables ?? []) {
+          const value = overrides.env?.[name] ?? environment[name];
+          if (value !== undefined && value !== "") {
+            const apiKey = secret(value, `Image credential ${name}`);
+            return { auth: { apiKey }, apiKey, source: name };
+          }
+        }
+      }
       const brokerId = provider.auth.provider ?? provider.id;
-      const resolved = await options.credentialBroker?.resolve({ provider: brokerId, ...optionalProperties(overrides.signal === undefined ? undefined : { signal: overrides.signal }) });
+      const resolved = requested === undefined
+        ? await options.credentialBroker?.resolve({ provider: brokerId, ...optionalProperties(overrides.signal === undefined ? undefined : { signal: overrides.signal }) })
+        : undefined;
       const stored = credentialKey(resolved);
       if (provider.auth.apiKey !== undefined) {
         const context = overrides.env === undefined ? authContext : {
           ...authContext,
           env: async (name: string) => overrides.env?.[name] ?? await authContext.env(name),
         };
-        const result = await provider.auth.apiKey.resolve({ ctx: context, ...optionalProperties(stored === undefined ? undefined : { credential: stored }), ...optionalProperties(overrides.signal === undefined ? undefined : { signal: overrides.signal }) });
+        const credential = requested === undefined ? stored : { key: secret(requested, "Image API key"), kind: "api_key" };
+        const result = await provider.auth.apiKey.resolve({ ctx: context, ...optionalProperties(credential === undefined ? undefined : { credential }), ...optionalProperties(overrides.signal === undefined ? undefined : { signal: overrides.signal }) });
         if (result === undefined && requested === undefined) return undefined;
         const apiKey = requested ?? result?.auth.apiKey;
         if (apiKey !== undefined) secret(apiKey, "Image API key");
@@ -224,17 +240,6 @@ export function createImagesModels(options: CreateImagesModelsOptions = {}): Mut
           ...optionalProperties(requested === undefined ? undefined : { source: "request" }),
           ...optionalProperties(stored === undefined ? undefined : { credentialKind: stored.kind }),
         };
-      }
-      if (requested !== undefined) {
-        const apiKey = secret(requested, "Image API key");
-        return { auth: { apiKey }, apiKey, source: "request" };
-      }
-      for (const name of provider.auth.environmentVariables ?? []) {
-        const value = overrides.env?.[name] ?? environment[name];
-        if (value !== undefined && value !== "") {
-          const apiKey = secret(value, `Image credential ${name}`);
-          return { auth: { apiKey }, apiKey, source: name };
-        }
       }
       if (stored === undefined) return undefined;
       const apiKey = secret(stored.key, "Image API key");
@@ -250,6 +255,7 @@ export function createImagesModels(options: CreateImagesModelsOptions = {}): Mut
       if (provider === undefined) return imageErrorResult(model, new Error(`Unknown image provider: ${model.provider}`), request.signal);
       try {
         const authorization = await registry.getAuth(model, request);
+        request.signal?.throwIfAborted();
         const selectedModel = authorization?.auth.baseUrl === undefined ? model : { ...model, baseUrl: authorization.auth.baseUrl };
         const headers = mergeHeaders(authorization?.auth.headers, request.headers);
         const env = { ...authorization?.env, ...request.env };
@@ -268,20 +274,18 @@ export function createImagesModels(options: CreateImagesModelsOptions = {}): Mut
         const entry = providers.get(id);
         const refreshModels = entry?.refreshModels;
         if (refreshModels === undefined) return Promise.resolve();
-        const pending = (async () => {
-          try { await refreshModels(); }
-          catch { throw new ImagesModelsError("model_source", `Image model refresh failed for ${id}`); }
-          finally { refreshes.delete(id); }
-        })();
+        const pending = Promise.resolve().then(() => refreshModels.call(entry)).then(() => undefined)
+          .catch(() => { throw new ImagesModelsError("model_source", `Image model refresh failed for ${id}`); })
+          .finally(() => { if (refreshes.get(id) === pending) refreshes.delete(id); });
         refreshes.set(id, pending);
         return pending;
       };
       if (provider !== undefined) return await refreshOne(provider);
       await Promise.allSettled([...providers.keys()].map(refreshOne));
     },
-    setProvider(provider) { providers.set(provider.id, provider); },
-    deleteProvider(id) { providers.delete(id); },
-    clearProviders() { providers.clear(); },
+    setProvider(provider) { providers.set(provider.id, provider); refreshes.delete(provider.id); },
+    deleteProvider(id) { providers.delete(id); refreshes.delete(id); },
+    clearProviders() { providers.clear(); refreshes.clear(); },
   };
   return registry;
 }

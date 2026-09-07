@@ -14,6 +14,13 @@ import {
   createReadOnlyToolDefinitions,
   createReadToolDefinition,
   createWriteToolDefinition,
+  EditTool,
+  FindTool,
+  GrepTool,
+  LsTool,
+  ReadTool,
+  ShellTool,
+  WriteTool,
 } from "../../src/tools/index.js";
 
 test("public tool collections expose the stable tools in their target groups", () => {
@@ -21,6 +28,18 @@ test("public tool collections expose the stable tools in their target groups", (
   assert.deepEqual(createCodingToolDefinitions(process.cwd()).map((tool) => tool.name), ["read", "bash", "edit", "write"]);
   assert.deepEqual(createReadOnlyToolDefinitions(process.cwd()).map((tool) => tool.name), ["read", "grep", "find", "ls"]);
   assert.deepEqual(Object.keys(createAllToolDefinitions(process.cwd())), ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+});
+
+test("built-in provider schemas match standalone parameters including descriptions", async (t) => {
+  const definitions = createAllToolDefinitions(process.cwd());
+  const tools = [new ReadTool(), new ShellTool("bash"), new EditTool(), new WriteTool(), new GrepTool(), new FindTool(), new LsTool()];
+  for (const [name, definition] of Object.entries(definitions)) {
+    await t.test(name, () => {
+      const tool = tools.find((candidate) => candidate.definition.name === name);
+      assert.ok(tool);
+      assert.deepEqual(structuredClone(tool.definition.inputSchema), structuredClone(definition.parameters));
+    });
+  }
 });
 
 test("read, write, and edit factories honor injected operations", async () => {
@@ -85,6 +104,39 @@ test("find and ls factories honor injected discovery operations", async () => {
   });
   const listed = await ls.execute("ls-1", {});
   assert.equal(listed.content[0]?.type === "text" ? listed.content[0].text : undefined, "a.txt\nfolder/\nz.txt");
+});
+
+test("find and ls default counts can be increased without changing their defaults", async () => {
+  const cwd = resolve("/virtual/workspace");
+  const paths = Array.from({ length: 1001 }, (_value, index) => join(cwd, `file-${index}.ts`));
+  const findLimits: number[] = [];
+  const find = createFindToolDefinition(cwd, {
+    operations: {
+      exists: () => true,
+      glob(_pattern, _cwd, options) { findLimits.push(options.limit); return paths; },
+    },
+  });
+  const defaultFind = await find.execute("find-default", { pattern: "*.ts" });
+  const expandedFind = await find.execute("find-expanded", { pattern: "*.ts", limit: 1002 });
+  assert.deepEqual(findLimits, [1000, 1002]);
+  assert.equal(defaultFind.details?.resultLimitReached, 1000);
+  assert.equal(expandedFind.details?.resultLimitReached, undefined);
+  assert.ok(expandedFind.content.some((block) => block.type === "text" && block.text.includes("file-1000.ts")));
+
+  const ls = createLsToolDefinition(cwd, {
+    operations: {
+      exists: () => true,
+      stat: (path) => ({ isDirectory: () => path === cwd }),
+      readdir: () => Array.from({ length: 501 }, (_value, index) => `file-${index}.txt`),
+    },
+  });
+  const defaultLs = await ls.execute("ls-default", {});
+  const expandedLs = await ls.execute("ls-expanded", { limit: 502 });
+  assert.equal(defaultLs.details?.entryLimitReached, 500);
+  assert.equal(expandedLs.details?.entryLimitReached, undefined);
+  const block = expandedLs.content[0];
+  assert.ok(block?.type === "text");
+  assert.equal(block.text.split("\n").length, 501);
 });
 
 test("default factory definitions execute against their captured cwd", async (t) => {

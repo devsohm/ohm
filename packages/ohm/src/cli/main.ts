@@ -36,8 +36,8 @@ import {
   withGracefulTermination,
   type GracefulTerminationContext,
 } from "../process/graceful-termination.js";
-import type { ExtensionError, InlineExtension } from "../extensions/direct.js";
-import type { RuntimeCommandUi } from "../extensions/runtime.js";
+import type { PluginError, InlinePlugin } from "../plugins/direct.js";
+import type { RuntimeCommandUi } from "../plugins/runtime.js";
 import { SessionManager } from "../storage/session-manager.js";
 import { exportSessionFile } from "../storage/session-export.js";
 import {
@@ -93,7 +93,7 @@ import {
 } from "../modes/interactive-interruption-recovery.js";
 import { createInteractiveTuiContext } from "../modes/interactive-tui-context.js";
 import { recoverNonInteractiveSession } from "../modes/noninteractive-recovery.js";
-import { formatExtensionError, projectExtensionError, type ProjectedExtensionError } from "../modes/extension-error.js";
+import { formatPluginError, projectPluginError, type ProjectedPluginError } from "../modes/plugin-error.js";
 import {
   captureOneShotAssistantBoundary,
   latestOneShotAssistant,
@@ -108,6 +108,8 @@ import { InteractiveSessionOperations, parseInteractivePathArgument } from "../m
 import { attachClipboardImage } from "../modes/interactive-terminal-actions.js";
 import { REFRESH_RESOURCE_SUMMARY, renderInteractiveCommandHelp } from "../interactive/commands.js";
 import { renderInteractiveResourceReport } from "../interactive/resource-report.js";
+import { runInteractivePresentationAction } from "../modes/interactive-presentation-actions.js";
+import { showInteractiveInspection } from "../modes/interactive-inspection.js";
 import { AnthropicApiBearerBillingWarning } from "../interactive/anthropic-warning.js";
 import { bindInteractiveSessionPresentation } from "../interactive/session-presentation.js";
 import { presentStartupChangelog, readPackageChangelog } from "../modes/startup-changelog.js";
@@ -136,21 +138,21 @@ import {
   parseManagementArguments,
   type ManagementArguments,
 } from "./management-args.js";
-import { loadRuntime, preactivateProjectTrustExtensions, type LoadedRuntime } from "./runtime.js";
+import { loadRuntime, preactivateProjectTrustPlugins, type LoadedRuntime } from "./runtime.js";
 import { persistDefaultSelection } from "./setup.js";
 import { renderCliHelp } from "./help.js";
 import { runRpcServer } from "./rpc.js";
 import { runDiagnosticsCommand } from "./diagnostics-command.js";
 import { runLogsCommand } from "./logs-command.js";
 import { runStatsCommand } from "./stats-command.js";
-import { runExtensionsCommand, runPackageCommand, runPackageConfigCommand, runProjectPackageCommand } from "./extensions-command.js";
+import { runPluginsCommand, runPackageCommand, runPackageConfigCommand, runProjectPackageCommand } from "./plugins-command.js";
 import { runProductInstallAction } from "./product-install.js";
 import { runSessionsCommand } from "./sessions-command.js";
 import { runServeCommand } from "./serve-command.js";
 import { createStartupSession, resolveStartupSessionDirectory, validateSessionFlags } from "./session-startup.js";
 import { selectStartupSession } from "./session-picker.js";
 import { ThemeHotRefresher } from "./theme-hot-refresh.js";
-import { applyRuntimeExtensionFlags } from "./extension-flags.js";
+import { applyRuntimePluginFlags, pluginResourceOptions } from "./plugin-flags.js";
 import { agentPaths, expandPath } from "./paths.js";
 import { ProjectTrustResolver } from "./project-trust.js";
 import { OHM_VERSION } from "../version.js";
@@ -210,9 +212,9 @@ interface InvocationTrustOptions {
   workspace: string;
   override?: boolean;
   terminal?: TerminalPrompter;
-  extensions: boolean;
-  extensionPaths: readonly string[];
-  extensionFactories: readonly InlineExtension[];
+  pluginCode: boolean;
+  pluginPaths: readonly string[];
+  pluginFactories: readonly InlinePlugin[];
 }
 
 async function createInvocationTrustResolver(options: InvocationTrustOptions): Promise<ProjectTrustResolver> {
@@ -225,11 +227,11 @@ async function createInvocationTrustResolver(options: InvocationTrustOptions): P
     defaultProjectTrust: settings.getDefaultProjectTrust(),
     cwd: process.cwd(),
     agentDirectory: paths.agentDirectory,
-    preactivate: async (workspace) => await preactivateProjectTrustExtensions(paths, workspace, {
-      extensions: options.extensions,
-      extensionPaths: options.extensionPaths,
-      extensionFactories: options.extensionFactories,
-      extensionRuntime: true,
+    preactivate: async (workspace) => await preactivateProjectTrustPlugins(paths, workspace, {
+      pluginCode: options.pluginCode,
+      pluginPaths: options.pluginPaths,
+      pluginFactories: options.pluginFactories,
+      pluginRuntime: true,
     }),
   });
 }
@@ -555,7 +557,7 @@ export function formatStartupReport(
   unicode = true,
 ): string {
   const loaded = [
-    inventory.extensions?.length ? `${inventory.extensions.length} extensions` : undefined,
+    inventory.extensions?.length ? `${inventory.extensions.length} plugins` : undefined,
     inventory.skills?.length ? `${inventory.skills.length} skills` : undefined,
     inventory.prompts?.length ? `${inventory.prompts.length} prompts` : undefined,
   ].filter(Boolean).join(" · ");
@@ -570,7 +572,7 @@ export function formatCompactStartupReport(
   unicode = true,
 ): string {
   const loaded = [
-    inventory.extensions?.length ? `${inventory.extensions.length} extensions` : undefined,
+    inventory.extensions?.length ? `${inventory.extensions.length} plugins` : undefined,
     inventory.skills?.length ? `${inventory.skills.length} skills` : undefined,
     inventory.prompts?.length ? `${inventory.prompts.length} prompts` : undefined,
   ].filter(Boolean).join(" · ");
@@ -1089,43 +1091,43 @@ export function runtimeUi(
     ownerKey,
     assertCurrent: () => {
       if (lifecycleSignal?.aborted === true) {
-        throw new Error(`Extension UI context is no longer active: ${extensionId}`);
+        throw new Error(`Plugin UI context is no longer active: ${extensionId}`);
       }
     },
   });
 }
 
-type LoadedExtensionBundle = ReturnType<LoadedRuntime["extensions"]["bundle"]>;
+type LoadedPluginBundle = ReturnType<LoadedRuntime["plugins"]["bundle"]>;
 type InteractiveSkill = Pick<
   ReturnType<LoadedRuntime["resourceLoader"]["getSkills"]>["skills"][number],
   "description" | "filePath" | "name"
 >;
-interface InteractiveExtensionBundle {
+interface InteractivePluginBundle {
   commands: Array<Pick<
-    LoadedExtensionBundle["commands"][number],
+    LoadedPluginBundle["commands"][number],
     "argumentHint" | "description" | "extensionId" | "name"
   >>;
   prompts: Array<Pick<
-    LoadedExtensionBundle["prompts"][number],
+    LoadedPluginBundle["prompts"][number],
     "argumentHint" | "description" | "extensionId" | "id"
   >>;
-  themes: LoadedExtensionBundle["themes"];
+  themes: LoadedPluginBundle["themes"];
 }
 
 export interface InteractiveUiRuntime {
   workspace: LoadedRuntime["workspace"];
   settings: LoadedRuntime["settings"];
   resourceLoader: { getSkills(): { skills: InteractiveSkill[] } };
-  session: Pick<LoadedRuntime["session"], "extensionRunner" | "toolRendererBinding">;
-  runtimeExtensions: LoadedRuntime["runtimeExtensions"];
-  extensions: { bundle(): InteractiveExtensionBundle };
+  session: Pick<LoadedRuntime["session"], "pluginRunner" | "toolRendererBinding">;
+  runtimePlugins: LoadedRuntime["runtimePlugins"];
+  plugins: { bundle(): InteractivePluginBundle };
 }
 
 /** Owns the generation-scoped TUI adapters for the currently loaded extension host. */
-export class InteractiveExtensionUiBinder {
+export class InteractivePluginUiBinder {
   readonly #terminal: TuiController;
   readonly #themeHotRefresher: ThemeHotRefresher;
-  #host: LoadedRuntime["runtimeExtensions"] | undefined;
+  #host: LoadedRuntime["runtimePlugins"] | undefined;
   #binding: InteractiveRuntimeUiBinding | undefined;
 
   constructor(terminal: TuiController) {
@@ -1137,16 +1139,16 @@ export class InteractiveExtensionUiBinder {
 
   context(runtime: InteractiveUiRuntime): ReturnType<typeof createInteractiveDirectUiContext> {
     if (
-      this.#host === runtime.runtimeExtensions
+      this.#host === runtime.runtimePlugins
       && this.#binding !== undefined
       && !this.#binding.signal.aborted
     ) return this.#binding.uiContext;
-    const themes = runtime.extensions.bundle().themes;
+    const themes = runtime.plugins.bundle().themes;
     return createInteractiveDirectUiContext(
       this.#terminal,
       "runtime",
       runtime.workspace,
-      runtime.runtimeExtensions.lifecycleSignal(),
+      runtime.runtimePlugins.lifecycleSignal(),
       {
         settings: runtime.settings,
         themePath: (name) => themes.find((theme) => theme.name === name)?.sourcePath,
@@ -1159,7 +1161,7 @@ export class InteractiveExtensionUiBinder {
   }
 
   #commandItems(runtime: InteractiveUiRuntime): PickerItem<string>[] {
-    const bundle = runtime.extensions.bundle();
+    const bundle = runtime.plugins.bundle();
     const skills = runtime.settings.getEnableSkillCommands()
       ? interactiveSkillCommands(
           runtime.resourceLoader.getSkills().skills,
@@ -1187,7 +1189,7 @@ export class InteractiveExtensionUiBinder {
         ...optionalProperties(entry.description === undefined ? undefined : { detail: entry.description }),
         keywords: [entry.extensionId, entry.argumentHint ?? "", "prompt template"],
       })),
-      ...runtime.runtimeExtensions.commands().map((entry): PickerItem<string> => ({
+      ...runtime.runtimePlugins.commands().map((entry): PickerItem<string> => ({
         id: `runtime-command:${entry.extensionId}:${entry.name}`,
         label: `/${entry.name}`,
         value: `/${entry.name}`,
@@ -1200,7 +1202,7 @@ export class InteractiveExtensionUiBinder {
 
   bind(runtime: InteractiveUiRuntime, force = false): boolean {
     const terminal = this.#terminal;
-    const host = runtime.runtimeExtensions;
+    const host = runtime.runtimePlugins;
     if (!force && this.#host === host && !host.lifecycleSignal().aborted) return false;
     const hostSignal = host.lifecycleSignal();
     hostSignal.throwIfAborted();
@@ -1209,7 +1211,7 @@ export class InteractiveExtensionUiBinder {
     try {
       terminal.setOperatorPreferences(tuiOperatorPreferences(runtime.settings));
       terminal.setDoubleEscapeAction(runtime.settings.getDoubleEscapeAction());
-      const themes = runtime.extensions.bundle().themes;
+      const themes = runtime.plugins.bundle().themes;
       terminal.setCustomThemes(themes.map((theme) => theme.definition));
       const theme = runtime.settings.getThemeSetting() ?? "signal";
       try { terminal.setTheme(theme); }
@@ -1221,7 +1223,7 @@ export class InteractiveExtensionUiBinder {
       watchActiveTheme();
       const binding = bindInteractiveRuntimeUi(
         terminal,
-        runtime.session.extensionRunner,
+        runtime.session.pluginRunner,
         runtime.workspace,
         () => this.#commandItems(runtime),
         {
@@ -1252,7 +1254,7 @@ export class InteractiveExtensionUiBinder {
   }
 
   restoreDirectContext(runtime: InteractiveUiRuntime): void {
-    if (this.#host === runtime.runtimeExtensions) this.#binding?.restoreDirectContext();
+    if (this.#host === runtime.runtimePlugins) this.#binding?.restoreDirectContext();
   }
 
   unbind(): void {
@@ -1276,7 +1278,7 @@ export class InteractiveExtensionUiBinder {
 
 function runtimeOptions(
   argumentsValue: Args,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Parameters<typeof loadRuntime>[0] {
@@ -1296,18 +1298,15 @@ function runtimeOptions(
     ...(projectTrustResolver === undefined
       ? argumentsValue.projectTrustOverride === undefined ? {} : { projectTrusted: argumentsValue.projectTrustOverride }
       : { projectTrustResolver }),
-    extensions: argumentsValue.noExtensions !== true,
-    extensionPaths: argumentsValue.extensions ?? [],
-    extensionFactories,
-    skills: argumentsValue.noSkills !== true,
+    ...pluginResourceOptions(argumentsValue),
+    pluginPaths: argumentsValue.pluginPaths,
+    pluginFactories,
     skillPaths: argumentsValue.skills ?? [],
-    promptTemplates: argumentsValue.noPromptTemplates !== true,
     promptTemplatePaths: argumentsValue.promptTemplates ?? [],
-    themes: argumentsValue.noThemes !== true,
     themePaths: argumentsValue.themes ?? [],
     ...optionalProperties(argumentsValue.systemPrompt === undefined ? undefined : { systemPrompt: argumentsValue.systemPrompt }),
     ...optionalProperties(argumentsValue.appendSystemPrompt === undefined ? undefined : { appendSystemPrompt: argumentsValue.appendSystemPrompt }),
-    extensionRuntime: true,
+    pluginRuntime: true,
     localObservabilityMode,
     ...optionalProperties(toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler }),
     offline: argumentsValue.offline === true || /^(?:1|true|yes)$/iu.test(process.env.OHM_OFFLINE ?? ""),
@@ -1326,13 +1325,13 @@ async function confirmForkFromWorkspace(workspace: string): Promise<boolean> {
 
 async function sessionRuntimeOptions(
   argumentsValue: Args,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<Parameters<typeof loadRuntime>[0] | undefined> {
   const options = runtimeOptions(
     argumentsValue,
-    extensionFactories,
+    pluginFactories,
     projectTrustResolver,
     toolAuthorizationHandler,
   );
@@ -1466,8 +1465,8 @@ function throwIfAssistantFailed(
   throw new Error(message);
 }
 
-function applyExtensionArguments(argumentsValue: Args, runtime: LoadedRuntime): void {
-  applyRuntimeExtensionFlags(argumentsValue, runtime.runtimeExtensions);
+function applyPluginArguments(argumentsValue: Args, runtime: LoadedRuntime): void {
+  applyRuntimePluginFlags(argumentsValue, runtime.runtimePlugins);
   const errors = argumentsValue.diagnostics.filter((entry) => entry.type === "error");
   if (errors.length > 0) throw new Error(errors.map((entry) => entry.message).join("\n"));
 	validateSessionFlags(argumentsValue);
@@ -1478,7 +1477,7 @@ function applyExtensionArguments(argumentsValue: Args, runtime: LoadedRuntime): 
 
 async function runCommand(
   argumentsValue: Args,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<void> {
@@ -1486,7 +1485,7 @@ async function runCommand(
     await runCommandOperation(
       argumentsValue,
       termination,
-      extensionFactories,
+      pluginFactories,
       projectTrustResolver,
       toolAuthorizationHandler,
     );
@@ -1496,14 +1495,14 @@ async function runCommand(
 async function runCommandOperation(
   argumentsValue: Args,
   termination: GracefulTerminationContext,
-  extensionFactories: readonly InlineExtension[],
+  pluginFactories: readonly InlinePlugin[],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<void> {
   termination.throwIfTerminated();
   const options = await sessionRuntimeOptions(
     argumentsValue,
-    extensionFactories,
+    pluginFactories,
     projectTrustResolver,
     toolAuthorizationHandler,
   );
@@ -1518,23 +1517,23 @@ async function runCommandOperation(
   });
   try {
     termination.throwIfTerminated();
-    applyExtensionArguments(argumentsValue, runtime);
+    applyPluginArguments(argumentsValue, runtime);
     owner = await createInteractiveRuntimeOwner(
       argumentsValue,
       runtime,
-      extensionFactories,
+      pluginFactories,
       projectTrustResolver,
       true,
       toolAuthorizationHandler,
     );
     const mode = argumentsValue.mode === "json" ? "json" : "print";
     let headerPending = mode === "json";
-    const pendingExtensionErrors: ProjectedExtensionError[] = [];
-    const reportExtensionError = (failure: ExtensionError): void => {
-      const event = projectExtensionError(failure);
-      if (mode === "json" && headerPending) pendingExtensionErrors.push(event);
+    const pendingPluginErrors: ProjectedPluginError[] = [];
+    const reportPluginError = (failure: PluginError): void => {
+      const event = projectPluginError(failure);
+      if (mode === "json" && headerPending) pendingPluginErrors.push(event);
       else if (mode === "json") writeMachineOutput(`${JSON.stringify(event)}\n`);
-      else console.error(formatExtensionError(failure));
+      else console.error(formatPluginError(failure));
     };
     const bind = async (
       candidate: AgentSession = owner!.session,
@@ -1551,10 +1550,10 @@ async function runCommandOperation(
       const signal = AbortSignal.any([termination.signal, controller.signal]);
       const candidateRuntime = owner.services.runtime;
       try {
-        await candidate.bindExtensions({
+        await candidate.bindPlugins({
           mode,
           commandContextActions: createAgentSessionRuntimeCommandActions(owner, candidate),
-          onError: reportExtensionError,
+          onError: reportPluginError,
         }, signal);
       } catch (error) {
         if (controller.signal.aborted && generation !== bindingGeneration) return;
@@ -1570,7 +1569,7 @@ async function runCommandOperation(
         headerPending = false;
         const header = candidate.sessionManager.getHeader();
         if (header !== null) writeMachineOutput(`${JSON.stringify(header)}\n`);
-        for (const event of pendingExtensionErrors.splice(0)) {
+        for (const event of pendingPluginErrors.splice(0)) {
           writeMachineOutput(`${JSON.stringify(event)}\n`);
         }
       }
@@ -1591,9 +1590,6 @@ async function runCommandOperation(
       signal.throwIfAborted();
       await selectConfiguredModel(candidateRuntime, argumentsValue, session, signal);
       signal.throwIfAborted();
-      if (session.model === undefined) {
-        throw new Error("No model selected. Pass --model or run ohm interactively and use /model.");
-      }
     };
     owner.setRebindSession(async (candidate) => {
       await bind(candidate, prepare);
@@ -1610,7 +1606,7 @@ async function runCommandOperation(
       const configuredTools = runtime.settings.getToolSettings();
       const tools = selectedTools(
         argumentsValue,
-        runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        runtime.runtimePlugins.tools().map((tool) => tool.definition.name),
         {
           ...optionalProperties(configuredTools.enabled === undefined ? undefined : { allowedTools: configuredTools.enabled }),
           ...optionalProperties(configuredTools.excluded === undefined ? undefined : { excludedTools: configuredTools.excluded }),
@@ -1651,7 +1647,7 @@ async function runCommandOperation(
     unsubscribe();
     if (owner === undefined) {
       try {
-        await runtime.runtimeExtensions.dispatch("session_shutdown", { reason: "quit" }).catch(() => undefined);
+        await runtime.runtimePlugins.dispatch("session_shutdown", { reason: "quit" }).catch(() => undefined);
       } finally {
         await runtime.close();
       }
@@ -1675,7 +1671,7 @@ interface InteractiveRuntimeServices extends AgentSessionRuntimeServices {
 async function createInteractiveRuntimeOwner(
   argumentsValue: Args,
   initial: LoadedRuntime,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   deferConfiguredModelSelection = false,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
@@ -1692,7 +1688,7 @@ async function createInteractiveRuntimeOwner(
     const runtime = await loadRuntime({
       ...runtimeOptions(
         argumentsValue,
-        extensionFactories,
+        pluginFactories,
         projectTrustResolver,
         toolAuthorizationHandler,
       ),
@@ -1704,12 +1700,12 @@ async function createInteractiveRuntimeOwner(
       ...optionalProperties(signal === undefined ? undefined : { signal }),
     });
     try {
-      applyExtensionArguments(argumentsValue, runtime);
+      applyPluginArguments(argumentsValue, runtime);
       if (!deferConfiguredModelSelection) await selectConfiguredModel(runtime, argumentsValue);
       return {
         session: runtime.session,
-        extensionsResult: runtime.resourceLoader.getExtensions(),
-        diagnostics: runtime.runtimeExtensions.diagnostics().map((entry) => ({
+        pluginsResult: runtime.resourceLoader.getPlugins(),
+        diagnostics: runtime.runtimePlugins.diagnostics().map((entry) => ({
           type: "warning" as const,
           message: entry.message,
         })),
@@ -1730,8 +1726,8 @@ async function createInteractiveRuntimeOwner(
   let owner!: AgentSessionRuntime<InteractiveRuntimeServices>;
   owner = new AgentSessionRuntime({
     session: initial.session,
-    extensionsResult: initial.resourceLoader.getExtensions(),
-    diagnostics: initial.runtimeExtensions.diagnostics().map((entry) => ({
+    pluginsResult: initial.resourceLoader.getPlugins(),
+    diagnostics: initial.runtimePlugins.diagnostics().map((entry) => ({
       type: "warning" as const,
       message: entry.message,
     })),
@@ -1743,20 +1739,20 @@ async function createInteractiveRuntimeOwner(
     },
   }, create, {
     async beforeSwitch(event, signal) {
-      return await owner.services.runtime.runtimeExtensions.reduceSessionBeforeSwitch({
+      return await owner.services.runtime.runtimePlugins.reduceSessionBeforeSwitch({
         reason: event.reason,
         ...optionalProperties(event.targetSessionFile === undefined ? undefined : { targetThreadId: event.targetSessionFile }),
       }, signal);
     },
     async beforeFork(event, signal) {
-      return await owner.services.runtime.runtimeExtensions.reduceSessionBeforeFork({
+      return await owner.services.runtime.runtimePlugins.reduceSessionBeforeFork({
         sourceThreadId: owner.session.sessionId,
         sourceEventId: event.entryId,
         position: event.position,
       }, signal);
     },
     async shutdown(event) {
-      await owner.services.runtime.runtimeExtensions.dispatch("session_shutdown", {
+      await owner.services.runtime.runtimePlugins.dispatch("session_shutdown", {
         reason: event.reason,
         ...optionalProperties(event.targetSessionFile === undefined ? undefined : { targetSessionFile: event.targetSessionFile }),
       });
@@ -1767,7 +1763,7 @@ async function createInteractiveRuntimeOwner(
 
 async function chatCommand(
   argumentsValue: Args,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<void> {
@@ -1775,7 +1771,7 @@ async function chatCommand(
     await chatCommandOperation(
       argumentsValue,
       termination,
-      extensionFactories,
+      pluginFactories,
       projectTrustResolver,
       toolAuthorizationHandler,
     );
@@ -1785,25 +1781,25 @@ async function chatCommand(
 async function chatCommandOperation(
   argumentsValue: Args,
   termination: GracefulTerminationContext,
-  extensionFactories: readonly InlineExtension[],
+  pluginFactories: readonly InlinePlugin[],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<void> {
   termination.throwIfTerminated();
   const options = await sessionRuntimeOptions(
     argumentsValue,
-    extensionFactories,
+    pluginFactories,
     projectTrustResolver,
     toolAuthorizationHandler,
   );
   if (options === undefined) return;
   let runtime = await loadRuntime({ ...options, deferModelNetworkRefresh: true });
   projectTrustResolver?.setTerminal(undefined);
-  applyExtensionArguments(argumentsValue, runtime);
+  applyPluginArguments(argumentsValue, runtime);
   const owner = await createInteractiveRuntimeOwner(
     argumentsValue,
     runtime,
-    extensionFactories,
+    pluginFactories,
     projectTrustResolver,
     true,
     toolAuthorizationHandler,
@@ -1825,10 +1821,10 @@ async function chatCommandOperation(
     },
   });
   projectTrustResolver?.setTerminal(terminal);
-  const reportExtensionError = (failure: ExtensionError): void => {
-    terminal.notify(formatExtensionError(failure), "error");
+  const reportPluginError = (failure: PluginError): void => {
+    terminal.notify(formatPluginError(failure), "error");
   };
-  const extensionUi = new InteractiveExtensionUiBinder(terminal);
+  const extensionUi = new InteractivePluginUiBinder(terminal);
   const deferredSubmissions = new BoundedDeferredSubmissionQueue<ImageBlock>(imageSourceBytes);
   const anthropicApiBearerBillingWarning = new AnthropicApiBearerBillingWarning();
   let promptActive = false;
@@ -1961,7 +1957,7 @@ async function chatCommandOperation(
               extensionUi.bind(runtime, true);
             },
             beforeSessionStart(refreshedSession) {
-              refreshedSession.updateExtensionBindings(interactiveExtensionBindings(refreshedSession));
+              refreshedSession.updatePluginBindings(interactivePluginBindings(refreshedSession));
               extensionUi.restoreDirectContext(runtime);
             },
           });
@@ -1973,7 +1969,7 @@ async function chatCommandOperation(
       },
       async afterRefresh(refreshedSession) {
         try {
-          refreshedSession.updateExtensionBindings(interactiveExtensionBindings(refreshedSession));
+          refreshedSession.updatePluginBindings(interactivePluginBindings(refreshedSession));
           bind(true);
           await refreshInteractiveModels({ force: false, allowNetwork: false });
           const warnings = refreshResult?.warnings ?? [];
@@ -1988,11 +1984,11 @@ async function chatCommandOperation(
       },
     });
   };
-  const interactiveExtensionBindings = (session: LoadedRuntime["session"]) => ({
+  const interactivePluginBindings = (session: LoadedRuntime["session"]) => ({
     mode: "tui" as const,
     uiContext: extensionUi.context(runtime),
     commandContextActions: interactiveCommandActions(session),
-    onError: reportExtensionError,
+    onError: reportPluginError,
   });
   owner.setBeforeSessionInvalidate(() => {
     abortPrompt(new Error("Session replaced"));
@@ -2008,15 +2004,15 @@ async function chatCommandOperation(
     runtime = owner.services.runtime;
     extensionUi.bind(runtime, true);
     bind(true);
-    await session.bindExtensions(
-      interactiveExtensionBindings(session),
-      runtime.runtimeExtensions.lifecycleSignal(),
+    await session.bindPlugins(
+      interactivePluginBindings(session),
+      runtime.runtimePlugins.lifecycleSignal(),
     );
     extensionUi.restoreDirectContext(runtime);
     await recoverThenApplyConfiguredModel(
       runtime,
       session,
-      runtime.runtimeExtensions.lifecycleSignal(),
+      runtime.runtimePlugins.lifecycleSignal(),
     );
     await refreshInteractiveModels({ force: false, allowNetwork: false });
   });
@@ -2105,7 +2101,7 @@ async function chatCommandOperation(
       const configuredTools = selectedRuntime.settings.getToolSettings();
       const tools = selectedTools(
         argumentsValue,
-        selectedRuntime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        selectedRuntime.runtimePlugins.tools().map((tool) => tool.definition.name),
         {
           ...optionalProperties(configuredTools.enabled === undefined ? undefined : { allowedTools: configuredTools.enabled }),
           ...optionalProperties(configuredTools.excluded === undefined ? undefined : { excludedTools: configuredTools.excluded }),
@@ -2268,14 +2264,14 @@ async function chatCommandOperation(
     }
   };
   const dispatchUnknownCommand = async (input: string, images: readonly ImageBlock[]): Promise<boolean> => {
-    const route = resolveInteractiveResourceSlash(runtime.session, input, runtime.extensions);
+    const route = resolveInteractiveResourceSlash(runtime.session, input, runtime.plugins);
     if (route === undefined) {
       terminal.notify(`Unknown command: /${input.slice(1).trim().split(/\s/u, 1)[0] ?? ""}`, "error");
       return true;
     }
     if (route.kind === "runtime") {
       const result = await runInteractiveOperation(async (signal) =>
-        await runtime.runtimeExtensions.runCommand(route.name, {
+        await runtime.runtimePlugins.runCommand(route.name, {
           args: route.args,
           threadId: runtime.session.sessionId,
           signal,
@@ -2302,7 +2298,7 @@ async function chatCommandOperation(
             command,
             hidden,
             workspace: runtime.workspace,
-            host: runtime.runtimeExtensions,
+            host: runtime.runtimePlugins,
             session: runtime.session,
             signal,
             onPrepared: beginPresentation,
@@ -2437,6 +2433,14 @@ async function chatCommandOperation(
       async share({ args }) {
         await runInteractiveOperation(async (signal) => await sessionOperations.shareSession(args, signal));
       },
+      async actions() {
+        await runInteractiveOperation(async (signal) =>
+          await runInteractivePresentationAction(runtime.session, terminal, signal));
+      },
+      async inspect() {
+        await runInteractiveOperation(async (signal) =>
+          await showInteractiveInspection(runtime.session, terminal, signal));
+      },
       context() { sessionOperations.showContext(); },
       resources() {
         terminal.notify(renderInteractiveResourceReport(runtime.session, runtime.workspace));
@@ -2543,7 +2547,7 @@ async function chatCommandOperation(
       async extensionShortcut(action) {
         action.generation.throwIfAborted();
         await runInteractiveOperation(async (signal) =>
-          await runtime.runtimeExtensions.runShortcut(action.shortcut, {
+          await runtime.runtimePlugins.runShortcut(action.shortcut, {
             threadId: runtime.session.sessionId,
             signal,
             ui: runtimeUi(terminal, "shortcut", action.generation),
@@ -2607,7 +2611,7 @@ async function chatCommandOperation(
       return;
     }
     const resourceRoute = text.trim().startsWith("/")
-      ? resolveInteractiveResourceSlash(runtime.session, text, runtime.extensions)
+      ? resolveInteractiveResourceSlash(runtime.session, text, runtime.plugins)
       : undefined;
     const classified = classifyActiveSubmission(text, { resourceCommand: resourceRoute !== undefined });
     if (classified.kind === "cancel") {
@@ -2710,9 +2714,9 @@ async function chatCommandOperation(
     terminal.start();
     extensionUi.bind(runtime);
     const startupSession = runtime.session;
-    await startupSession.bindExtensions(
-      interactiveExtensionBindings(startupSession),
-      AbortSignal.any([runtime.runtimeExtensions.lifecycleSignal(), termination.signal]),
+    await startupSession.bindPlugins(
+      interactivePluginBindings(startupSession),
+      AbortSignal.any([runtime.runtimePlugins.lifecycleSignal(), termination.signal]),
     );
     extensionUi.restoreDirectContext(runtime);
     await recoverThenApplyConfiguredModel(runtime, startupSession);
@@ -2733,7 +2737,7 @@ async function chatCommandOperation(
     });
     terminal.setStartup(
       formatCompactStartupReport(
-        { extensions: runtime.extensions.list().map((entry) => entry.id) },
+        { extensions: runtime.plugins.list().map((entry) => entry.id) },
         runtime.workspace,
         keybindings,
         terminal.capabilities.unicode,
@@ -2768,16 +2772,16 @@ async function chatCommandOperation(
 
 async function listModels(
   argumentsValue: Args,
-  extensionFactories: readonly InlineExtension[] = [],
+  pluginFactories: readonly InlinePlugin[] = [],
   projectTrustResolver?: ProjectTrustResolver,
   toolAuthorizationHandler?: ToolAuthorizationHandler,
 ): Promise<void> {
   const runtime = await loadRuntime({
-    ...runtimeOptions(argumentsValue, extensionFactories, projectTrustResolver, toolAuthorizationHandler),
+    ...runtimeOptions(argumentsValue, pluginFactories, projectTrustResolver, toolAuthorizationHandler),
     ephemeral: true,
   });
   try {
-    applyExtensionArguments(argumentsValue, runtime);
+    applyPluginArguments(argumentsValue, runtime);
     const provider = argumentsValue.provider;
     const direct = argumentsValue.offline === true || /^(?:1|true|yes)$/iu.test(process.env.OHM_OFFLINE ?? "")
       ? runtime.modelRegistry.getAll()
@@ -2810,13 +2814,13 @@ async function configCommand(
 
 export interface MainOptions {
   /** Trusted in-process extensions activated for every runtime generation. */
-  extensionFactories?: InlineExtension[];
+  pluginFactories?: InlinePlugin[];
   /** Optional host-owned gate for model-requested tool effects in every runtime mode. */
   toolAuthorizationHandler?: ToolAuthorizationHandler;
 }
 
 export async function main(argv = process.argv.slice(2), options: MainOptions = {}): Promise<void> {
-  const extensionFactories = options.extensionFactories ?? [];
+  const pluginFactories = options.pluginFactories ?? [];
   const helpTopics: ReadonlySet<string> = new Set(CLI_HELP_TOPICS);
   if (argv[0] === "help") {
     writeMachineOutput(renderCliHelp(argv[1]));
@@ -2839,6 +2843,18 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
     const approve = flagBoolean(management, "approve");
     const deny = flagBoolean(management, "no-approve");
     if (approve && deny) throw new Error("--approve and --no-approve are mutually exclusive");
+    if (management.command === "plugins" && management.positionals[0] === "author") {
+      // Author inspection selects its own package; do not activate unrelated discovery.
+      const result = await withGracefulTermination(async (termination) => {
+        termination.throwIfTerminated();
+        const result = await runPluginsCommand(management, { signal: termination.signal });
+        termination.throwIfTerminated();
+        return result;
+      });
+      // The author command's signal owner is closed before the interactive host starts.
+      if (result !== undefined) await main(result.previewArgv, options);
+      return;
+    }
     if (management.command === "config") {
       const action = management.positionals[0];
       const local = flagBoolean(management, "local");
@@ -2859,24 +2875,28 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
         return;
       }
     }
-    if (["extensions", "install", "remove", "update", "list", "packages", "config", "serve"].includes(management.command)) {
+    if (["plugins", "install", "remove", "update", "list", "packages", "config", "serve"].includes(management.command)) {
       const projectTrustResolver = await createInvocationTrustResolver({
         workspace: flagString(management, "workspace") ?? process.cwd(),
         ...optionalProperties(approve || deny ? { override: approve } : undefined),
         ...optionalProperties(management.command !== "serve" && process.stdin.isTTY && process.stdout.isTTY ? { terminal: new ScopedTrustPrompter() } : undefined),
-        extensions: !flagBoolean(management, "no-extensions"),
-        extensionPaths: flagStrings(management, "extension"),
-        extensionFactories,
+        pluginCode: !flagBoolean(management, "no-plugin-code") && !flagBoolean(management, "no-plugins"),
+        pluginPaths: flagStrings(management, "plugin"),
+        pluginFactories,
       });
       try {
         if (management.command === "serve") {
           await runServeCommand(management, {
-            extensionFactories,
+            pluginFactories,
             projectTrustResolver,
             ...optionalProperties(options.toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler: options.toolAuthorizationHandler }),
           });
-        } else if (management.command === "extensions") {
-          await runExtensionsCommand(management, { extensionFactories, projectTrustResolver });
+        } else if (management.command === "plugins") {
+          await withGracefulTermination(async (termination) => {
+            termination.throwIfTerminated();
+            await runPluginsCommand(management, { pluginFactories, projectTrustResolver, signal: termination.signal });
+            termination.throwIfTerminated();
+          });
         } else if (["install", "remove", "update", "list"].includes(management.command)) {
           await withGracefulTermination(async (termination) => {
             termination.throwIfTerminated();
@@ -2930,15 +2950,15 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
     workspace: argumentsValue.workspace ?? process.cwd(),
     ...optionalProperties(argumentsValue.projectTrustOverride === undefined ? undefined : { override: argumentsValue.projectTrustOverride }),
     ...optionalProperties(startupTrustPrompter === undefined ? undefined : { terminal: startupTrustPrompter }),
-    extensions: argumentsValue.noExtensions !== true,
-    extensionPaths: argumentsValue.extensions ?? [],
-    extensionFactories,
+    pluginCode: argumentsValue.noPluginCode !== true && argumentsValue.noPlugins !== true,
+    pluginPaths: argumentsValue.pluginPaths,
+    pluginFactories,
   });
   try {
     if (argumentsValue.listModels !== undefined) {
       await listModels(
         argumentsValue,
-        extensionFactories,
+        pluginFactories,
         projectTrustResolver,
         options.toolAuthorizationHandler,
       );
@@ -2947,7 +2967,7 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
     if (argumentsValue.mode === "rpc") {
       if (argumentsValue.fileArgs.length > 0) throw new Error("RPC mode cannot accept @file inputs");
       await runRpcServer(argumentsValue, {
-        extensionFactories,
+        pluginFactories,
         projectTrustResolver,
         ...optionalProperties(options.toolAuthorizationHandler === undefined ? undefined : { toolAuthorizationHandler: options.toolAuthorizationHandler }),
       });
@@ -2956,14 +2976,14 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
     if (interactive) {
       await chatCommand(
         argumentsValue,
-        extensionFactories,
+        pluginFactories,
         projectTrustResolver,
         options.toolAuthorizationHandler,
       );
     } else {
       await runCommand(
         argumentsValue,
-        extensionFactories,
+        pluginFactories,
         projectTrustResolver,
         options.toolAuthorizationHandler,
       );

@@ -1,10 +1,10 @@
-# Session JSONL extension
+# Session JSONL plugin
 
 This example reads session data through the read-only session manager supplied
 to the command context.
 
 ```text
-ohm install ./packages/ohm/examples/session-jsonl
+ohm plugins install ./packages/ohm/examples/session-jsonl
 ```
 
 `/example-session-summary` inspects the session header, entries, and active

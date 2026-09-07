@@ -7,8 +7,8 @@ import test from "node:test";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.js";
 import type { ObservabilitySink } from "../../src/core/observability.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import { getExtensionRuntimeHost } from "../../src/extensions/compat.js";
-import type { RuntimeInlineExtension } from "../../src/extensions/runtime.js";
+import { getPluginRuntimeHost } from "../../src/plugins/compat.js";
+import type { RuntimeInlinePlugin } from "../../src/plugins/runtime.js";
 import { createInMemoryHarness } from "../../src/embedding/index.js";
 import { providerFromAdapter } from "../../src/providers/internal-runtime-bridge.js";
 import { ModelRuntime } from "../../src/providers/model-compat.js";
@@ -119,7 +119,7 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 	const runtime = await modelRuntime();
 	const model = runtime.getModel("openai-codex", SOL);
 	assert.ok(model);
-	const extension: RuntimeInlineExtension = {
+	const extension: RuntimeInlinePlugin = {
 		name: "sdk-parity",
 		factory(api) {
 			api.registerTool({
@@ -134,7 +134,7 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 		cwd,
 		agentDir,
 		settingsManager: SettingsManager.inMemory(),
-		extensionFactories: [extension],
+		pluginFactories: [extension],
 		noSkills: true,
 		noPromptTemplates: true,
 		noThemes: true,
@@ -152,7 +152,7 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 		settingsManager: SettingsManager.inMemory(),
 		noTools: "builtin",
 	});
-	await direct.session.bindExtensions({ mode: "sdk" });
+	await direct.session.bindPlugins({ mode: "sdk" });
 
 	const services = await createAgentSessionServices({
 		cwd,
@@ -160,7 +160,7 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 		modelRuntime: runtime,
 		settingsManager: SettingsManager.inMemory(),
 		resourceLoaderOptions: {
-			extensionFactories: [extension],
+			pluginFactories: [extension],
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
@@ -174,14 +174,14 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 		thinkingLevel: "high",
 		noTools: "builtin",
 	});
-	await reusable.session.bindExtensions({ mode: "sdk" });
+	await reusable.session.bindPlugins({ mode: "sdk" });
 
 	const owner = await createAgentSessionRuntime(async (request) => {
 		const loader = new DefaultResourceLoader({
 			cwd: request.cwd,
 			agentDir: request.agentDir,
 			settingsManager: SettingsManager.inMemory(),
-			extensionFactories: [extension],
+			pluginFactories: [extension],
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
@@ -198,13 +198,13 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 			settingsManager: SettingsManager.inMemory(),
 			noTools: "builtin",
 		});
-		await created.session.bindExtensions({ mode: "sdk" });
+		await created.session.bindPlugins({ mode: "sdk" });
 		return {
 			...created,
 			services: {
 				cwd: request.cwd,
 				agentDir: request.agentDir,
-				async close() { await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close(); },
+				async close() { await getPluginRuntimeHost(loader.getPlugins().runtime)?.close(); },
 			},
 		};
 	}, {
@@ -245,8 +245,8 @@ test("direct, reusable-service, owner-runtime, and narrow embedding factories re
 	await reusable.session.close();
 	await direct.session.close();
 	await Promise.all([
-		getExtensionRuntimeHost(services.resourceLoader.getExtensions().runtime)?.close(),
-		getExtensionRuntimeHost(directLoader.getExtensions().runtime)?.close(),
+		getPluginRuntimeHost(services.resourceLoader.getPlugins().runtime)?.close(),
+		getPluginRuntimeHost(directLoader.getPlugins().runtime)?.close(),
 	]);
 	await runtime.close();
 	await rm(root, { recursive: true, force: true });

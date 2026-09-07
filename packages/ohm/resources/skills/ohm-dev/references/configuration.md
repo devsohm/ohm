@@ -10,7 +10,7 @@ Use the configuration that belongs to the active ohm version. Read [Settings](..
 | Trusted workspace override | `WORKSPACE/.ohm/config.json` |
 | Global user instructions | `~/.ohm/AGENTS.md` or `$OHM_HOME/AGENTS.md` |
 | Directory-specific instructions | `AGENTS.md` along the path to the working directory |
-| Extension, skill, prompt, or theme content | Its own file or package, referenced by `config.json` when necessary |
+| Plugin, skill, prompt, or theme content | Its own file or package, referenced by `config.json` when necessary |
 | Provider credential | The ohm credential backend, never `config.json` |
 | Session history | The append-only session store, never `config.json` |
 
@@ -27,13 +27,13 @@ Do not create a second settings format or place executable resource bodies, mode
 5. Keep project settings limited to intentional overrides. A newly created project file contains only `$schema`.
    Never move a global-only setting into project scope.
 6. Keep credentials, secret headers, and credential commands out of the document.
-7. Run the same `ohm config validate` command after editing, then run `/refresh` in an idle interactive session. Confirm that it reports the refreshed resources and retains the current session.
+7. Run the same `ohm config validate` command after editing. Ask the user to run `/refresh` in an idle interactive session, confirm that it retains the current session, and exercise the changed setting or keybinding.
 
 An invalid candidate must leave the previous in-memory settings active. Do not repair a parse error by replacing the file with defaults or deleting unknown user keys.
 
 ## Refresh versus restart
 
-`/refresh` is the normal path for settings, keybindings, extensions, skills, prompt templates, themes, and `AGENTS.md` files. It waits for pending writes, blocks new input, prepares a candidate generation, and keeps the previous generation usable if preparation fails.
+`/refresh` is the normal path for settings, keybindings, plugins and their resources, and `AGENTS.md` files. It waits for pending writes, blocks new input, prepares a candidate generation, and keeps the previous generation usable if preparation fails.
 
 Restart only for process-bound state: a Node or native-helper update, a launcher change, an environment value inherited at process start, or a runtime failure that makes `/refresh` unavailable. Preserve the current session when restarting.
 
@@ -41,10 +41,4 @@ Restart only for process-bound state: a Node or native-helper update, a launcher
 
 The installed global `AGENTS.md` is deliberately empty. Do not populate it with this skill or with generic rules. Add user instructions only when the user supplies or requests them, and keep project instructions in the applicable project tree.
 
-## Verify
-
-- Run `ohm config validate` for the edited scope and require a successful result.
-- Confirm the target scope and project-trust state.
-- Run `/refresh` and inspect the reported resources.
-- Exercise the changed setting or keybinding.
-- For a source change to configuration behavior, run the focused settings, CLI configuration, trust, refresh, and keybinding tests described in [Testing and release](testing-release.md).
+For a source change to configuration behavior, run the focused settings, CLI configuration, trust, refresh, and keybinding tests described in [Testing and release](testing-release.md).

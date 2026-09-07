@@ -318,6 +318,76 @@ test("empty pickers retain recovery text and dismissal help when space is availa
   assert.deepEqual(projected.cursor, { row: 3, column: 12 });
 });
 
+for (const unicode of [true, false]) {
+  for (const columns of [80, 24]) {
+    test(`label prompts retain their prefill without empty-picker chrome at ${columns} columns, unicode=${unicode}`, () => {
+      const overlay = {
+        title: "Edit entry label",
+        promptMode: "input" as const,
+        queryLabel: "label> ", query: "bookmark", queryCursor: 3,
+        selected: 0, items: [],
+        hints: ["Enter save; empty removes; Esc cancel"],
+      };
+      const frame = projectNativeOverlay({
+        snapshot: createNativeOverlaySnapshot(overlay), columns, rows: 8, unicode,
+      });
+      assert.match(frame.text, /^Edit entry label\nlabel> bookmark\n/u);
+      assert.match(frame.text.replaceAll("\n", " "), /Enter save; empty removes; Esc cancel/u);
+      assert.doesNotMatch(frame.text, /0\/0|No matches|Filter/u);
+      assert.deepEqual(frame.cursor, { row: 2, column: 11 });
+      assert.ok(frame.text.split("\n").every((line) => cellWidth(line) <= columns));
+    });
+
+    test(`confirmation prompts retain their target and action without a filter at ${columns} columns, unicode=${unicode}`, () => {
+      const overlay = {
+        title: "Delete session", promptMode: "confirmation" as const,
+        queryLabel: "confirm> ", query: "", selected: 0, items: [],
+        status: "Delete Older? Recycle when available; otherwise permanent.",
+        hints: ["Enter delete; Esc cancel"],
+      };
+      const frame = projectNativeOverlay({
+        snapshot: createNativeOverlaySnapshot(overlay), columns, rows: 8, unicode,
+      });
+      const text = frame.text.replaceAll("\n", " ");
+      assert.match(text, /^Delete session Delete Older\?/u);
+      assert.match(text, /otherwise permanent\./u);
+      assert.match(text, /Enter delete; Esc cancel/u);
+      assert.doesNotMatch(text, /0\/0|No matches|Filter|confirm>/u);
+      assert.equal(frame.cursor, undefined);
+      assert.ok(frame.text.split("\n").every((line) => cellWidth(line) <= columns));
+    });
+  }
+}
+
+test("tiny prompts preserve input cursors and bound every row", () => {
+  const overlay = {
+    title: "Edit entry label", promptMode: "input" as const,
+    queryLabel: "label> ", query: "old界new", queryCursor: 4,
+    selected: 0, items: [], hints: ["Enter save; Esc cancel"],
+  };
+  for (const columns of [1, 12, 24]) {
+    for (const rows of [1, 2, 3]) {
+      const frame = projectNativeOverlay({ snapshot: createNativeOverlaySnapshot(overlay), columns, rows });
+      const lines = frame.text.split("\n");
+      assert.ok(lines.length <= rows);
+      assert.ok(lines.every((line) => cellWidth(line) <= columns));
+      assert.doesNotMatch(frame.text, /0\/0|No matches/u);
+      assert.ok(frame.cursor !== undefined);
+      assert.ok(frame.cursor.row >= 1 && frame.cursor.row <= lines.length);
+      assert.ok(frame.cursor.column >= 1 && frame.cursor.column <= columns);
+
+      const confirmation = projectNativeOverlay({
+        snapshot: createNativeOverlaySnapshot({ ...overlay, promptMode: "confirmation", status: "Delete this session?" }),
+        columns, rows,
+      });
+      assert.ok(confirmation.text.split("\n").length <= rows);
+      assert.ok(confirmation.text.split("\n").every((line) => cellWidth(line) <= columns));
+      assert.doesNotMatch(confirmation.text, /0\/0|No matches|label>/u);
+      assert.equal(confirmation.cursor, undefined);
+    }
+  }
+});
+
 test("picker semantic roles come from a supplied custom theme", () => {
   const theme = createTheme("overlay-test", { color: true, unicode: true }, {
     schemaVersion: 1,

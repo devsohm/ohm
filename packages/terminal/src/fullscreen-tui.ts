@@ -1,151 +1,24 @@
 import type { Terminal } from "./terminal.js";
-import { type Component, TUI } from "./tui.js";
-import { getOsc8LinkAtColumn } from "./utils.js";
-import {
-  cancelViewportPointer,
-  dispatchViewportPointer,
-  fitViewportRows,
-  renderViewport,
-  type ViewportPointerEvent,
-  type ViewportPointerTarget,
-} from "./viewport.js";
+import { type Component, TUI, type TuiPointerOptions } from "./tui.js";
+import { fitViewportRows, renderViewport, type ViewportPointerRegion } from "./viewport.js";
 
-const ENTER_FULLSCREEN = "\x1b[?1049h";
-const LEAVE_FULLSCREEN = "\x1b[?1049l";
-const DISABLE_LINE_WRAP = "\x1b[?7l";
-const ENABLE_LINE_WRAP = "\x1b[?7h";
-const ENABLE_BUTTON_MOTION_POINTER = "\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h";
-const ENABLE_ALL_MOTION_POINTER = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h";
-const DISABLE_BUTTON_MOTION_POINTER = "\x1b[?1006l\x1b[?1004l\x1b[?1002l\x1b[?1000l";
-const DISABLE_ALL_MOTION_POINTER = "\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
-const ESCAPE = "\x1b";
-const POINTER_REPORT_SOURCE = `${ESCAPE}\\[<([0-9]{1,3});([0-9]{1,5});([0-9]{1,5})([Mm])|${ESCAPE}\\[([IO])`;
-
-interface PointerInput {
-  data: string;
-  events: ViewportPointerEvent[];
-  focusLost: boolean;
-  reportSeen: boolean;
-}
-
-export interface FullscreenTUIOptions {
-  mouse?: boolean;
-  wheelScrollLines?: number;
-  openUrl?: (target: string) => void;
-}
-
-interface ClickState {
-  row: number;
-  column: number;
-  dragged: boolean;
-}
-
-function pointerButton(code: number): ViewportPointerEvent["button"] {
-  const selected = code & 3;
-  return selected === 0 ? "left" : selected === 1 ? "middle" : selected === 2 ? "right" : "none";
-}
-
-function parsePointerInput(value: string, wheelScrollLines: number): PointerInput {
-  const events: ViewportPointerEvent[] = [];
-  let focusLost = false;
-  let reportSeen = false;
-  let output = "";
-  let start = 0;
-  const reports = new RegExp(POINTER_REPORT_SOURCE, "gu");
-  for (const match of value.matchAll(reports)) {
-    reportSeen = true;
-    const index = match.index;
-    output += value.slice(start, index);
-    start = index + match[0].length;
-    if (match[5] !== undefined) {
-      focusLost ||= match[5] === "O";
-      continue;
-    }
-    const code = Number(match[1]);
-    const column = Number(match[2]) - 1;
-    const row = Number(match[3]) - 1;
-    if (!Number.isSafeInteger(code) || !Number.isSafeInteger(row) || !Number.isSafeInteger(column)
-      || row < 0 || column < 0 || row > 9_999 || column > 9_999) continue;
-    if ((code & 64) !== 0) {
-      const direction = code & 3;
-      if (direction < 2) events.push({
-        type: "wheel",
-        row,
-        column,
-        button: "none",
-        deltaRows: direction === 0 ? -wheelScrollLines : wheelScrollLines,
-      });
-      continue;
-    }
-    const released = match[4] === "m" || ((code & 32) === 0 && (code & 3) === 3);
-    events.push({
-      type: released ? "release" : (code & 32) !== 0 ? "move" : "press",
-      row,
-      column,
-      button: pointerButton(code),
-    });
-  }
-  output += value.slice(start);
-  return { data: output, events, focusLost, reportSeen };
-}
-
-function hasUnsafeLinkCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x20 || (code >= 0x7f && code <= 0x9f)) return true;
-  }
-  return false;
-}
-
-function safeLinkTarget(value: string): string | undefined {
-  if (value.length < 1 || value.length > 4_096 || hasUnsafeLinkCharacter(value)) return undefined;
-  try {
-    const parsed = new URL(value);
-    if (!["http:", "https:", "mailto:"].includes(parsed.protocol)) return undefined;
-    if (parsed.username !== "" || parsed.password !== "") return undefined;
-    return parsed.href.length <= 4_096 ? parsed.href : undefined;
-  } catch {
-    return undefined;
-  }
-}
+/** Shared pointer options; fullscreen mouse reporting defaults to enabled. */
+export type FullscreenTUIOptions = TuiPointerOptions;
 
 /** Fixed-height terminal surface. The existing TUI class remains the main-screen surface. */
 export class FullscreenTUI extends TUI {
   override readonly mode = "fullscreen";
   #root: Component | undefined;
   #fullscreenActive = false;
-  #capturedPointer: ViewportPointerTarget | undefined;
-  #hoveredPointer: ViewportPointerTarget | undefined;
-  readonly #mouse: boolean;
-  readonly #wheelScrollLines: number;
-  readonly #openUrl: ((target: string) => void) | undefined;
-  #disablePointer = "";
-  #click: ClickState | undefined;
-  #frame: string[] = [];
 
-  constructor(
-    terminal: Terminal,
-    showHardwareCursor?: boolean,
-    logDirectory?: string,
-    options: FullscreenTUIOptions = {},
-  ) {
-    super(terminal, showHardwareCursor, logDirectory);
-    const wheelScrollLines = Math.trunc(options.wheelScrollLines ?? 3);
-    if (!Number.isSafeInteger(wheelScrollLines) || wheelScrollLines < 1 || wheelScrollLines > 100) {
-      throw new RangeError("Fullscreen wheel scroll lines must be 1 to 100");
-    }
-    this.#mouse = options.mouse ?? true;
-    this.#wheelScrollLines = wheelScrollLines;
-    this.#openUrl = options.openUrl;
-    this.addInputListener((data) => this.#handlePointerInput(data));
+  constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string, options: FullscreenTUIOptions = {}) {
+    super(terminal, showHardwareCursor, logDirectory, { ...options, mouse: options.mouse ?? true });
   }
 
   get root(): Component | undefined { return this.#root; }
 
   setRoot(component: Component | undefined): void {
     if (component === this.#root) return;
-    this.#cancelPointer();
-    this.#frame = [];
     super.clear();
     this.#root = component;
     if (component) super.addChild(component);
@@ -157,24 +30,23 @@ export class FullscreenTUI extends TUI {
 
   override addChild(component: Component): void {
     if (this.#root) throw new Error("FullscreenTUI accepts one root component; use a stack to compose children");
-    this.#frame = [];
     this.#root = component;
     super.addChild(component);
   }
 
   override removeChild(component: Component): void {
     if (component !== this.#root) return;
-    this.#cancelPointer();
-    this.#frame = [];
     super.removeChild(component);
     this.#root = undefined;
   }
 
   override clear(): void {
-    this.#cancelPointer();
-    this.#frame = [];
     super.clear();
     this.#root = undefined;
+  }
+
+  override viewportPointerRegions(): readonly ViewportPointerRegion[] {
+    return this.#root === undefined ? [] : [{ component: this.#root, row: 0, column: 0, width: this.terminal.columns, height: this.terminal.rows }];
   }
 
   override render(width: number): string[] {
@@ -184,92 +56,14 @@ export class FullscreenTUI extends TUI {
     return renderViewport(this.#root, columns, rows, () => this.requestRender());
   }
 
-  protected override compositionChanged(): void { this.#frame = []; }
-
-  protected override frameComposed(lines: readonly string[]): void {
-    this.#frame = [...lines];
-  }
-
   protected override beforeTerminalStart(): void {
     this.#fullscreenActive = true;
-    const term = process.env.TERM?.toLowerCase() ?? "";
-    const limitedPointerMotion = process.env.TMUX !== undefined
-      || process.env.ZELLIJ !== undefined
-      || process.env.STY !== undefined
-      || term.startsWith("tmux")
-      || term.startsWith("screen");
-    const enablePointer = limitedPointerMotion ? ENABLE_BUTTON_MOTION_POINTER : ENABLE_ALL_MOTION_POINTER;
-    this.#disablePointer = limitedPointerMotion ? DISABLE_BUTTON_MOTION_POINTER : DISABLE_ALL_MOTION_POINTER;
-    this.terminal.write(`${ENTER_FULLSCREEN}${DISABLE_LINE_WRAP}${this.#mouse ? enablePointer : ""}\x1b[2J\x1b[H`);
+    this.terminal.write("\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H");
   }
 
   protected override beforeTerminalStop(): void {
     if (!this.#fullscreenActive) return;
-    this.#cancelPointer();
     this.#fullscreenActive = false;
-    this.#click = undefined;
-    this.#frame = [];
-    this.terminal.write(`\x1b[0m${this.#mouse ? this.#disablePointer : ""}${ENABLE_LINE_WRAP}${LEAVE_FULLSCREEN}`);
-    this.#disablePointer = "";
-  }
-
-  #handlePointerInput(data: string): { consume?: boolean; data?: string } | undefined {
-    if (!this.#mouse) return undefined;
-    const parsed = parsePointerInput(data, this.#wheelScrollLines);
-    if (parsed.focusLost) this.#cancelPointer();
-    for (const event of parsed.events) this.#dispatchPointer(event);
-    if (!parsed.reportSeen) return undefined;
-    return parsed.data === "" ? { consume: true } : { data: parsed.data };
-  }
-
-  #dispatchPointer(event: ViewportPointerEvent): void {
-    const root = this.#root;
-    if (root === undefined) return;
-    const result = dispatchViewportPointer(
-      root,
-      event,
-      this.terminal.columns,
-      this.terminal.rows,
-      this.#capturedPointer,
-    );
-    if (event.type === "press" && event.button === "left" && !result.handled) {
-      this.#click = { row: event.row, column: event.column, dragged: false };
-    } else if (event.type === "move" && this.#click !== undefined
-      && (this.#click.row !== event.row || this.#click.column !== event.column)) {
-      this.#click.dragged = true;
-    } else if (event.type === "release") {
-      const click = this.#click;
-      this.#click = undefined;
-      if (click !== undefined && !click.dragged && click.row === event.row && click.column === event.column) {
-        const target = safeLinkTarget(getOsc8LinkAtColumn(this.#frame[event.row] ?? "", event.column) ?? "");
-        if (target !== undefined) this.#openUrl?.(target);
-      }
-    }
-    if (event.type === "move" && this.#capturedPointer === undefined) {
-      if (this.#hoveredPointer !== undefined && this.#hoveredPointer !== result.target) {
-        cancelViewportPointer(root, this.#hoveredPointer, this.terminal.columns, this.terminal.rows, "leave");
-      }
-      this.#hoveredPointer = result.target;
-    }
-    if (result.capture !== undefined) this.#capturedPointer = result.capture;
-    if (result.releaseCapture === true || (this.#capturedPointer !== undefined && result.target === undefined)) {
-      this.#capturedPointer = undefined;
-    }
-    if (result.handled) this.requestRender();
-  }
-
-  #cancelPointer(): void {
-    const root = this.#root;
-    if (root !== undefined) {
-      if (this.#capturedPointer !== undefined) {
-        cancelViewportPointer(root, this.#capturedPointer, this.terminal.columns, this.terminal.rows);
-      }
-      if (this.#hoveredPointer !== undefined && this.#hoveredPointer !== this.#capturedPointer) {
-        cancelViewportPointer(root, this.#hoveredPointer, this.terminal.columns, this.terminal.rows);
-      }
-    }
-    this.#capturedPointer = undefined;
-    this.#hoveredPointer = undefined;
-    this.#click = undefined;
+    this.terminal.write("\x1b[0m\x1b[?7h\x1b[?1049l");
   }
 }

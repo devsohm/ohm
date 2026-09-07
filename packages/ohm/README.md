@@ -4,19 +4,19 @@
 
 ohm is an open, local-first agent harness for people who want control over how their agent works. Its lean core
 provides an extensible agent runtime, bounded coding tools, persistent sessions, multiple host surfaces, and a trusted
-extension system designed to be built on. Start it in a
+plugin system designed to be built on. Start it in a
 project, drive it through the terminal, JSON, RPC, HTTP, or SSE, embed it through the Node.js API, or build a different
 agent experience on the same runtime.
 
 Instead of putting every possible workflow into core, ohm supplies the foundation for the agent you want. Skills and
-prompt templates add reusable guidance; trusted extensions can add tools, commands, providers, authentication methods,
+prompt templates add reusable guidance; trusted plugins can add tools, commands, providers, authentication methods,
 durable state, events, and structural UI. **ohm is not the finished agent. It is the harness you build yours with.**
 
-"Local-first" describes where the runtime, tools, configuration, credentials, and append-only session files live.
-Requests still go to the provider you select unless you use a local provider. `bash` and runtime extensions run with
+"Local-first" describes where the runtime, tools, configuration, credentials, and session databases live.
+Requests still go to the provider you select unless you use a local provider. `bash` and runtime plugins run with
 your operating-system user privileges. Built-in local shell execution drops accidentally inherited common
 credential-shaped environment entries and authenticated URLs while retaining ordinary build environment such as
-`PATH`. This is not an isolation boundary, and trusted extensions can deliberately add environment entries, so review
+`PATH`. This is not an isolation boundary, and trusted plugins can deliberately add environment entries, so review
 installed code.
 
 This repository implements the agent loop, canonical provider mappings, normalized events, and subscription
@@ -43,20 +43,20 @@ per-user launcher.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/devsohm/ohm/v0.1.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/devsohm/ohm/v0.2.0/install.ps1 | iex
 ```
 
 Neither command needs Node.js, npm, an npm account, or the npm registry. Linux and macOS need `curl`, `tar`, and a
 SHA-256 utility. Current Windows includes the required PowerShell and `tar.exe`.
 
 For a portable copy, download the standalone archive matching your platform from the
-[v0.1.1 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.1.1), verify it against `SHA256SUMS`, and
+[v0.2.0 GitHub release](https://github.com/devsohm/ohm/releases/tag/v0.2.0), verify it against `SHA256SUMS`, and
 extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/ohm`
 on Linux or macOS and `bin\ohm.cmd` on Windows.
 
@@ -172,7 +172,7 @@ The default coding tools are:
 
 All seven built-ins are active by default in interactive, print, JSON, RPC, serve, and direct SDK sessions. For
 interactive, print, JSON, and RPC invocations, use `--tools` as an allowlist, `--exclude-tools` to remove selected
-names, `--no-builtin-tools` to retain only extension tools, or `--no-tools` to disable every tool. Serve sessions use
+names, `--no-builtin-tools` to retain only plugin tools, or `--no-tools` to disable every tool. Serve sessions use
 the persisted tool policy; SDK callers use their session options. For example, this read-only invocation narrows the
 active set:
 
@@ -183,7 +183,7 @@ ohm --tools read,grep,find,ls -p "Review the source tree"
 Absolute paths work when a task spans outside the starting directory. Commands and tools run with the invoking user's
 normal operating-system access. The default CLI does not install a per-command approval dialog; SDK and embedding
 hosts can supply a host-owned one-shot tool authorization handler. Project trust applies only to executable
-project-local configuration and extensions. Model-invoked `bash` receives current non-secret `OHM_*` session
+project-local configuration and plugins. Model-invoked `bash` receives current non-secret `OHM_*` session
 identity after inherited credentials and stale session metadata are removed. User-entered `!` and `!!` commands do
 not receive that session identity.
 
@@ -241,7 +241,7 @@ Double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` to
 
 ## Sessions and continuity
 
-Sessions are saved automatically as strict append-only V4 JSONL journals and
+Sessions are saved automatically as append-only V4 journals in SQLite databases and
 scoped to the current workspace. They record conversation nodes, selected
 state, accepted runs, durable queues, checkpoints, tool-effect recovery,
 provider continuation state, usage, branches, and compaction summaries.
@@ -259,8 +259,10 @@ a branch point, create a linked branch, label entries, or snapshot the current
 head. Saved-session discovery and switching stay in `/resume`, so Atlas never
 mixes unrelated session rows into the journal tree. Commits append immutable
 nodes and move the selected head, so Atlas actions never rewrite history. On
-reopen, ohm ignores an unterminated tail and rejects invalid committed
-records.
+reopen, ohm validates committed records before reconstructing state. Existing
+JSONL journals remain readable; explicitly resuming one creates a validated
+SQLite copy without changing the original file. JSONL remains the readable
+import/export format, and `--no-session` remains entirely in memory.
 
 Interactive, print, JSON, and serve modes attempt safe recovery before they accept
 new work. An uncertain tool effect blocks the session instead of being repeated
@@ -286,7 +288,7 @@ and aims to keep 20% of the resulting trigger as recent history. The summary
 target is 5% of the context window, clamped from 1,024 through 8,192 tokens. If no safe token boundary exists, it
 falls back to two complete recent turns. Normal provider requests keep complete projected tool results. Only the
 temporary input used to create a compaction summary bounds old tool-result text. Older complete history can be
-replaced by a durable summary; stored JSONL remains unchanged.
+replaced by a durable summary; the original journal entries remain intact.
 
 An explicit output-token request is clamped to the selected model's reviewed or live ceiling. Completed normal and
 summary responses are checked against that effective ceiling: positive provider usage is authoritative, while zero
@@ -294,9 +296,9 @@ or missing usage uses conservative text, reasoning, and tool-argument estimation
 unknown rather than being guessed.
 
 An explicit context-window override cannot bypass an independent reviewed or live maximum input ceiling. Provider
-and extension model declarations carry that ceiling separately from the total context window and output maximum.
+and plugin model declarations carry that ceiling separately from the total context window and output maximum.
 
-Automatic compaction is on by default and can also be triggered with `/compact`. A final projection that grows after system or extension processing, or a provider-reported context overflow, can force one safe compaction retry even when an earlier local token estimate was low. Repeated overflow on the unchanged context fails; successful provider or tool progress permits a later independent recovery.
+Automatic compaction is on by default and can also be triggered with `/compact`. A final projection that grows after system or plugin processing, or a provider-reported context overflow, can force one safe compaction retry even when an earlier local token estimate was low. Repeated overflow on the unchanged context fails; successful provider or tool progress permits a later independent recovery.
 
 Provider caching is used where the protocol supports it:
 
@@ -316,7 +318,7 @@ Chat Completions, and Responses. OpenCode Go has a separate credential identity,
 Chat Completions, or Responses routes, and filters those routes through its authenticated model listing. xAI uses
 Responses. Ollama discovers local models without a key.
 
-Trusted extensions and SDK hosts can register other model providers through the generic provider and protocol APIs. Those
+Trusted plugins and SDK hosts can register other model providers through the generic provider and protocol APIs. Those
 registrations do not become default providers or add environment variables to the built-in credential map.
 
 Common environment variables are recognized automatically:
@@ -338,47 +340,52 @@ OHM_XAI_OAUTH_CLIENT_ID
 
 For authentication behavior, provider-specific configuration, custom OAuth registrations, and OpenAI-compatible endpoints, see [Providers](docs/providers.md). Kimi Code model and cache behavior is detailed in [Kimi Code](docs/kimi-code.md). The independent [`ohm/images` API](docs/image-generation.md) provides brokered one-shot image generation and a separate image-model catalog without placing image-only routes in the chat picker.
 
-## Extensions, skills, prompts, themes, and packages
+## Plugins
+
+A plugin is one installable unit containing any combination of skills, prompts,
+themes, and executable tools, commands, hooks, or UI contributions. Use
+`ohm/plugins` and its `PluginAPI` for code authoring; declarative plugins need no
+code. All contributions share the same loader, trust checks, and refresh lifecycle.
 
 Resources may be loaded from user scope, a trusted project's `.ohm` directory, an explicit CLI path, or an installed package.
 
 ```sh
-ohm install ./my-package
-ohm install npm:@scope/my-package
-ohm install git:https://example.com/owner/repository.git
-ohm install ssh://git@example.com/owner/private-repository.git#v1
-ohm --extension ./my-package/extensions/index.mjs -p "Try this extension without installing it"
-ohm list
+ohm plugins install ./my-package
+ohm plugins install npm:@scope/my-package
+ohm plugins install git:https://example.com/owner/repository.git
+ohm plugins install ssh://git@example.com/owner/private-repository.git#v1
+ohm plugins preview ./my-package
+ohm plugins list
 ohm config
-ohm update --all
-ohm remove SOURCE
+ohm plugins update --all
+ohm plugins remove SOURCE
 ```
 
-An extension package can contribute:
+A plugin can contribute:
 
 - runtime tools, slash commands, shortcuts, typed flags, providers, auth methods, tool renderers, and lifecycle listeners;
-- extension-owned protocol bridges and delegated-agent workflows built from ordinary tools and managed processes;
+- plugin-owned protocol bridges and delegated-agent workflows built from ordinary tools and managed processes;
 - bounded ordered text slots around the rich TUI editor;
 - generation-owned named routes for bounded rich-TUI screens and dashboards;
-- durable extension-owned session state and transcript entries with structural renderers;
+- durable plugin-owned session state and transcript entries with structural renderers;
 - progressively disclosed Agent Skills;
 - prompt templates with positional arguments and defaults;
 - terminal themes.
 
-Runtime extensions are trusted local code with the same Node.js and operating-system access as the harness.
+Runtime plugins are trusted local code with the same Node.js and operating-system access as the harness.
 Project-local executable resources are ignored until the workspace is trusted. Declarative user resources do not
 trigger repeated prompts.
 
-Trusted direct extensions integrate external protocols; there is no core catch-all configuration file or MCP
+Trusted direct plugins integrate external protocols; there is no core catch-all configuration file or MCP
 registry. The [`mcp-stdio` example](examples/mcp-stdio/README.md) owns framing, transport, discovery, allowlisting,
 credentials, catalog replacement, and process lifecycle while publishing selected definitions with ordinary
 `registerTool()` calls.
 
-Delegated-agent workflow and policy remain extension-owned. Core supplies generic
-[`jobs` and `childSessions`](docs/extension-api.md#durable-jobs-and-child-sessions) services for durable identity,
-bounded lifecycle control, and restart-aware reattachment, but it does not define subagent profiles, scheduling,
-event semantics, trees, or presentation. The [`subagent-specialists`](examples/subagent-specialists/README.md)
-example demonstrates an earlier managed-process workflow. Use an
+Delegated-agent workflows are plugin-owned; core does not spawn, manage, or reattach child agent sessions.
+Plugins can compose the public SDK, RPC client, and managed-process service. The optional
+[`subagent-specialists`](examples/subagent-specialists/README.md) example implements delegation through ordinary
+tools and managed processes. Generic [`jobs`](docs/plugin-api.md#durable-jobs) remain available for
+plugin-owned background work. Use an
 [`external execution backend`](docs/execution-backends.md) when a model tool must cross a reviewed isolation
 boundary.
 
@@ -391,12 +398,12 @@ Authoring tools report optional `engines.ohm` metadata, but the loader does not 
 the packed package against each supported host release. See the package guide for the `ohm` `package.json`
 convention and configurable npm or Git wrapper arguments.
 
-Start with [Extensions](docs/extensions.md), the [outcome-based examples catalog](examples/README.md), [package authoring](docs/packages.md), the [public discovery index](docs/package-gallery.md), and the [extension TUI contract](docs/tui.md). Declarative authoring has standalone guides for [prompt templates](docs/prompt-templates.md), [skills](docs/skills.md), and [themes](docs/themes.md).
+Start with [Plugins](docs/plugins.md), the [outcome-based examples catalog](examples/README.md), [package authoring](docs/packages.md), the [public discovery index](docs/package-gallery.md), and the [plugin TUI contract](docs/tui.md). Declarative authoring has standalone guides for [prompt templates](docs/prompt-templates.md), [skills](docs/skills.md), and [themes](docs/themes.md).
 
-For ohm configuration, extension authoring, source maintenance, general project development, diagnostics, and release work, enter
+For ohm configuration, plugin authoring, source maintenance, general project development, diagnostics, and release work, enter
 `/skill:ohm-dev <request>`. The single bundled development skill routes to version-matched installed docs and
 declarations or to the active project's checked-in workflow. It never invents build commands or deployment authority.
-Its extension workflow selects a focused example, defines a visible acceptance contract, and verifies the package
+Its plugin workflow selects a focused example, defines a visible acceptance contract, and verifies the package
 through its real install and `/refresh` path.
 
 ## Configuration
@@ -418,12 +425,12 @@ global baseline.
 
 The packaged baseline points editors to the versioned
 [`config-v1.json`](resources/schemas/config-v1.json) schema. `$schema` is metadata only. Editors can flag unknown
-core keys, while the runtime preserves unknown extension-owned fields for forward compatibility.
+core keys, while the runtime preserves unknown plugin-owned fields for forward compatibility.
 
 The schema documents persistent tool policy and the keybinding object; the keybinding guide lists the stable action
 names. Invalid JSON is reported without replacing the last valid in-memory values. Credential state remains in the
-selected platform backend or private auth file, sessions remain JSONL files, and provider or model declarations
-belong to the model registry or trusted extensions.
+selected platform backend or private auth file, saved sessions use SQLite, and provider or model declarations
+belong to the model registry or trusted plugins.
 
 Project settings are neither read nor writable before trust. The active ohm home always remains user scope, even
 when the current workspace would give its `.ohm` directory the same path. In that case, project-scoped config
@@ -468,12 +475,12 @@ contract and resource paths are in [Configuration](docs/configuration.md), with 
 `ohm --mode rpc` starts newline-delimited JSON RPC over standard input and output. `ohm serve` starts an
 authenticated loopback HTTP and SSE service over the same session runtime. One-shot prompts may invoke
 installed runtime commands, declarative commands, prompt templates, and skills with the same slash forms used in
-chat. The package also exports provider-neutral service, event, provider, tool, extension, storage, context, and TUI
+chat. The package also exports provider-neutral service, event, provider, tool, plugin, storage, context, and TUI
 contracts for embedding.
 
 For an in-process Node.js integration, `ohm/embedding` owns cancellation, refresh, and cleanup while keeping
 credential and provider-registry authority private. `ohm/sdk` composes one direct `AgentSession` from
-caller-selected providers, tools, extensions, resources, settings, and storage.
+caller-selected providers, tools, plugins, resources, settings, and storage.
 
 `ohm/modes` exposes adapters with separate ownership rules. Print mode disposes the runtime it receives.
 Interactive mode borrows a runtime and owns its terminal. RPC mode accepts and owns an existing
@@ -521,7 +528,7 @@ and call `recoverInterruptedRun()`; no embedding lifecycle method implicitly
 abandons an uncertain tool effect.
 
 Existing layers are available as explicit ESM subpaths under `ohm/<layer>`. The layer may be `auth`, `config`,
-`context`, `core`, `embedding`, `extensions`, `images`, `interfaces`, `modes`, `net`, `process`, `prompts`,
+`context`, `core`, `embedding`, `images`, `interfaces`, `modes`, `net`, `plugins`, `process`, `prompts`,
 `providers`, `sdk`, `service`, `serve`, `storage`, `testing`, `tools`, or `tui`. Each subpath resolves to built JavaScript and
 TypeScript declarations. Consumers can depend on one layer without importing the root barrel.
 
@@ -539,7 +546,7 @@ ohm --export session.jsonl conversation.html
 RPC is strict LF-delimited command JSON over standard input and output. Commands use a `type` and optional string
 `id`. Responses use `type: "response"`, preserve the ID, and include the command name. Agent events stream as raw
 records. Node.js clients can use the typed `RpcClient` export from `ohm/interfaces`. See
-[RPC protocol and typed client](docs/rpc.md) for commands, sessions, events, cancellation, and extension UI.
+[RPC protocol and typed client](docs/rpc.md) for commands, sessions, events, cancellation, and plugin UI.
 
 ```jsonl
 {"id":"req_1","type":"get_state"}
@@ -554,8 +561,8 @@ The local service creates or opens sessions, accepts prompts, cancels work,
 reads state, exposes explicit interrupted-run recovery, and streams the same
 public event envelopes through SSE. It binds to
 `127.0.0.1:4317` by default, and the CLI accepts loopback hosts only. It has no
-WebSocket, CORS, public multi-tenant
-policy, or SQLite backend. See [HTTP and SSE service](docs/serve.md).
+WebSocket, CORS, or public multi-tenant policy. Saved sessions use the same
+SQLite journal as the other modes. See [HTTP and SSE service](docs/serve.md).
 
 ## Development
 
@@ -565,7 +572,7 @@ npm run typecheck
 npm run typecheck:test --workspace ohm
 npm test
 npm run benchmark:offline --workspace ohm
-npm run benchmark:extensions --workspace ohm
+npm run benchmark:plugins --workspace ohm
 npm run benchmark:runtime --workspace ohm
 npm run test:coverage:risk
 npm run build
@@ -583,14 +590,14 @@ and crash recovery. It does not measure model intelligence. See
 [Outcome benchmarks](https://github.com/devsohm/ohm/blob/main/packages/ohm/benchmarks/README.md) for metric
 definitions and limits.
 
-`npm run benchmark:extensions --workspace ohm` is a second credential-free verifier. It runs extension candidates through managed install, public discovery, activation, refresh, and removal and reports pass@1/pass@3 with zero model calls.
+`npm run benchmark:plugins --workspace ohm` is a second credential-free verifier. It runs plugin candidates through managed install, public discovery, activation, refresh, and removal and reports pass@1/pass@3 with zero model calls.
 
 `npm run benchmark:runtime --workspace ohm` measures eleven deterministic scenarios against generous
 freeze-regression ceilings. These cover startup, large-package refresh, small and large session resume, bounded
 cold-history paging, and cursor-paged RPC replay.
 
 `npm run test:coverage:risk` aggregates subprocess-aware coverage. It enforces separate line, branch, and function
-floors for the extension runtime, CLI, TUI controller, agent session, JSONL session manager, and HTTP/SSE transport. The paid
+floors for the plugin runtime, CLI, TUI controller, agent session, session manager, and HTTP/SSE transport. The paid
 `npm run benchmark:compare --workspace ohm` command is opt-in. It gives two CLIs the same model, task files, and
 external verifier; it does not claim one harness is better without evidence. See
 [Outcome benchmarks](https://github.com/devsohm/ohm/blob/main/packages/ohm/benchmarks/README.md).

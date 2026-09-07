@@ -31,7 +31,7 @@ import { ToolCoordinator, ToolRegistry, WorkspaceBoundary } from "../../src/tool
 import type { HarnessTool, ToolContext } from "../../src/tools/types.js";
 import { parseCompactionFileActivity, renderCompactionFileActivity } from "../../src/context/file-activity.js";
 import { buildContextProjection, type ContextUsageBaseline } from "../../src/context/projection.js";
-import { extensionSessionManager } from "../../src/extensions/session-contract.js";
+import { pluginSessionManager } from "../../src/plugins/session-contract.js";
 import { OllamaAdapter } from "../../src/providers/ollama.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
 
@@ -954,7 +954,7 @@ test("terminal assistant content and response metadata survive runtime history a
   const durable = reopened.getEntries()[0];
   assert.equal(durable?.type, "message");
   assert.deepEqual(durable?.type === "message" ? durable.message : undefined, assistant);
-  const projected = extensionSessionManager(reopened).getEntries()[0];
+  const projected = pluginSessionManager(reopened).getEntries()[0];
   assert.equal(projected?.type, "message");
   assert.deepEqual(projected?.type === "message" && projected.message.role === "assistant"
     ? {
@@ -1740,7 +1740,7 @@ test("before-agent reduction precedes the public agent lifecycle", async () => {
     model: "model",
     tools: harness.tools,
     toolContext: harness.toolContext,
-    extensions: {
+    pluginReducers: {
       async beforeAgentStart() {
         order.push("before_agent_start");
         return { messages: [], systemPrompt: "instructions" };
@@ -1780,7 +1780,7 @@ test("agent rejects extension-expanded provider context before transport", async
     contextTokenBudget: 10_000,
     maxInputTokenLimit: 200,
     autoCompaction: false,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         return [
           ...messages,
@@ -1844,7 +1844,7 @@ test("agent compacts once when final extension context crosses the hard budget",
     contextTriggerTokens: 8_500,
     compactionRecentTokens: 100,
     summaryTokenBudget: 100,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         contextCalls += 1;
         return [
@@ -1968,7 +1968,7 @@ test("agent charges replacement context without crediting removed baseline messa
     toolContext: harness.toolContext,
     contextTokenBudget: 20_000,
     autoCompaction: false,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         const prompt = messages.at(-1)!;
         return [{ ...prompt, content: [{ type: "text", text: "x".repeat(50_000) }] }];
@@ -2007,7 +2007,7 @@ test("agent charges duplicate context messages beyond their single observed occu
     toolContext: harness.toolContext,
     contextTokenBudget: 20_000,
     autoCompaction: false,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         return Array.from({ length: 10 }, () => messages.at(-1)!);
       },
@@ -2045,7 +2045,7 @@ test("agent does not loop when final extension context still exceeds the budget 
     contextTriggerTokens: 8_500,
     compactionRecentTokens: 100,
     summaryTokenBudget: 100,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         contextCalls += 1;
         return [
@@ -2117,7 +2117,7 @@ test("agent reports a nonfatal final-projection compaction failure without conti
     compactionRecentTokens: 100,
     summaryTokenBudget: 100,
     nonFatalAutomaticCompaction: true,
-    extensions: {
+    pluginReducers: {
       async context(messages) {
         return [
           ...messages,
@@ -2606,7 +2606,7 @@ test("agent awaits a delayed message_end before persisting and dispatching tool 
     model: "model",
     tools: harness.tools,
     toolContext: harness.toolContext,
-    extensions: {
+    pluginReducers: {
       async messageEnd(message) {
         if (message.role === "assistant" && message.content.some((block) => block.type === "tool_call")) {
           markAssistantEntered();
@@ -3378,7 +3378,7 @@ test("active tool changes made by a tool apply atomically to the next provider t
     model: "model",
     tools: coordinator,
     toolContext: harness.toolContext,
-    extensions: {
+    pluginReducers: {
       async beforeAgentStart() {
         return { messages: [], systemPrompt: "persistent extension prompt" };
       },

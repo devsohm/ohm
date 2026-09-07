@@ -203,7 +203,7 @@ test("RPC client sends typed one-way extension UI responses", async () => {
         resolve(record);
       });
     });
-    await client.respondToExtensionUi({
+    await client.respondToPluginUi({
       type: "extension_ui_response",
       id: "ui-select",
       value: "selected",
@@ -265,6 +265,76 @@ test("RPC client cycles the active scoped model", async () => {
     assert.equal(result?.thinkingLevel, "high");
     assert.equal(result?.isScoped, true);
   } finally {
+    await client.stop();
+  }
+});
+
+test("RPC model cycle options cannot replace the command type", async () => {
+  const client = new RpcClient({ cliPath, env: { OHM_RPC_FIXTURE_MODE: "command-echo" } });
+  await client.start();
+  const commands: JsonObject[] = [];
+  const off = client.onEvent((event) => {
+    const record = eventRecord(event);
+    if (record["type"] !== "fixture_command_received") return;
+    const command = record["command"];
+    if (!isJsonObject(command)) assert.fail("Fixture event omitted its command record");
+    commands.push(command);
+  });
+  try {
+    const modelOptions = {
+      type: "clear_queue",
+      direction: "backward" as const,
+      models: [{ selector: "fixture/fixture-model" }],
+      persist: false,
+    };
+    await client.cycleModel(modelOptions);
+    const thinkingOptions = { type: "clear_queue", persist: false };
+    await client.cycleThinkingLevel(thinkingOptions);
+    assert.deepEqual(commands.map(({ id: _id, ...command }) => command), [
+      { type: "cycle_model", direction: "backward", models: [{ selector: "fixture/fixture-model" }], persist: false },
+      { type: "cycle_thinking_level", persist: false },
+    ]);
+  } finally {
+    off();
+    await client.stop();
+  }
+});
+
+test("RPC presentation and history request fields cannot replace the command type", async () => {
+  const client = new RpcClient({ cliPath, env: { OHM_RPC_FIXTURE_MODE: "command-echo" } });
+  await client.start();
+  const commands: JsonObject[] = [];
+  const off = client.onEvent((event) => {
+    const record = eventRecord(event);
+    if (record["type"] !== "fixture_command_received") return;
+    const command = record["command"];
+    if (!isJsonObject(command)) assert.fail("Fixture event omitted its command record");
+    commands.push(command);
+  });
+  try {
+    const request = {
+      type: "clear_queue",
+      protocolVersion: 1 as const,
+      owner: "example",
+      presentationId: "review",
+      revision: 2,
+      actionId: "run",
+      input: { target: "workspace" },
+    };
+    await client.invokePortablePresentationAction(request);
+    const entriesOptions = { type: "clear_queue", afterSequence: 0, limit: 1 };
+    await client.getEntriesPage(entriesOptions);
+    const pageOptions = { type: "clear_queue", cursor: "page-2", limit: 1 };
+    await client.getTreePage(pageOptions);
+    await client.getMessagesPage(pageOptions);
+    assert.deepEqual(commands.map(({ id: _id, ...command }) => command), [
+      { ...request, type: "presentation_action" },
+      { ...entriesOptions, type: "get_entries" },
+      { ...pageOptions, type: "get_tree" },
+      { ...pageOptions, type: "get_messages" },
+    ]);
+  } finally {
+    off();
     await client.stop();
   }
 });

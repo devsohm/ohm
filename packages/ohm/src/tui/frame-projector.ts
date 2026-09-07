@@ -4,6 +4,7 @@ import type { Frame, TuiControllerOptions, TuiViewState } from "./types.js";
 import type { RuntimeUiBlock } from "./components.js";
 import type { OhmTranscriptSearchMatch } from "./native-renderer/transcript-search.js";
 import type { OhmNativeToolDetailCache } from "./native-renderer/view.js";
+import type { OverlayBounds } from "@ohm/terminal";
 
 export const INTERNAL_TUI_TOOL_DETAIL_CACHE: unique symbol = Symbol("ohm.tui.tool-detail-cache");
 
@@ -60,11 +61,13 @@ export interface TuiTranscriptSearchProjection {
 }
 
 export const INTERNAL_TUI_TRANSCRIPT_SEARCH: unique symbol = Symbol("ohm.tui.transcript-search");
+export const INTERNAL_TUI_OVERLAY_BOUNDS: unique symbol = Symbol("ohm.tui.overlay-bounds");
 
 export type TuiProjectedFrame = Frame & {
   readonly cursor: NonNullable<Frame["cursor"]>;
   readonly [INTERNAL_TUI_PERSISTENT_POINTER_MAP]?: TuiPersistentPointerMap;
   readonly [INTERNAL_TUI_TRANSCRIPT_SEARCH]?: TuiTranscriptSearchProjection;
+  readonly [INTERNAL_TUI_OVERLAY_BOUNDS]?: ReadonlyMap<object, OverlayBounds>;
 };
 
 export const INTERNAL_TUI_FRAME_PROJECTOR_CLEAR: unique symbol = Symbol("ohm.tui.frame-projector-clear");

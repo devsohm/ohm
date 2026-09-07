@@ -14,8 +14,11 @@ export class VStack extends Stack implements ViewportComponent, ViewportPointerR
   override render(width: number): string[] {
     const entries = this.entriesFor({ width, height: Number.MAX_SAFE_INTEGER });
     const output: string[] = [];
+    this.#regions = [];
     entries.forEach(({ component }, index) => {
-      output.push(...component.render(width));
+      const rendered = component.render(width);
+      this.#regions.push({ component, row: output.length, column: 0, width, height: rendered.length });
+      output.push(...rendered);
       if (index + 1 < entries.length) output.push(...Array.from({ length: this.gap }, () => ""));
     });
     return output;

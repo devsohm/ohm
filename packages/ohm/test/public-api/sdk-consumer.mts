@@ -39,7 +39,7 @@ import type {
   ToolDefinition as RootToolDefinition,
 } from "ohm";
 import type { ProviderToolDefinition as CoreToolDefinition } from "ohm/core";
-import type { ToolDefinition as ExtensionToolDefinition } from "ohm/extensions";
+import type { ToolDefinition as ExtensionToolDefinition } from "ohm/plugins";
 import type { ToolDefinition as ToolsToolDefinition } from "ohm/tools";
 
 const harnessTool: HarnessTool = {
@@ -91,7 +91,15 @@ const toolAuthorizationHandler: ToolAuthorizationHandler = async (request, conte
 const sessionManager = SessionManager.inMemory(process.cwd());
 const branchQuery: SessionBranchQuery = { type: "message", limit: 1 };
 const branchEntry = sessionManager.findEntryOnBranch(branchQuery);
-const settingsManager = SettingsManager.inMemory();
+const settingsManager = SettingsManager.inMemory({
+  plugins: [{ source: "./review", entrypoints: ["index.ts"], skills: ["skills"] }],
+});
+const configuredPlugins: ReturnType<SettingsManager["getPackages"]> = settingsManager.getSettings().plugins ?? [];
+const configuredPlugin: Exclude<(typeof configuredPlugins)[number], string> = {
+  source: "./review", entrypoints: ["index.ts"], skills: ["skills"],
+};
+const configuredEntrypoints: string[] | undefined = configuredPlugin.entrypoints;
+void configuredEntrypoints;
 
 const options = {
   cwd: process.cwd(),
@@ -164,5 +172,5 @@ void [
   loadSkill,
   withFileMutationQueue,
   DefaultResourceLoader,
-  created.extensionsResult.runtime,
+  created.pluginsResult.runtime,
 ];

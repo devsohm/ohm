@@ -5,7 +5,7 @@ import {
   createInteractiveDirectUiFacade,
   createOwnedInteractiveDirectUiContext,
 } from "../../src/tui/direct-ui.js";
-import type { ExtensionUIRouteHost } from "../../src/extensions/capabilities/ui-routes.js";
+import type { PluginUIRouteHost } from "../../src/plugins/capabilities/ui-routes.js";
 import { TuiController } from "../../src/tui/controller.js";
 import {
   INTERNAL_TUI_FRAME_PROJECTOR,
@@ -49,7 +49,7 @@ test("rich direct UI routes are named, data-safe, and stable across callback fac
   );
   const firstCallback = new AbortController();
   const firstUi = createInteractiveDirectUiFacade(base, firstCallback.signal);
-  let observedHost: ExtensionUIRouteHost | undefined;
+  let observedHost: PluginUIRouteHost | undefined;
   let disposed = 0;
 
   const stale = firstUi.routes.register("inspector", {

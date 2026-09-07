@@ -185,10 +185,12 @@ test("package manifests and ignore files enforce exact byte bounds before discov
   value.settings.setPackages(roots);
   await value.settings.flush();
 
+  await assert.rejects(value.packages.resolve(), /Plugin manifest exceeds 1048576 bytes/u);
+  value.settings.setPackages(roots.filter((root) => root !== roots[1]));
   const result = await value.packages.resolve();
   assert.deepEqual(
     result.extensions.filter((entry) => roots.includes(entry.metadata.baseDir ?? "")).map((entry) => entry.metadata.baseDir),
-    [roots[1], roots[3]],
+    [roots[3]],
   );
 });
 
@@ -457,7 +459,7 @@ test("progress observers cannot change package operation outcomes", async () => 
   });
 
   await value.packages.installAndPersist(extension);
-  assert.equal(value.settings.getGlobalSettings().packages?.length, 1);
+  assert.equal(value.settings.getGlobalSettings().plugins?.length, 1);
   await assert.rejects(
     value.packages.install(join(value.root, "missing.ts")),
     /Path does not exist/u,
@@ -476,7 +478,7 @@ test("invocation package sources resolve temporarily without persisting settings
   const packageRoot = join(value.root, "temporary-package");
   await mkdir(join(packageRoot, "extensions"), { recursive: true });
   await writeFile(join(packageRoot, "extensions", "entry.ts"), "export default () => {};");
-  const resolved = await value.packages.resolveExtensionSources([packageRoot], { temporary: true });
+  const resolved = await value.packages.resolvePluginSources([packageRoot], { temporary: true });
   assert.deepEqual(resolved.extensions.map((entry) => ({
     path: entry.path,
     scope: entry.metadata.scope,
@@ -486,7 +488,7 @@ test("invocation package sources resolve temporarily without persisting settings
     scope: "temporary",
     origin: "package",
   }]);
-  assert.deepEqual(value.settings.getSettings().packages, undefined);
+  assert.deepEqual(value.settings.getSettings().plugins, undefined);
 });
 
 test("prompt and theme convention discovery is top-level only", async () => {
@@ -542,8 +544,8 @@ test("stored local package paths are explicitly relative to their settings direc
   assert.equal(value.packages.addSourceToSettings(projectPackage, { local: true }), true);
   await value.settings.flush();
 
-  assert.deepEqual(value.settings.getGlobalSettings().packages, ["./packages/local-user"]);
-  assert.deepEqual(value.settings.getProjectSettings().packages, ["./packages/local-project"]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, ["./packages/local-user"]);
+  assert.deepEqual(value.settings.getProjectSettings().plugins, ["./packages/local-project"]);
 });
 
 test("stored local package paths remain absolute across Windows volumes", () => {
@@ -562,7 +564,7 @@ test("local installs resolve invocation paths from the launch directory before p
   await value.packages.installAndPersist("./local-package");
   await value.settings.flush();
 
-  assert.deepEqual(value.settings.getGlobalSettings().packages, ["../workspace/local-package"]);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, ["../workspace/local-package"]);
   assert.equal(value.packages.getInstalledPath("../workspace/local-package", "user"), packageRoot);
 });
 
@@ -617,24 +619,24 @@ test("equivalent Git transports replace refs without discarding resource filters
   }]);
 
   assert.equal(value.packages.addSourceToSettings("git:git@github.com:example/tools@v2"), true);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [{
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [{
     source: "git:git@github.com:example/tools@v2",
-    extensions: ["+extensions/one.ts"],
+    entrypoints: ["+extensions/one.ts"],
   }]);
   assert.equal(value.packages.addSourceToSettings("git:ssh://git@github.com/example/tools@v2"), true);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [{
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [{
     source: "git:ssh://git@github.com/example/tools@v2",
-    extensions: ["+extensions/one.ts"],
+    entrypoints: ["+extensions/one.ts"],
   }]);
   assert.equal(value.packages.addSourceToSettings("git:ssh://git@github.com/example/tools@v2"), false);
   assert.equal(value.packages.removeSourceFromSettings("git:https://github.com/example/tools"), true);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, []);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, []);
 });
 
 test("package source identities reject npm options and retain distinct file and SSH authorities", async () => {
   const value = await fixture();
   assert.throws(() => value.packages.addSourceToSettings("npm:--global"), /Invalid npm package source/u);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, undefined);
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, undefined);
 
   const firstArchive = pathToFileURL(join(value.root, "@scope", "a.tgz")).href;
   const secondArchive = pathToFileURL(join(value.root, "@scope", "b.tgz")).href;
@@ -642,7 +644,7 @@ test("package source identities reject npm options and retain distinct file and 
   assert.equal(value.packages.addSourceToSettings(`npm:${secondArchive}`), true);
   assert.equal(value.packages.addSourceToSettings("git:ssh://alice@example.com:22/owner/repo.git"), true);
   assert.equal(value.packages.addSourceToSettings("git:ssh://bob@example.com:2222/owner/repo.git"), true);
-  assert.deepEqual(value.settings.getGlobalSettings().packages, [
+  assert.deepEqual(value.settings.getGlobalSettings().plugins, [
     `npm:${firstArchive}`,
     `npm:${secondArchive}`,
     "git:ssh://alice@example.com:22/owner/repo.git",
@@ -683,13 +685,13 @@ test("temporary Git refresh activation failure keeps the prior complete checkout
     },
   });
   const source = "git:https://example.test/owner/first.git";
-  const initial = await packages.resolveExtensionSources([source], { temporary: true });
+  const initial = await packages.resolvePluginSources([source], { temporary: true });
   const path = initial.extensions[0]?.path;
   assert.ok(path);
   assert.match(await readFile(path, "utf8"), /"1"/u);
 
   await writeFile(fake.state, "2");
-  const refreshed = await packages.resolveExtensionSources([source], { temporary: true });
+  const refreshed = await packages.resolvePluginSources([source], { temporary: true });
   assert.equal(refreshed.extensions[0]?.path, path);
   assert.match(await readFile(path, "utf8"), /"1"/u);
 });
@@ -909,10 +911,10 @@ test("plain configured extension, prompt, and theme paths resolve from their set
     await writeFile(join(value.cwd, "project-resources", resource.type, resource.filename), "");
     await writeFile(join(value.agentDir, resource.type, resource.filename), "");
   }
-  value.settings.setExtensionPaths(["../user-resources/extensions", "!extensions/*"]);
+  value.settings.setLegacyPluginEntrypoints(["../user-resources/extensions", "!extensions/*"]);
   value.settings.setPromptPaths(["../user-resources/prompts", "!prompts/*"]);
   value.settings.setThemePaths(["../user-resources/themes", "!themes/*"]);
-  value.settings.setProjectExtensionPaths(["../project-resources/extensions"]);
+  value.settings.setProjectLegacyPluginEntrypoints(["../project-resources/extensions"]);
   value.settings.setProjectPromptPaths(["../project-resources/prompts"]);
   value.settings.setProjectThemePaths(["../project-resources/themes"]);
   await value.settings.flush();
@@ -1029,7 +1031,7 @@ test("temporary npm installs use private deterministic storage while explicit in
   value.settings.setNpmCommand([process.execPath, executable, "--", "npm"]);
   await value.settings.flush();
 
-  const temporary = await value.packages.resolveExtensionSources(["npm:temporary-package"], { temporary: true });
+  const temporary = await value.packages.resolvePluginSources(["npm:temporary-package"], { temporary: true });
   assert.match(
     (temporary.extensions[0]?.path ?? "").replaceAll("\\", "/"),
     /\/tmp\/extensions\/npm\/[0-9a-f]{8}\/node_modules\/temporary-package\/extensions\/index\.mjs$/u,
@@ -1088,11 +1090,11 @@ test("temporary Git refreshes emit pull progress while retaining the cached chec
     gitCommand: [process.execPath, fakeGitScript],
   });
   const source = "git:https://example.test/owner/temporary-git.git";
-  await packages.resolveExtensionSources([source], { temporary: true });
+  await packages.resolvePluginSources([source], { temporary: true });
   const events: string[] = [];
   packages.setProgressCallback((event) => events.push(`${event.type}:${event.action}:${event.source}`));
 
-  const resolved = await packages.resolveExtensionSources([source], { temporary: true });
+  const resolved = await packages.resolvePluginSources([source], { temporary: true });
 
   assert.equal(resolved.extensions.length, 1);
   assert.deepEqual(events, [

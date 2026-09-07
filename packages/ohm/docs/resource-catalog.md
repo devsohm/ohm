@@ -4,22 +4,22 @@
 
 - tools and ownership lookup;
 - skills, providers, and runtime commands;
-- extension catalog and package records;
+- plugin catalog and package records;
 - diagnostics.
 
 The helper returns one deterministic, callback-free `HarnessResourceCatalog`. `parseHarnessResourceCatalog()` validates and detaches a catalog received across an application boundary.
 
 The full catalog is not a method on `HarnessRuntime`, `EmbeddingHarness`, or the RPC protocol. Applications that own the required source objects build it explicitly.
 
-Direct extensions use:
+Plugins use:
 
-- `ohm.getCommands()` for the ordered invokable extension-command, prompt-template, and skill-command list;
+- `ohm.getCommands()` for the ordered invokable plugin-command, prompt-template, and skill-command list;
 - `ohm.getDiscoveryView()` for a richer bounded metadata snapshot;
 - `resources_discover` to contribute package-relative skills, prompts, and custom themes.
 
 The focused [`dynamic-package`](../examples/dynamic-package/README.md) demonstrates the contribution path.
 
-Interactive `/resources` is a compact status report for the active extension bundle. It is not a serialized `HarnessResourceCatalog` and should not be parsed as one.
+Interactive `/resources` is a compact status report for the active plugin bundle. It is not a serialized `HarnessResourceCatalog` and should not be parsed as one.
 
 ## Full catalog contract
 
@@ -30,9 +30,9 @@ The full projection can include:
 - prompt and skill metadata;
 - custom themes and provider/model summaries;
 - managed packages;
-- extension status, trust, contribution counts, and diagnostics.
+- plugin status, trust, contribution counts, and diagnostics.
 
-Package and extension entries preserve `user`, `project`, and invocation-only scope. Temporary `--extension` resources never look persistent. Declarative project packages can also expose their credential-free source declaration, deterministic disabled-resource filters, and immutable resolved version, revision, archive, content, and package digests.
+Plugin entries preserve `user`, `project`, and invocation-only scope. Temporary `--plugin` resources never look persistent. Declarative project packages can also expose their credential-free source declaration, deterministic disabled-resource filters, and immutable resolved version, revision, archive, content, and package digests.
 
 Arrays are sorted, entry counts and bytes are bounded, and omitted counts are explicit. Consumers must check `schemaVersion` and `bounds.truncated`. A truncated catalog is valid: `bounds.omitted` reports the number of entries omitted from each section.
 
@@ -44,6 +44,6 @@ contains:
 - model-private metadata;
 - absolute local source paths or private package staging paths.
 
-Blocked or untrusted extensions remain visible with their diagnostics. Their contributed tools, commands, prompts, and custom themes are not projected.
+Blocked or untrusted plugins remain visible with their diagnostics. Their contributed tools, commands, prompts, and custom themes are not projected.
 
 Validate untrusted or persisted data with `parseHarnessResourceCatalog()` before use. The parser rejects unknown fields, invalid bounds, inconsistent omitted counts, and callback-bearing or otherwise non-data values.

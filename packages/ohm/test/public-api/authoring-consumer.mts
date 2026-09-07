@@ -5,19 +5,19 @@ import {
   type CommandCompletion,
   type CommandOptions,
   type CustomMessageDeliveryOptions,
-  type ExtensionAPI,
-  type ExtensionEventMap,
-  type ExtensionEventResultMap,
-  type ExtensionFactory,
-  type ExtensionMessage,
-  type ExtensionModelRegistry,
-  type ExtensionOAuthConfig,
-  type ExtensionProviderConfig,
-  type ExtensionProviderModelConfig,
-  type ExtensionRegistrationHandle,
-  type ExtensionSessionProvenance,
-  type ExtensionThinkingLevel,
-  type ExtensionUICapabilities,
+  type PluginAPI,
+  type PluginEventMap,
+  type PluginEventResultMap,
+  type PluginFactory,
+  type PluginMessage,
+  type PluginModelRegistry,
+  type PluginOAuthConfig,
+  type PluginProviderConfig,
+  type PluginProviderModelConfig,
+  type PluginRegistrationHandle,
+  type PluginSessionProvenance,
+  type PluginThinkingLevel,
+  type PluginUICapabilities,
   type FlagOptions,
   type FooterFactory,
   type ForkOptions,
@@ -36,14 +36,14 @@ import {
   type ToolRecoveryContract,
   type UserMessageDeliveryOptions,
   type WidgetPlacement,
-} from "ohm/extensions";
+} from "ohm/plugins";
 import { Type } from "typebox";
 import {
   defineProviderAdapter,
   type ProviderAdapterDefinition,
 } from "ohm/providers";
 
-export const extension: ExtensionFactory = (ohm: ExtensionAPI) => {
+export const extension: PluginFactory = (ohm: PluginAPI) => {
   const switchGuard = { cancel: true, reason: "consumer switch policy" } satisfies SessionBeforeSwitchResult;
   const forkGuard = { cancel: true, reason: "consumer fork policy" } satisfies SessionBeforeForkResult;
   ohm.on("session_before_switch", () => switchGuard);
@@ -106,21 +106,21 @@ export interface ExtensionAuthoringConvenienceTypes {
   commandCompletion: CommandCompletion;
   commandOptions: CommandOptions;
   customMessageDelivery: CustomMessageDeliveryOptions;
-  event: ExtensionEventMap[keyof ExtensionEventMap];
-  eventResult: ExtensionEventResultMap[keyof ExtensionEventResultMap];
-  extensionMessage: ExtensionMessage;
-  uiCapabilities: ExtensionUICapabilities;
+  event: PluginEventMap[keyof PluginEventMap];
+  eventResult: PluginEventResultMap[keyof PluginEventResultMap];
+  extensionMessage: PluginMessage;
+  uiCapabilities: PluginUICapabilities;
   flagOptions: FlagOptions;
   footerFactory: FooterFactory;
   forkOptions: ForkOptions;
   keybindingsManager: KeybindingsManager;
-  modelRegistry: ExtensionModelRegistry;
+  modelRegistry: PluginModelRegistry;
   navigateTreeOptions: NavigateTreeOptions;
-  oauth: ExtensionOAuthConfig;
-  provider: ExtensionProviderConfig;
-  providerModel: ExtensionProviderModelConfig;
-  registration: ExtensionRegistrationHandle;
-  sessionProvenance: ExtensionSessionProvenance;
+  oauth: PluginOAuthConfig;
+  provider: PluginProviderConfig;
+  providerModel: PluginProviderModelConfig;
+  registration: PluginRegistrationHandle;
+  sessionProvenance: PluginSessionProvenance;
   replacementOptions: ReplacementOptions;
   shortcutOptions: ShortcutOptions;
   slashCommand: SlashCommandInfo;
@@ -128,7 +128,7 @@ export interface ExtensionAuthoringConvenienceTypes {
   sourceInfo: SourceInfo;
   switchSessionOptions: SwitchSessionOptions;
   systemPromptOptions: BuildSystemPromptOptions;
-  thinkingLevel: ExtensionThinkingLevel;
+  thinkingLevel: PluginThinkingLevel;
   toolContext: ToolContext;
   recovery: ToolRecoveryContract;
   userMessageDelivery: UserMessageDeliveryOptions;

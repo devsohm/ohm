@@ -19,7 +19,7 @@ export type ResolvedSessionReference =
   | { type: "not_found"; reference: string };
 
 function looksLikePath(reference: string): boolean {
-  return reference.includes("/") || reference.includes("\\") || reference.endsWith(".jsonl");
+  return reference.includes("/") || reference.includes("\\") || reference.endsWith(".jsonl") || reference.endsWith(".sqlite");
 }
 
 function exact(session: SessionInfo, reference: string): boolean {

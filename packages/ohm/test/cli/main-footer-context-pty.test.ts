@@ -85,10 +85,10 @@ await main([
   "--name", "primary footer",
   "--approve",
   "--offline",
-  "--no-extensions",
+  "--no-plugin-code",
   "--no-session",
 ], {
-  extensionFactories: [{
+  pluginFactories: [{
     name: "footer-context-fixture",
     factory(ohm) {
       ohm.registerProvider("footer-fixture", {

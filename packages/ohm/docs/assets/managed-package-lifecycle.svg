@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" role="img" aria-labelledby="title desc">
-  <title id="title">ohm managed extension package lifecycle</title>
+  <title id="title">ohm managed plugin package lifecycle</title>
   <desc id="desc">A trusted workspace declares package sources. Only an explicit update follows moving selectors or local edits. Update resolves immutable identities, materializes packages in isolated bounded staging, validates resources and production dependencies, activation-tests the complete candidate set, then atomically swaps the installed set and lock. Failure preserves the previous set. Normal startup and reconcile consume only the immutable lock and verify installed bytes and provenance.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">

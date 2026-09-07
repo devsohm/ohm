@@ -415,7 +415,7 @@ async function main() {
     assert.match(standaloneHelp.stdout, /^ohm\b/mu);
     assert.equal(standaloneHelp.stderr, "");
     const standaloneRpc = await runBoundedCommand(standaloneRuntime, [standaloneCli,
-      "--mode", "rpc", "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {
+      "--mode", "rpc", "--no-session", "--offline", "--no-plugin-code", "--no-skills", "--no-prompt-templates", "--no-themes"], {
       cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted offline RPC startup check",
     });
     assert.equal(standaloneRpc.stdout, "");
@@ -528,7 +528,7 @@ async function main() {
       assert.equal(target.startsWith(`${packageRoot}/`) || target.startsWith(`${packageRoot}\\`), true, `${subpath} escapes the package root`);
       if (subpath === "./rpc-entry") {
         const rpcEntry = await runBoundedCommand(process.execPath, [target,
-          "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {
+          "--no-session", "--offline", "--no-plugin-code", "--no-skills", "--no-prompt-templates", "--no-themes"], {
           cwd: paths.install,
           env: environment,
           timeoutMs: 30_000,

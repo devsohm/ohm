@@ -1,42 +1,27 @@
 import { optionalProperties } from "../core/optional-properties.js";
-import { randomUUID } from "node:crypto";
-import {
-  constants,
-  createWriteStream,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  statSync,
-  unlinkSync,
-} from "node:fs";
-import { link, open } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { Value } from "typebox/value";
 
-import { errorCode } from "../core/errors.js";
 import type { ContentBlock } from "../core/types.js";
 import { FUNCTION_VALUE, isObjectValue, STRING_VALUE } from "../core/value-schemas.js";
 import type {
   ProjectTrustContext,
-  LoadExtensionsResult,
+  LoadPluginsResult,
   SessionBeforeForkEvent,
   SessionBeforeSwitchEvent,
   SessionShutdownEvent,
   SessionStartEvent,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 import type { AgentSession, AgentSessionReplacedContext } from "./agent-session.js";
-import { closeAgentSessionForReplacement } from "./agent-session-owner.js";
-import { MAX_SESSION_FILE_BYTES, SessionManager } from "../storage/session-manager.js";
-
-const SESSION_IMPORT_NONBLOCK = constants.O_NONBLOCK ?? 0;
+import { SessionManager } from "../storage/session-manager.js";
 
 export type {
   SessionBeforeForkEvent,
   SessionBeforeSwitchEvent,
   SessionShutdownEvent,
   SessionStartEvent,
-} from "../extensions/direct.js";
+} from "../plugins/direct.js";
 
 export interface AgentSessionRuntimeDiagnostic {
   type: "info" | "warning" | "error";
@@ -64,7 +49,7 @@ export interface AgentSessionRuntimeLifecycle {
 export interface CreateAgentSessionRuntimeResult<S extends AgentSessionRuntimeServices = AgentSessionRuntimeServices> {
   session: AgentSession;
   services: S;
-  extensionsResult?: LoadExtensionsResult;
+  pluginsResult?: LoadPluginsResult;
   diagnostics?: AgentSessionRuntimeDiagnostic[];
   modelFallbackMessage?: string;
 }
@@ -124,86 +109,10 @@ function assertWorkspace(path: string, missingError?: () => Error): void {
   }
 }
 
-function importDestination(directory: string, source: string, attempt: number): string {
-  const filename = basename(source);
-  if (attempt === 0) return join(directory, filename);
-  const extension = extname(filename);
-  const stem = extension === "" ? filename : filename.slice(0, -extension.length);
-  return join(directory, `${stem}-${attempt}${extension}`);
-}
-
-function availableImportDestination(directory: string, source: string): string {
-  for (let attempt = 0; ; attempt += 1) {
-    const candidate = importDestination(directory, source, attempt);
-    if (!existsSync(candidate)) return candidate;
-  }
-}
-
-async function commitStagedImport(
-  stagingPath: string,
-  directory: string,
-  source: string,
-  signal: AbortSignal,
-): Promise<string> {
-  for (let attempt = 0; ; attempt += 1) {
-    signal.throwIfAborted();
-    const candidate = importDestination(directory, source, attempt);
-    try {
-      await link(stagingPath, candidate);
-      return candidate;
-    } catch (error) {
-      if (errorCode(error) === "EEXIST") continue;
-      throw error;
-    }
-  }
-}
-
-function removeImportFile(path: string | undefined): void {
-  if (path === undefined) return;
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-}
-
-function removeCommittedImport(stagingPath: string, destination: string | undefined): void {
-  if (destination === undefined) return;
-  try {
-    const staging = lstatSync(stagingPath);
-    const committed = lstatSync(destination);
-    if (staging.dev === committed.dev && staging.ino === committed.ino) unlinkSync(destination);
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-}
-
-interface CreatedSessionFile {
-  path: string;
-  device: number;
-  inode: number;
-}
-
-function recordCreatedSessionFile(path: string | undefined): CreatedSessionFile | undefined {
-  if (path === undefined) return undefined;
-  const details = lstatSync(path);
-  return { path, device: details.dev, inode: details.ino };
-}
-
-function removeCreatedSessionFile(file: CreatedSessionFile | undefined): void {
-  if (file === undefined) return;
-  try {
-    const details = lstatSync(file.path);
-    if (details.dev !== file.device || details.ino !== file.inode) return;
-    unlinkSync(file.path);
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-}
 
 function rollbackCreatedSession(
   manager: SessionManager,
-  file: CreatedSessionFile | undefined,
+  cleanup: (() => void) | undefined,
   cause: unknown,
 ): never {
   const failures = [cause];
@@ -213,7 +122,7 @@ function rollbackCreatedSession(
     failures.push(error);
   }
   try {
-    removeCreatedSessionFile(file);
+    cleanup?.();
   } catch (error) {
     failures.push(error);
   }
@@ -281,7 +190,7 @@ function isRuntimeCreationResult<S extends AgentSessionRuntimeServices>(
 export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSessionRuntimeServices> {
   #session: AgentSession;
   #services: S;
-  #extensionsResult: LoadExtensionsResult | undefined;
+  #pluginsResult: LoadPluginsResult | undefined;
   #diagnostics: AgentSessionRuntimeDiagnostic[];
   #modelFallbackMessage: string | undefined;
   readonly #factory: CreateAgentSessionRuntimeFactory<S>;
@@ -302,7 +211,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     factory: CreateAgentSessionRuntimeFactory<S>,
     diagnostics?: AgentSessionRuntimeDiagnostic[],
     modelFallbackMessage?: string,
-    extensionsResult?: LoadExtensionsResult,
+    pluginsResult?: LoadPluginsResult,
   );
   constructor(
     initial: CreateAgentSessionRuntimeResult<S>,
@@ -315,7 +224,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     factoryOrLifecycle: CreateAgentSessionRuntimeFactory<S> | AgentSessionRuntimeLifecycle = {},
     diagnostics: AgentSessionRuntimeDiagnostic[] = [],
     modelFallbackMessage?: string,
-    extensionsResult?: LoadExtensionsResult,
+    pluginsResult?: LoadPluginsResult,
   ) {
     if (isRuntimeFactory(servicesOrFactory)) {
       if (!isRuntimeCreationResult(initialOrSession) || isRuntimeFactory(factoryOrLifecycle)) {
@@ -323,7 +232,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       }
       this.#session = initialOrSession.session;
       this.#services = initialOrSession.services;
-      this.#extensionsResult = initialOrSession.extensionsResult;
+      this.#pluginsResult = initialOrSession.pluginsResult;
       this.#diagnostics = [...(initialOrSession.diagnostics ?? [])];
       this.#modelFallbackMessage = initialOrSession.modelFallbackMessage;
       this.#factory = servicesOrFactory;
@@ -335,7 +244,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     }
     this.#session = initialOrSession;
     this.#services = servicesOrFactory;
-    this.#extensionsResult = extensionsResult;
+    this.#pluginsResult = pluginsResult;
     this.#diagnostics = [...diagnostics];
     this.#modelFallbackMessage = modelFallbackMessage;
     this.#factory = factoryOrLifecycle;
@@ -345,7 +254,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
   get session(): AgentSession { return this.#session; }
   get services(): S { return this.#services; }
   get cwd(): string { return this.#services.cwd; }
-  get extensionsResult(): LoadExtensionsResult | undefined { return this.#extensionsResult; }
+  get pluginsResult(): LoadPluginsResult | undefined { return this.#pluginsResult; }
   get diagnostics(): readonly AgentSessionRuntimeDiagnostic[] { return this.#diagnostics; }
   get modelFallbackMessage(): string | undefined { return this.#modelFallbackMessage; }
 
@@ -430,7 +339,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     };
     const result = await waitForCallback(
       async () => this.#lifecycle.beforeSwitch === undefined
-        ? await this.#session.extensionRunner?.emit(event)
+        ? await this.#session.pluginRunner?.emit(event)
         : await this.#lifecycle.beforeSwitch(event, signal),
       signal,
     );
@@ -449,7 +358,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     const event: SessionBeforeForkEvent = { type: "session_before_fork", entryId, position };
     const result = await waitForCallback(
       async () => this.#lifecycle.beforeFork === undefined
-        ? await this.#session.extensionRunner?.emit(event)
+        ? await this.#session.pluginRunner?.emit(event)
         : await this.#lifecycle.beforeFork(event, signal),
       signal,
     );
@@ -474,7 +383,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     const failures: unknown[] = [];
     try {
       const shutdown = async (): Promise<void> => {
-        if (this.#lifecycle.shutdown === undefined) await this.#session.extensionRunner?.emit(event);
+        if (this.#lifecycle.shutdown === undefined) await this.#session.pluginRunner?.emit(event);
         else await this.#lifecycle.shutdown(event);
       };
       await shutdown();
@@ -489,7 +398,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     try {
       const close = async (): Promise<void> => {
         if (reason === "quit") await this.#session.close();
-        else await closeAgentSessionForReplacement(this.#session);
+        else await this.#session.close({ reason: "replacement" });
       };
       await close();
     } catch (error) {
@@ -508,7 +417,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
   #apply(result: CreateAgentSessionRuntimeResult<S>, disposed = false): void {
     this.#session = result.session;
     this.#services = result.services;
-    this.#extensionsResult = result.extensionsResult;
+    this.#pluginsResult = result.pluginsResult;
     this.#diagnostics = [...(result.diagnostics ?? [])];
     this.#modelFallbackMessage = result.modelFallbackMessage;
     this.#currentDisposed = disposed;
@@ -519,7 +428,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       session: this.#session,
       services: this.#services,
       diagnostics: [...this.#diagnostics],
-      ...optionalProperties(this.#extensionsResult === undefined ? undefined : { extensionsResult: this.#extensionsResult }),
+      ...optionalProperties(this.#pluginsResult === undefined ? undefined : { pluginsResult: this.#pluginsResult }),
       ...optionalProperties(this.#modelFallbackMessage === undefined ? undefined : { modelFallbackMessage: this.#modelFallbackMessage }),
     };
   }
@@ -572,13 +481,13 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     try {
       recovered = await this.#createWithSignal(async (recoverySignal) => {
         const previousManager = nativeSessionManager(previous.session);
-        const previousFile = previousManager.getSessionFile();
-        if (previousManager.isPersisted() && previousFile === undefined) {
-          throw new Error("The persistent session has no backing file");
+        const previousLocation = previousManager.getSessionFile();
+        if (previousManager.isPersisted() && previousLocation === undefined) {
+          throw new Error("The persistent session has no storage location");
         }
-        const recoveryManager = previousFile === undefined
+        const recoveryManager = previousLocation === undefined
           ? previousManager
-          : SessionManager.open(previousFile, previousManager.getSessionDir(), previousManager.getCwd());
+          : SessionManager.open(previousLocation, previousManager.getSessionDir(), previousManager.getCwd());
         return await createManagerCandidate(recoveryManager, recoverySignal, async (sessionManager) =>
           await this.#factory({
             cwd: previous.services.cwd,
@@ -694,7 +603,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       await waitForCallback(async () => await previous, admissionSignal);
       this.#assertOpen();
       if (expectedSession !== undefined && this.#session !== expectedSession) {
-        throw new Error("Extension command context is stale after session replacement");
+        throw new Error("Plugin command context is stale after session replacement");
       }
       controller = new AbortController();
       this.#activeMutationAbort = controller;
@@ -724,6 +633,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     expectedSession?: AgentSession,
   ): Promise<{ cancelled: boolean; reason?: string }> {
     const result = await this.#mutate(options.signal, async (signal) => {
+      const current = nativeSessionManager(this.#session);
       const path = resolve(sessionPath);
       const guard = await this.#guardSwitch("resume", signal, path);
       signal.throwIfAborted();
@@ -732,9 +642,16 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       }
       const previousSessionFile = this.#session.sessionFile;
       const modelScope = this.#session.modelScopeOverride;
-      const reopenAfterTeardown = previousSessionFile !== undefined && resolve(previousSessionFile) === path;
-      const manager = reopenAfterTeardown ? undefined : SessionManager.open(path, undefined, options.cwdOverride);
-      let handedOff = false;
+      const previousLocation = current.getSessionFile();
+      const snapshot = SessionManager.open(path, undefined, options.cwdOverride, { readOnly: true });
+      const reopenAfterTeardown = previousLocation !== undefined
+        && (resolve(previousLocation) === path || snapshot.getSessionId() === current.getSessionId());
+      const openSelected = (): SessionManager => current.isPersisted()
+        ? SessionManager.open(path, current.getSessionDir(), options.cwdOverride)
+        : snapshot.cloneInMemory();
+      let manager = reopenAfterTeardown ? undefined : openSelected();
+      let cleanup = manager?.captureCreatedSessionCleanup();
+      let replaced = false;
       const agentDir = this.#services.agentDir;
       const cwd = manager?.getCwd()
         ?? (options.cwdOverride === undefined ? nativeSessionManager(this.#session).getCwd() : resolve(options.cwdOverride));
@@ -750,7 +667,9 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
         );
         const projectTrustContext = options.projectTrustContextFactory?.(cwd);
         context = await this.#replace("resume", path, async (replacementSignal) => {
-          const selectedManager = manager ?? SessionManager.open(path, undefined, options.cwdOverride);
+          const selectedManager = manager ?? openSelected();
+          manager = selectedManager;
+          cleanup ??= selectedManager.captureCreatedSessionCleanup();
           const candidate = await createManagerCandidate(selectedManager, replacementSignal, async (sessionManager) =>
             await this.#factory({
               cwd,
@@ -765,11 +684,15 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
               ...optionalProperties(projectTrustContext === undefined ? undefined : { projectTrustContext }),
               signal: replacementSignal,
             }));
-          handedOff = true;
           return candidate;
         }, signal);
+        replaced = true;
       } finally {
-        if (!handedOff) manager?.closeV4Store();
+        snapshot.closeV4Store();
+        if (!replaced) {
+          try { manager?.closeV4Store(); }
+          finally { cleanup?.(); }
+        }
       }
       if (options.withSession !== undefined) {
         await waitForCallback(async () => await options.withSession!(context), signal);
@@ -801,13 +724,13 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
         ? SessionManager.create(
             cwd,
             current.getSessionDir(),
-            options.parentSession === undefined ? undefined : { parentSession: options.parentSession },
+            optionalProperties(options.parentSession === undefined ? undefined : { parentSession: options.parentSession }),
           )
         : SessionManager.inMemory(
             cwd,
             options.parentSession === undefined ? undefined : { parentSession: options.parentSession },
           );
-      const createdFile = recordCreatedSessionFile(manager.getSessionFile());
+      const createdCleanup = manager.captureCreatedSessionCleanup();
       let context: AgentSessionReplacedContext;
       try {
         if (options.setup !== undefined) {
@@ -831,7 +754,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
           return candidate;
         }, signal);
       } catch (error) {
-        rollbackCreatedSession(manager, createdFile, error);
+        rollbackCreatedSession(manager, createdCleanup, error);
       }
       if (options.withSession !== undefined) {
         await waitForCallback(async () => await options.withSession!(context), signal);
@@ -878,25 +801,26 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
       const agentDir = this.#services.agentDir;
       const currentManager = nativeSessionManager(this.#session);
       const persisted = currentManager.isPersisted();
-      const source = this.#session.sessionFile;
-      if (persisted && source === undefined) throw new Error("The persistent session has no backing file");
+      const source = currentManager.getSessionFile();
+      if (persisted && source === undefined) throw new Error("The persistent session has no storage location");
       if (persisted && !existsSync(source!)) throw new Error("Forking requires the saved session file, but it is unavailable");
       const sessionDirectory = currentManager.getSessionDir();
       let candidateManager: SessionManager | undefined;
-      let createdFile: CreatedSessionFile | undefined;
+      let createdCleanup: (() => void) | undefined;
       let context: AgentSessionReplacedContext;
       try {
         context = await this.#replace("fork", undefined, async (replacementSignal) => {
-          const manager = persisted
+          const managedStorage = persisted;
+          const manager = managedStorage
             ? target === null
-              ? SessionManager.create(cwd, sessionDirectory, { parentSession: source! })
+              ? SessionManager.create(cwd, sessionDirectory, { parentSession: currentManager.getSessionId() })
               : SessionManager.open(source!, sessionDirectory)
             : currentManager.cloneInMemory();
           candidateManager = manager;
-          if (persisted && target === null) createdFile = recordCreatedSessionFile(manager.getSessionFile());
+          if (target === null) createdCleanup = manager.captureCreatedSessionCleanup();
           return await createManagerCandidate(manager, replacementSignal, async (sessionManager) => {
             if (target === null) {
-              if (!persisted) {
+              if (!managedStorage) {
                 sessionManager.newSession(
                   previousSessionFile === undefined ? undefined : { parentSession: previousSessionFile },
                 );
@@ -904,7 +828,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
             } else {
               const branch = sessionManager.createBranchedSession(target);
               if (persisted && branch === undefined) throw new Error("The forked session could not be created");
-              createdFile = recordCreatedSessionFile(branch);
+              createdCleanup = sessionManager.captureCreatedSessionCleanup();
             }
             return await this.#factory({
               cwd: sessionManager.getCwd(),
@@ -921,7 +845,7 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
           });
         }, signal);
       } catch (error) {
-        if (candidateManager !== undefined) rollbackCreatedSession(candidateManager, createdFile, error);
+        if (candidateManager !== undefined) rollbackCreatedSession(candidateManager, createdCleanup, error);
         throw error;
       }
       if (options.withSession !== undefined) {
@@ -948,74 +872,37 @@ export class AgentSessionRuntime<S extends AgentSessionRuntimeServices = AgentSe
     return await this.#mutate(signal, async (operationSignal) => {
       const source = resolve(inputPath);
       if (!existsSync(source)) throw new SessionImportFileNotFoundError(source);
-      const directory = nativeSessionManager(this.#session).getSessionDir();
-      if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-      const stagingPath = join(directory, `.ohm-import-${randomUUID()}.tmp`);
-      let destination: string | undefined;
-      let committed = false;
-      let sourceHandle: Awaited<ReturnType<typeof open>> | undefined;
+      const current = nativeSessionManager(this.#session);
+      const manager = await SessionManager.importJsonl(source, current.isPersisted() ? current.getSessionDir() : "", {
+        signal: operationSignal,
+        ...optionalProperties(cwdOverride === undefined ? undefined : { cwdOverride }),
+      });
+      const cleanup = manager.captureCreatedSessionCleanup();
+      let adopted = false;
       try {
-        sourceHandle = await open(source, constants.O_RDONLY | SESSION_IMPORT_NONBLOCK);
-        const sourceDetails = await sourceHandle.stat();
-        if (!sourceDetails.isFile()) throw new Error(`Session import source is not a regular file: ${source}`);
-        if (sourceDetails.size > MAX_SESSION_FILE_BYTES) {
-          throw new Error(`Session import source exceeds ${MAX_SESSION_FILE_BYTES} bytes: ${source}`);
-        }
-        await pipeline(
-          sourceHandle.createReadStream({ autoClose: false, end: MAX_SESSION_FILE_BYTES }),
-          createWriteStream(stagingPath, { flags: "wx", mode: 0o600 }),
-          { signal: operationSignal },
-        );
+        const path = manager.getSessionFile() ?? source;
+        assertWorkspace(manager.getCwd(), () => new MissingSessionCwdError({ sessionFile: path, sessionCwd: manager.getCwd(), fallbackCwd: this.cwd }));
+        const guard = await this.#guardSwitch("resume", operationSignal, path);
         operationSignal.throwIfAborted();
-
-        const staged = SessionManager.open(stagingPath, directory, cwdOverride);
-        try {
-          const reportedDestination = availableImportDestination(directory, source);
-          assertWorkspace(
-            staged.getCwd(),
-            () => new MissingSessionCwdError({
-              sessionFile: reportedDestination,
-              sessionCwd: staged.getCwd(),
-              fallbackCwd: this.cwd,
-            }),
-          );
-        } finally {
-          staged.closeV4Store();
-        }
-        operationSignal.throwIfAborted();
-
-        destination = await commitStagedImport(stagingPath, directory, source, operationSignal);
-        const guard = await this.#guardSwitch("resume", operationSignal, destination);
-        operationSignal.throwIfAborted();
-        if (guard.cancel === true) {
-          return { cancelled: true, ...optionalProperties(guard.reason === undefined ? undefined : { reason: guard.reason }) };
-        }
-
+        if (guard.cancel === true) return { cancelled: true, ...optionalProperties(guard.reason === undefined ? undefined : { reason: guard.reason }) };
         const previousSessionFile = this.#session.sessionFile;
         const modelScope = this.#session.modelScopeOverride;
         const agentDir = this.#services.agentDir;
-        await this.#replace("resume", destination, async (replacementSignal) => {
-          const manager = SessionManager.open(destination!, directory, cwdOverride);
-          return await createManagerCandidate(manager, replacementSignal, async (sessionManager) =>
+        await this.#replace("resume", manager.getSessionFile(), async (replacementSignal) =>
+          await createManagerCandidate(manager, replacementSignal, async (sessionManager) =>
             await this.#factory({
-              cwd: sessionManager.getCwd(),
-              agentDir,
-              sessionManager,
+              cwd: sessionManager.getCwd(), agentDir, sessionManager,
               ...optionalProperties(modelScope === undefined ? undefined : { modelScope }),
-              sessionStartEvent: {
-                type: "session_start",
-                reason: "resume",
-                ...optionalProperties(previousSessionFile === undefined ? undefined : { previousSessionFile }),
-              },
+              sessionStartEvent: { type: "session_start", reason: "resume", ...optionalProperties(previousSessionFile === undefined ? undefined : { previousSessionFile }) },
               signal: replacementSignal,
-            }));
-        }, operationSignal);
-        committed = true;
+            })), operationSignal);
+        adopted = true;
         return { cancelled: false };
       } finally {
-        await sourceHandle?.close().catch(() => undefined);
-        if (!committed) removeCommittedImport(stagingPath, destination);
-        removeImportFile(stagingPath);
+        if (!adopted) {
+          try { manager.closeV4Store(); }
+          finally { cleanup(); }
+        }
       }
     });
   }

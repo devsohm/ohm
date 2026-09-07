@@ -126,7 +126,7 @@ test("PTY login stores an extension-provided device credential, selects a model,
   await mkdir(workspace);
   const paths = agentPaths(environment);
   await mkdir(paths.agentDirectory, { recursive: true, mode: 0o700 });
-  const extension = join(paths.userExtensions, "dynamic-auth");
+  const extension = join(paths.userPlugins, "dynamic-auth");
   await mkdir(join(extension, "extensions"), { recursive: true });
   await writeFile(join(extension, "package.json"), JSON.stringify({
     name: "dynamic-auth",
@@ -384,7 +384,7 @@ test("built CLI /model shows subscription models from a stored OAuth credential 
     workspace,
     "--offline",
     "--no-browser",
-    "--no-extensions",
+    "--no-plugin-code",
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",

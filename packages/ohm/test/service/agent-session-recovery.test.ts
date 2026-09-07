@@ -31,7 +31,7 @@ import {
   type ObservabilitySink,
 } from "../../src/core/observability.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
-import { loadDirectExtensions } from "../../src/extensions/runtime.js";
+import { loadDirectPlugins } from "../../src/plugins/runtime.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
 import { createModels } from "../../src/providers/models.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
@@ -495,6 +495,200 @@ test("live operations checkpoint settled tool effects", async (context) => {
   assert.equal(Value.Check(STRING_VALUE, checkpoint.effectId), true);
 });
 
+test("live tool turns and queues do not clone the whole journal", async (context) => {
+  const manager = await managerFixture(context, "bounded-live-reads");
+  for (let index = 0; index < 256; index += 1) {
+    manager.appendMessage({
+      id: `history-${index}`,
+      role: "user",
+      content: [{ type: "text", text: "retained history ".repeat(64) }],
+      createdAt: TIME,
+    });
+  }
+  const snapshots = context.mock.method(manager, "getV4State", () => {
+    throw new Error("Runtime reads must not clone the whole journal");
+  });
+  const provider = new ToolCheckpointProvider();
+  const tool = recoveryTool("checkpoint_tool", "repeatable", async () => ({
+    content: "tool completed", isError: false,
+  }));
+  const session = await AgentSession.create({
+    sessionManager: manager,
+    providers: new ProviderRegistry([provider]),
+    settingsManager: SettingsManager.inMemory(),
+    tools: [tool],
+    model: SELECTED_MODEL,
+  });
+  context.after(async () => await session.close());
+
+  await session.steer("queued first");
+  await session.followUp("queued second");
+  await session.prompt("run with history");
+  session.clearAllQueues();
+
+  assert.equal(snapshots.mock.callCount(), 0);
+  assert.ok(provider.requests >= 2);
+  assert.equal(manager.getV4Branch().openOperationId, null);
+  assert.deepEqual(manager.getV4PendingQueue(), []);
+});
+
+test("runtime journal queries return detached records and exclude unrelated operations", async (context) => {
+  const manager = await managerFixture(context, "detached-runtime-reads");
+  const history = manager.appendMessage({
+    id: "history", role: "user", content: [{ type: "text", text: "history" }], createdAt: TIME,
+  });
+  const selected = selection([recoveryTool("probe", "never_repeat", async () => ({
+    content: "unused", isError: false,
+  }))]);
+  const accepted = acceptRun(manager, selected);
+  materializePrompt(manager, accepted.operationId, accepted.promptNodeId);
+  const assistantNodeId = beginToolStep(manager, accepted.operationId, selected);
+  prepareEffect(manager, {
+    operationId: accepted.operationId, assistantNodeId, selected,
+    effectId: "effect", callId: "call", toolName: "probe", policy: "never_repeat",
+    input: { value: "original" }, resultNodeId: "result", index: 0,
+  });
+  manager.commitChanges([{
+    type: "queue_added", branchId: "main", entryId: "queued", targetNodeId: "queued-node",
+    kind: "follow_up", addedAt: TIME, message: { text: "original" },
+  }]);
+  const before = manager.getV4State();
+  const branch = manager.getV4Branch();
+  const operation = manager.getV4Operation(accepted.operationId)!;
+  const node = manager.getV4Node(accepted.promptNodeId)!;
+  const nodes = manager.getV4OperationNodes(accepted.operationId);
+  const queue = manager.getV4QueueEntry("queued")!;
+  const targetQueue = manager.getV4QueueEntryForNode("queued-node")!;
+  const pending = manager.getV4PendingQueue();
+  const effect = manager.getV4ToolEffect("effect")!;
+  const effects = manager.getV4ToolEffects(accepted.operationId);
+
+  assert.equal(manager.hasV4Node(history), true);
+  assert.equal(manager.hasV4Node("missing"), false);
+  assert.equal(manager.getV4Node("missing"), undefined);
+  assert.equal(manager.getV4Operation("missing"), undefined);
+  assert.equal(manager.getV4QueueEntry("missing"), undefined);
+  assert.equal(manager.getV4QueueEntryForNode("missing"), undefined);
+  assert.equal(manager.getV4ToolEffect("missing"), undefined);
+  assert.deepEqual(nodes.map((entry) => entry.id), [accepted.promptNodeId, assistantNodeId]);
+  assert.deepEqual(manager.getV4OperationNodes("missing"), []);
+  assert.deepEqual(manager.getV4ToolEffects("missing"), []);
+  branch.headNodeId = "mutated";
+  operation.selection.toolNames.push("mutated");
+  node.parentId = "mutated";
+  nodes[0]!.parentId = "mutated";
+  queue.message = "mutated";
+  targetQueue.message = "mutated";
+  pending[0]!.message = "mutated";
+  effect.effectiveInput = "mutated";
+  effects[0]!.effectiveInput = "mutated";
+  assert.deepEqual(manager.getV4State(), before);
+
+  manager.commitChanges([{
+    type: "queue_finished", branchId: "main", entryId: "queued", finishedAt: TIME, outcome: "cancelled",
+  }]);
+  assert.deepEqual(manager.getV4PendingQueue(), []);
+  assert.equal(manager.getV4QueueEntryForNode("queued-node")?.status, "cancelled");
+});
+
+test("recent activity bounds detached metadata and omits journal payloads", async (context) => {
+  const manager = await managerFixture(context, "recent-activity");
+  for (let index = 0; index < 25; index += 1) {
+    manager.commitChanges([{
+      type: "run_accepted", branchId: "main", operationId: `old-${index}`,
+      promptNodeId: null, sourceHeadId: null, acceptedAt: TIME,
+      request: { prompt: "PRIVATE-PROMPT" }, selection: selection([]),
+    }, {
+      type: "run_finished", operationId: `old-${index}`, finishedAt: TIME,
+      outcome: "completed", detail: "PRIVATE-DETAIL",
+    }]);
+  }
+  const selected = selection([recoveryTool("probe", "never_repeat", async () => ({
+    content: "unused", isError: false,
+  }))]);
+  const accepted = acceptRun(manager, selected);
+  materializePrompt(manager, accepted.operationId, accepted.promptNodeId, "PRIVATE-PROMPT");
+  const assistantNodeId = beginToolStep(manager, accepted.operationId, selected);
+  for (let index = 0; index < 3; index += 1) {
+    prepareEffect(manager, {
+      operationId: accepted.operationId, assistantNodeId, selected,
+      effectId: `effect-${index}`, callId: `call-${index}`, toolName: "probe", policy: "never_repeat",
+      input: { token: "PRIVATE-INPUT" }, resultNodeId: "result", index,
+    });
+  }
+  dispatchEffect(manager, "effect-2");
+  context.mock.method(manager, "getV4State", () => { throw new Error("Activity must not snapshot payloads"); });
+
+  const activity = manager.getRecentActivity(2);
+  assert.deepEqual(activity.operations, [{
+    id: accepted.operationId, status: "running", acceptedAt: TIME, finishedAt: null, finishReason: null, errorCategory: null,
+  }, {
+    id: "old-24", status: "completed", acceptedAt: TIME, finishedAt: TIME, finishReason: null, errorCategory: null,
+  }]);
+  assert.deepEqual(activity.toolEffects, [2, 1].map((index) => ({
+    id: `effect-${index}`, operationId: accepted.operationId, toolName: "probe",
+    status: index === 2 ? "dispatched" : "prepared", preparedAt: TIME,
+    lastDispatchedAt: index === 2 ? TIME : null, recoveryStartedAt: null, finishedAt: null,
+  })));
+  assert.doesNotMatch(JSON.stringify(activity), /PRIVATE/u);
+  activity.operations[0]!.status = "failed";
+  activity.toolEffects[0]!.toolName = "mutated";
+  assert.equal(manager.getRecentActivity(1).operations[0]?.status, "running");
+  assert.equal(manager.getRecentActivity(1).toolEffects[0]?.toolName, "probe");
+  assert.equal(manager.getRecentActivity().operations.length, 20);
+  assert.equal(manager.getRecentActivity(100).operations.length, 26);
+  assert.deepEqual(manager.getRecentActivity(0), { operations: [], toolEffects: [] });
+  for (const limit of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 101]) {
+    assert.throws(() => manager.getRecentActivity(limit), /between 0 and 100/u);
+  }
+});
+
+test("recent activity exposes only recognized terminal categories from durable details", async (context) => {
+  const manager = await managerFixture(context, "terminal-activity");
+  const cases: Array<{
+    outcome: "completed" | "failed" | "cancelled";
+    detail: SessionV4Json;
+    finishReason: string | null;
+    errorCategory: string | null;
+  }> = [
+    { outcome: "completed", detail: { finishReason: "length", message: "PRIVATE-MESSAGE" }, finishReason: "length", errorCategory: null },
+    { outcome: "failed", detail: { error: { category: "rate_limit", message: "PRIVATE-ERROR", raw: "PRIVATE-BODY" } }, finishReason: null, errorCategory: "rate_limit" },
+    { outcome: "cancelled", detail: { reason: "PRIVATE-CANCELLATION" }, finishReason: null, errorCategory: null },
+    { outcome: "cancelled", detail: { recoveredAfterRestart: true }, finishReason: null, errorCategory: null },
+    { outcome: "completed", detail: { finishReason: "PRIVATE-UNKNOWN", error: { category: "network" } }, finishReason: null, errorCategory: null },
+    { outcome: "failed", detail: { finishReason: "stop", error: { category: "PRIVATE-UNKNOWN" } }, finishReason: null, errorCategory: null },
+    { outcome: "failed", detail: { error: ["network"] }, finishReason: null, errorCategory: null },
+    { outcome: "completed", detail: null, finishReason: null, errorCategory: null },
+    { outcome: "completed", detail: ["stop"], finishReason: null, errorCategory: null },
+  ];
+  for (const [index, value] of cases.entries()) {
+    manager.commitChanges([{
+      type: "run_accepted", branchId: "main", operationId: `terminal-${index}`,
+      promptNodeId: null, sourceHeadId: null, acceptedAt: TIME,
+      request: { prompt: "PRIVATE-PROMPT" }, selection: selection([]),
+    }]);
+    if (value.outcome === "cancelled") manager.commitChanges([{
+      type: "run_cancel", operationId: `terminal-${index}`, cancelId: `cancel-${index}`, requestedAt: TIME,
+    }]);
+    manager.commitChanges([{
+      type: "run_finished", operationId: `terminal-${index}`, finishedAt: TIME,
+      outcome: value.outcome, detail: value.detail,
+    }]);
+  }
+  const state = manager.getV4State();
+  const bytes = Buffer.from([state.header, ...state.commits.values()].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  context.mock.method(manager, "getV4State", () => { throw new Error("Activity must not snapshot payloads"); });
+  const expected = cases.map((value, index) => ({
+    id: `terminal-${index}`, status: value.outcome, acceptedAt: TIME, finishedAt: TIME,
+    finishReason: value.finishReason, errorCategory: value.errorCategory,
+  })).reverse();
+  assert.deepEqual(manager.getRecentActivity().operations, expected);
+  const snapshot = SessionManager.openSnapshotBytes(join(manager.getCwd(), "imported.jsonl"), bytes);
+  context.after(() => snapshot.closeV4Store());
+  assert.deepEqual(snapshot.getRecentActivity().operations, expected, "imported metadata uses the same whitelist");
+  assert.doesNotMatch(JSON.stringify(snapshot.getRecentActivity()), /PRIVATE/u);
+});
+
 test("live cancellation records a cooperative tool failure and recovers without replay", async (context) => {
   const manager = await managerFixture(context, "live-interrupted-tool");
   const provider = new InterruptedToolProvider();
@@ -940,11 +1134,16 @@ test("dispatched repeatable effects use exact durable inputs once and materializ
     },
   });
   t.after(async () => await session.close());
+  const snapshots = t.mock.method(manager, "getV4State", () => {
+    throw new Error("Recovery must not clone the whole journal");
+  });
   assert.deepEqual(await session.recoverInterruptedRun(), {
     recovered: true,
     operationId: accepted.operationId,
     blocked: [],
   });
+  assert.equal(snapshots.mock.callCount(), 0);
+  snapshots.mock.restore();
 
   assert.deepEqual(observed, [{ value: "first" }, { value: "second" }]);
   assert.deepEqual(approvals, [
@@ -1410,10 +1609,10 @@ test("lower-level suspended reopen defers direct-host model and thinking selecti
   dispatchEffect(manager, "deferred-selection-effect");
 
   const requestedModelId = "requested-recovery-model";
-  const host = await loadDirectExtensions([], {
+  const host = await loadDirectPlugins([], {
     workspace: manager.getCwd(),
     activationFailure: "throw",
-    inlineExtensions: [{
+    inlinePlugins: [{
       name: "deferred-selection-provider",
       factory(api) {
         api.registerProvider(PROVIDER, {
@@ -1447,7 +1646,7 @@ test("lower-level suspended reopen defers direct-host model and thinking selecti
     providers: new ProviderRegistry(),
     modelRegistry: new ModelRegistry(createModels()),
     settingsManager: SettingsManager.inMemory(),
-    extensionRunner: host,
+    pluginRunner: host,
     tools: [tool],
     model: {
       provider: PROVIDER,

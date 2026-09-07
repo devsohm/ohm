@@ -5,7 +5,7 @@ shutdown events. It does not cancel host operations. The pre-tree handler adds
 short custom instructions, but the host still performs summarization.
 
 ```text
-ohm install ./packages/ohm/examples/session-lifecycle
+ohm plugins install ./packages/ohm/examples/session-lifecycle
 ```
 
 - `/example-session-lifecycle` reports the ordered events seen by the current

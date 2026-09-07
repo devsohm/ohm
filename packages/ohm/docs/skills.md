@@ -57,7 +57,7 @@ The active runtime can load:
 - `WORKSPACE/.ohm/skills`, after project approval;
 - the single bundled `ohm-dev` development skill;
 - skill roots declared by enabled packages;
-- paths returned by trusted extension `resources_discover` callbacks;
+- paths returned by trusted plugin `resources_discover` callbacks;
 - settings paths and repeatable `--skill PATH` inputs.
 
 Other harness directories are never scanned merely because they exist. This
@@ -151,7 +151,7 @@ name, those interactive surfaces show the shorter prompt command and omit the
 redundant skill row. A directly entered `/skill:NAME` command still works.
 When the setting is false, the two interactive surfaces hide all skill entries.
 The setting does not unload a skill or remove model-visible metadata. RPC and
-extension command introspection continue to report every invocable skill
+plugin command introspection continue to report every invocable skill
 command and do not use this interactive preference. To prevent a skill from
 loading, use `--no-skills`, use resource filters, or remove its root.
 
@@ -231,7 +231,7 @@ apply the instructions.
 Use:
 
 ```sh
-ohm extensions doctor
+ohm plugins doctor
 ohm diagnostics ./support.json
 ```
 

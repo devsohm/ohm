@@ -134,8 +134,8 @@ export {
 } from "./tui.js";
 export type {
   BackgroundCell, BackgroundComponent, Component, Focusable, OverlayAnchor,
-  OverlayHandle, OverlayMargin, OverlayOptions, OverlayUnfocusOptions, SizeValue,
-  TuiInputListener, TuiInputListenerResult, TuiMainScreenRenderState, TuiMode, TuiStopOptions,
+  OverlayBounds, OverlayHandle, OverlayMargin, OverlayOptions, OverlayUnfocusOptions, SizeValue,
+  TuiInputListener, TuiInputListenerResult, TuiMainScreenRenderState, TuiMode, TuiPointerOptions, TuiStopOptions,
   ViewportTUI,
 } from "./tui.js";
 export {
@@ -147,6 +147,7 @@ export {
   visibleWidth,
   wrapTextWithAnsi,
 } from "./utils.js";
+export { wordWrapLine, type TextChunk } from "./word-wrap.js";
 export {
   cancelViewportPointer,
   dispatchViewportPointer,
