@@ -8,6 +8,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { tsImport } from "tsx/esm/api";
 
 import {
   assertRootLockIdentity,
@@ -53,6 +54,7 @@ import {
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const FIXTURE_VERSION = "9.8.7";
+const { runProcess: runRuntimeProcess } = await tsImport("../../src/process/index.ts", import.meta.url);
 
 function standaloneRuntimeLease(installRoot, pid, lease = "a".repeat(32)) {
   const canonicalRoot = resolve(installRoot);
@@ -152,30 +154,25 @@ function failedFetchResponse(status, options = {}) {
 }
 
 async function runProcess(command, args, options = {}) {
-  const hasInput = options.input !== undefined;
-  const child = spawn(command, args, {
-    cwd: options.cwd,
+  const result = await runRuntimeProcess({
+    argv: [command, ...args],
+    cwd: options.cwd ?? process.cwd(),
     env: options.env,
-    shell: false,
-    stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  const stdout = [];
-  const stderr = [];
-  child.stdout.on("data", (chunk) => stdout.push(chunk));
-  child.stderr.on("data", (chunk) => stderr.push(chunk));
-  const code = await new Promise((resolveExit, reject) => {
-    child.once("error", reject);
-    child.once("close", resolveExit);
-    if (hasInput) {
-      child.stdin.once("error", reject);
-      child.stdin.end(options.input);
-    }
-  });
+    inheritEnv: options.env === undefined,
+    stdin: options.input,
+    timeoutMs: options.timeoutMs ?? 60_000,
+    outputLimitBytes: 4 * 1024 * 1024,
+  }, new AbortController().signal);
+  if (result.timedOut || result.cancelled) {
+    throw new Error(`${command} ${result.timedOut ? "timed out" : "was cancelled"}: ${result.stderr.toString("utf8")}`);
+  }
+  if (result.stdout.length !== result.stdoutBytes || result.stderr.length !== result.stderrBytes) {
+    throw new Error(`${command} output exceeded the release fixture capture limit`);
+  }
   return {
-    code,
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
+    code: result.exitCode,
+    stdout: result.stdout.toString("utf8"),
+    stderr: result.stderr.toString("utf8"),
   };
 }
 
@@ -701,14 +698,25 @@ async function runNode(args, options = {}) {
   return result;
 }
 
-test("process runner ignores stdin when no input is provided", {
-  skip: process.platform === "win32",
-}, async () => {
+test("process runner closes stdin when no input is provided", async () => {
   const result = await runProcess(process.execPath, [
     "-e",
-    "const { fstatSync } = require('node:fs'); process.exit(fstatSync(0).isCharacterDevice() ? 0 : 1);",
+    "const { readFileSync } = require('node:fs'); process.exit(readFileSync(0).length === 0 ? 0 : 1);",
   ]);
   assert.equal(result.code, 0, result.stderr);
+});
+
+test("release fixture process timeouts terminate the owned child", { timeout: 15_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-release-fixture-timeout-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const pidPath = join(root, "pid");
+  await assert.rejects(runProcess(process.execPath, [
+    "--eval",
+    `require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setInterval(() => {}, 1000);`,
+  ], { timeoutMs: 5_000 }), /timed out/u);
+  const pid = Number(await readFile(pidPath, "utf8"));
+  assert.equal(Number.isSafeInteger(pid) && pid > 0, true);
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 
 test("source installation builds and verifies only matching native helpers", () => {
@@ -2975,48 +2983,58 @@ test("release staging refuses a markerless output without deleting it", async (c
   await assert.rejects(access(`${output}.lifecycle.lock`), { code: "ENOENT" });
 });
 
-test("lifecycle operations serialize across processes", async (context) => {
+test("lifecycle operations serialize across processes", { timeout: 20_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "ohm-lifecycle-lock-"));
-  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const children = [];
+  context.after(async () => {
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await Promise.all(children.map(({ closed }) => closed));
+    await rm(root, { recursive: true, force: true });
+  });
   const installRoot = join(root, "install");
   const common = pathToFileURL(join(PROJECT_ROOT, "scripts", "lifecycle-common.mjs")).href;
   const program = [
     `import { withLifecycleLock } from ${JSON.stringify(common)}`,
     `import { writeFileSync } from "node:fs"`,
-    "const [root, name, delay] = process.argv.slice(1)",
-    "await withLifecycleLock(root, async () => { writeFileSync(1, name + '\\n'); await new Promise((resolve) => setTimeout(resolve, Number(delay))) })",
+    "const [root, name, ready] = process.argv.slice(1)",
+    "if (name === 'second') writeFileSync(ready, 'waiting')",
+    "await withLifecycleLock(root, async () => { writeFileSync(1, name + '\\n'); if (name === 'first') { writeFileSync(ready, 'held'); await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); }) } })",
   ].join(";");
-  const first = spawn(process.execPath, ["--input-type=module", "--eval", program, installRoot, "first", "400"], {
-    cwd: PROJECT_ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let firstOutput = "";
-  first.stdout.on("data", (chunk) => { firstOutput += chunk.toString("utf8"); });
-  await new Promise((resolveReady, reject) => {
-    const timeout = setTimeout(() => reject(new Error("first lifecycle process did not acquire the lock")), 5_000);
-    first.stdout.on("data", () => {
-      if (!firstOutput.includes("first\n")) return;
-      clearTimeout(timeout);
-      resolveReady();
+  const start = (name) => {
+    const ready = join(root, `${name}.ready`);
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", program, installRoot, name, ready], {
+      cwd: PROJECT_ROOT,
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    first.once("error", reject);
-  });
-
-  const second = spawn(process.execPath, ["--input-type=module", "--eval", program, installRoot, "second", "0"], {
-    cwd: PROJECT_ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let secondOutput = "";
-  second.stdout.on("data", (chunk) => { secondOutput += chunk.toString("utf8"); });
+    const closed = new Promise((resolveClose) => child.once("close", resolveClose));
+    const owner = { child, closed, ready, stdout: "", stderr: "", error: undefined };
+    children.push(owner);
+    child.once("error", (error) => { owner.error = error; });
+    child.stdin.once("error", (error) => {
+      owner.error = error;
+      child.kill("SIGKILL");
+    });
+    child.stdout.on("data", (chunk) => { owner.stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { owner.stderr += chunk.toString("utf8"); });
+    return owner;
+  };
+  const first = start("first");
+  await waitForFile(first.ready);
+  const second = start("second");
+  second.child.stdin.end();
+  await waitForFile(second.ready);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  assert.equal(secondOutput, "", "the second operation must wait for the first lock holder");
-  const [firstCode, secondCode] = await Promise.all([
-    new Promise((resolve) => first.once("close", resolve)),
-    new Promise((resolve) => second.once("close", resolve)),
-  ]);
-  assert.equal(firstCode, 0);
-  assert.equal(secondCode, 0);
-  assert.equal(secondOutput, "second\n");
+  assert.equal(second.stdout, "", "the second operation must wait for the first lock holder");
+  first.child.stdin.end();
+  const [firstCode, secondCode] = await Promise.all([first.closed, second.closed]);
+  assert.ifError(first.error);
+  assert.ifError(second.error);
+  assert.equal(firstCode, 0, first.stderr);
+  assert.equal(secondCode, 0, second.stderr);
+  assert.equal(first.stdout, "first\n");
+  assert.equal(second.stdout, "second\n");
   await assert.rejects(access(`${installRoot}.lifecycle.lock`), { code: "ENOENT" });
 });
 

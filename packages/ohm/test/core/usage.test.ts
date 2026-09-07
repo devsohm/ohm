@@ -70,6 +70,25 @@ test("normalized usage aggregation preserves complete structured costs only", ()
   }).cost, undefined);
 });
 
+test("usage cost formatting trims only fractional zeros", () => {
+  for (const [total, fractionDigits, expected] of [
+    [0, 0, "$0"],
+    [10, 0, "$10"],
+    [100, 0, "$100"],
+    [10.6, 0, "$11"],
+    [10, -1, "$10"],
+    [10, 6, "$10"],
+    [1.23, 6, "$1.23"],
+    [0.00125, 6, "$0.00125"],
+    [1e30, 6, "$1e+30"],
+    [1.2e30, 6, "$1.2e+30"],
+  ] as const) {
+    const cost = { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total };
+    assert.equal(formatUsageCost(cost, fractionDigits), expected);
+  }
+  assert.equal(formatUsageCost(undefined), undefined);
+});
+
 test("complete usage aggregation retains only independently reported fields", () => {
   const first = addCompleteNormalizedUsage(undefined, {
     inputTokens: 4,

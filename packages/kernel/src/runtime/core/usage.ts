@@ -268,7 +268,7 @@ export function addCompleteNormalizedUsage(
 export function formatUsageCost(cost: UsageCost | undefined, fractionDigits = 6): string | undefined {
   if (cost === undefined) return undefined;
   const digits = Math.max(0, Math.min(12, Math.trunc(fractionDigits)));
-  return `$${cost.total.toFixed(digits).replace(/0+$/u, "").replace(/\.$/u, "")}`;
+  return `$${cost.total.toFixed(digits).replace(/(\.\d*?)0+$/u, "$1").replace(/\.$/u, "")}`;
 }
 
 /** Exact input tokens occupying provider context, including cache reads/writes. */

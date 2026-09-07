@@ -21,23 +21,35 @@ const LISTEN_ADDRESS_VALUE = Type.Object({ port: Type.Number(), address: Type.St
 
 async function fixture(context: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "ohm-runtime-provider-configuration-"));
+  const cleanups: Array<() => void | Promise<void>> = [];
+  context.after(async () => {
+    const errors: unknown[] = [];
+    for (const cleanup of cleanups.reverse()) {
+      try { await cleanup(); } catch (error) { errors.push(error); }
+    }
+    try { await rm(root, { recursive: true, force: true }); } catch (error) { errors.push(error); }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Provider configuration fixture cleanup failed");
+  });
   const workspace = join(root, "workspace");
   const agentDirectory = join(root, "agent");
   await mkdir(workspace);
   await mkdir(agentDirectory);
-  context.after(() => rm(root, { recursive: true, force: true }));
   return {
-    workspace,
-    agentDirectory,
-    configurationPath: join(agentDirectory, "model-providers.json"),
-    credentialStore: new InMemoryCredentialStore(),
-    projectTrusted: false,
-    ephemeral: true,
-    pluginCode: false,
-    skills: false,
-    promptTemplates: false,
-    themes: false,
-    offline: true,
+    options: {
+      workspace,
+      agentDirectory,
+      configurationPath: join(agentDirectory, "model-providers.json"),
+      credentialStore: new InMemoryCredentialStore(),
+      projectTrusted: false,
+      ephemeral: true,
+      pluginCode: false,
+      skills: false,
+      promptTemplates: false,
+      themes: false,
+      offline: true,
+    },
+    cleanup: (dispose: () => void | Promise<void>): void => { cleanups.push(dispose); },
   };
 }
 
@@ -56,7 +68,7 @@ function customConfiguration(contextWindow = 16_384) {
 }
 
 test("default SDK and CLI restore the same configured custom model without network or catalog mutation", async (context) => {
-  const options = await fixture(context);
+  const { options, cleanup } = await fixture(context);
   await writeFile(options.configurationPath, JSON.stringify(customConfiguration()));
   const catalogPath = join(options.agentDirectory, "models.json");
   const catalog = JSON.stringify({ version: 1, savedAt: "2026-09-05T00:00:00.000Z", providers: [] });
@@ -72,7 +84,7 @@ test("default SDK and CLI restore the same configured custom model without netwo
   const cliManager = SessionManager.inMemory(options.workspace);
   cliManager.appendModelChange("configured-fixture", "fixture");
   const runtime = await loadRuntime({ ...options, sessionManager: cliManager });
-  context.after(() => runtime.close());
+  cleanup(() => runtime.close());
   const sdkManager = SessionManager.inMemory(options.workspace);
   sdkManager.appendModelChange("configured-fixture", "fixture");
   const { session } = await createAgentSession({
@@ -81,7 +93,7 @@ test("default SDK and CLI restore the same configured custom model without netwo
     sessionManager: sdkManager,
     settingsManager: SettingsManager.inMemory(),
   });
-  context.after(() => session.close());
+  cleanup(() => session.close());
 
   assert.equal(runtime.providers.has("configured-fixture"), true);
   assert.equal(runtime.auth.binding("configured-fixture").displayName, "Configured fixture");
@@ -96,7 +108,7 @@ test("default SDK and CLI restore the same configured custom model without netwo
 });
 
 test("configured builtin models and invocation keys have the same SDK and CLI precedence", async (context) => {
-  const options = await fixture(context);
+  const { options, cleanup } = await fixture(context);
   await writeFile(options.configurationPath, JSON.stringify({
     providers: {
       openai: {
@@ -117,9 +129,9 @@ test("configured builtin models and invocation keys have the same SDK and CLI pr
     modelsPath: options.configurationPath,
     allowModelNetwork: false,
   });
-  context.after(() => sdkModels.close());
+  cleanup(() => sdkModels.close());
   const runtime = await loadRuntime({ ...options, apiKeyProvider: "configured-fixture", apiKey: "invocation-fixture-key" });
-  context.after(() => runtime.close());
+  cleanup(() => runtime.close());
 
   const model = runtime.modelRegistry.find("openai", "gpt-5.6-sol");
   assert.ok(model);
@@ -139,12 +151,12 @@ test("configured builtin models and invocation keys have the same SDK and CLI pr
 });
 
 test("builtin provider-only configuration retains its catalog across offline refresh", async (context) => {
-  const options = await fixture(context);
+  const { options, cleanup } = await fixture(context);
   await writeFile(options.configurationPath, JSON.stringify({
     providers: { openai: { baseUrl: "http://127.0.0.1:1/v1", apiKey: "fixture-only-key" } },
   }));
   const runtime = await loadRuntime(options);
-  context.after(() => runtime.close());
+  cleanup(() => runtime.close());
   const before = runtime.modelRegistry.find("openai", "gpt-5.6-sol");
   assert.ok(before);
   assert.equal(before.baseUrl, "http://127.0.0.1:1/v1");
@@ -159,12 +171,12 @@ test("builtin provider-only configuration retains its catalog across offline ref
 });
 
 test("configured-host refresh rejects invalid configuration atomically and applies valid changes to the restored model", async (context) => {
-  const options = await fixture(context);
+  const { options, cleanup } = await fixture(context);
   await writeFile(options.configurationPath, JSON.stringify(customConfiguration()));
   const sessionManager = SessionManager.inMemory(options.workspace);
   sessionManager.appendModelChange("configured-fixture", "fixture");
   const runtime = await loadRuntime({ ...options, sessionManager });
-  context.after(() => runtime.close());
+  cleanup(() => runtime.close());
   const previousSession = runtime.session;
   const previousModel = runtime.session.model;
   const sessionId = runtime.session.sessionId;
@@ -195,7 +207,7 @@ test("configured-host refresh rejects invalid configuration atomically and appli
 
 for (const providerId of ["configured-fixture", "openai"]) {
 test(`configured ${providerId} completes real SDK and spawned RPC turns with its endpoint, key, and headers`, async (context) => {
-  const options = await fixture(context);
+  const { options, cleanup } = await fixture(context);
   const requests: Array<{ url: string | undefined; authorization: string | undefined; header: string | string[] | undefined; modelHeader: string | string[] | undefined; body: string }> = [];
   const server = createServer(async (request, response) => {
     let body = "";
@@ -204,8 +216,8 @@ test(`configured ${providerId} completes real SDK and spawned RPC turns with its
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(`data: ${JSON.stringify({ id: "fixture-response", model: "fixture", choices: [{ index: 0, delta: { role: "assistant", content: "Configured transport works" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
   });
+  cleanup(() => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))));
   const address = server.address();
   assert.ok(Check(LISTEN_ADDRESS_VALUE, address));
   const configuration = customConfiguration();
@@ -225,7 +237,7 @@ test(`configured ${providerId} completes real SDK and spawned RPC turns with its
     cwd: options.workspace, agentDir: options.agentDirectory,
     sessionManager: SessionManager.inMemory(options.workspace), settingsManager: SettingsManager.inMemory(),
   });
-  context.after(() => session.close());
+  cleanup(() => session.close());
   await session.modelRuntime.setRuntimeApiKey(providerId, "invocation-fixture-key", { allowNetwork: false });
   const model = session.modelRuntime.find(providerId, "fixture");
   assert.ok(model);
@@ -240,8 +252,8 @@ test(`configured ${providerId} completes real SDK and spawned RPC turns with its
     env: { OHM_HOME: options.agentDirectory, OHM_OFFLINE: "1", NODE_OPTIONS: `--import=${import.meta.resolve("tsx")}` },
     args: ["--offline", "--approve", "--no-session", "--no-plugin-code", "--no-skills", "--no-context-files", "--api-key", "invocation-fixture-key"],
   });
+  cleanup(() => client.stop());
   await client.start();
-  context.after(() => client.stop());
   await client.promptAndWait("Say hello", undefined, 10_000);
   const rpcText = await client.getLastAssistantText();
 

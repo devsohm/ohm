@@ -287,18 +287,19 @@ export async function removeRiskCoverageGroupArtifacts(temporary: string, groupI
   await rm(groupDirectory, { recursive: true, force: true });
 }
 
-export async function runRiskCoverageCheck(): Promise<RiskCoverageReport> {
+export async function runRiskCoverageCheck(run = runProcess): Promise<RiskCoverageReport> {
   const config = parseRiskCoverageConfig(JSON.parse(await readFile(CONFIG, "utf8")));
   await validateRiskCoverageTargets(config);
   const allTests = await discoverTests(join(ROOT, "test"), config.excludedTests);
   const groupedTests = config.groups.map((group) => ({ group, tests: selectRiskCoverageTests(allTests, group) }));
-  const temporary = await mkdtemp(join(tmpdir(), "ohm-risk-coverage-"));
+  const temporary = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "ohm-risk-coverage-"));
+  let report: RiskCoverageReport;
   try {
     const coverage = new Map<string, CoveragePercentages>();
     const groupReports: RiskCoverageReport["groups"] = [];
     for (const { group, tests } of groupedTests) {
       const reportDirectory = join(temporary, group.id, "report");
-      const result = await runProcess({
+      const result = await run({
         argv: [
           process.execPath,
           C8_BIN,
@@ -345,7 +346,7 @@ export async function runRiskCoverageCheck(): Promise<RiskCoverageReport> {
       await removeRiskCoverageGroupArtifacts(temporary, group.id);
     }
     const targets = evaluateRiskCoverage(config, coverage);
-    return {
+    report = {
       schemaVersion: 1,
       suite: "risk-coverage-v1",
       purpose: "high-risk-module-regression-guard",
@@ -358,9 +359,16 @@ export async function runRiskCoverageCheck(): Promise<RiskCoverageReport> {
       targets,
       passed: targets.every((target) => target.passed),
     };
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
+  } catch (error) {
+    try {
+      process.stderr.write(`[risk coverage] Artifacts retained at ${temporary}\n`);
+    } catch {
+      // Diagnostic output must not replace the original coverage failure.
+    }
+    throw error;
   }
+  await rm(temporary, { recursive: true, force: true });
+  return report;
 }
 
 async function main(): Promise<void> {

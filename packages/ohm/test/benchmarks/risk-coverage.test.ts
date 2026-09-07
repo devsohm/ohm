@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -10,6 +10,7 @@ import {
   parseRiskCoverageConfig,
   parseV8Coverage,
   removeRiskCoverageGroupArtifacts,
+  runRiskCoverageCheck,
   selectRiskCoverageTests,
   validateRiskCoverageTargets,
 } from "../../benchmarks/risk-coverage.js";
@@ -209,5 +210,79 @@ test("risk coverage group cleanup removes only a validated direct child", async 
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("risk coverage retains failed raw artifacts and the original error when diagnostics throw", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-risk-retained-"));
+  const previousRunnerTemp = process.env.RUNNER_TEMP;
+  context.after(async () => {
+    if (previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = previousRunnerTemp;
+    await rm(root, { recursive: true, force: true });
+  });
+  process.env.RUNNER_TEMP = root;
+  const failure = new SyntaxError("incomplete coverage JSON");
+  const raw = Buffer.from('{"result":[{"url":"unfinished');
+  let rawPath = "";
+  let diagnostic = "";
+  context.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    diagnostic += String(chunk);
+    throw new Error("diagnostic output unavailable");
+  });
+
+  await assert.rejects(runRiskCoverageCheck(async ({ argv }) => {
+    const argument = argv.find((value) => value.startsWith("--temp-directory="));
+    assert.ok(argument);
+    const directory = argument.slice("--temp-directory=".length);
+    await mkdir(directory, { recursive: true });
+    rawPath = join(directory, "coverage-fixture.json");
+    await writeFile(rawPath, raw);
+    throw failure;
+  }), (error) => error === failure);
+
+  const retained = dirname(dirname(dirname(rawPath)));
+  assert.equal(dirname(retained), root);
+  assert.equal(diagnostic, `[risk coverage] Artifacts retained at ${retained}\n`);
+  assert.deepEqual(await readFile(rawPath), raw);
+});
+
+test("risk coverage cleans only its own temporary root after passing or below-threshold reports", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "ohm-risk-success-"));
+  const previousRunnerTemp = process.env.RUNNER_TEMP;
+  context.after(async () => {
+    if (previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = previousRunnerTemp;
+    await rm(root, { recursive: true, force: true });
+  });
+  process.env.RUNNER_TEMP = root;
+  const sibling = join(root, "unrelated-evidence.txt");
+  await writeFile(sibling, "keep\n");
+
+  for (const percentage of [100, 0]) {
+    let temporary = "";
+    const report = await runRiskCoverageCheck(async ({ argv }) => {
+      const argument = argv.find((value) => value.startsWith("--reports-dir="));
+      assert.ok(argument);
+      const directory = argument.slice("--reports-dir=".length);
+      temporary = dirname(dirname(directory));
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "coverage-report.json"), JSON.stringify({
+        files: argv.filter((value) => value.startsWith("--include=")).map((value) => ({
+          sourcePath: value.slice("--include=".length),
+          summary: { lines: { pct: percentage }, branches: { pct: percentage }, functions: { pct: percentage } },
+        })),
+      }));
+      return {
+        exitCode: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
+        stdoutBytes: 0, stderrBytes: 0, timedOut: false, cancelled: false, durationMs: 1,
+      };
+    });
+
+    assert.equal(report.passed, percentage === 100);
+    assert.equal(dirname(temporary), root);
+    await assert.rejects(readFile(join(temporary, "extension-runtime", "report", "coverage-report.json")), { code: "ENOENT" });
+    await assert.rejects(readFile(temporary), { code: "ENOENT" });
+    assert.equal(await readFile(sibling, "utf8"), "keep\n");
   }
 });
