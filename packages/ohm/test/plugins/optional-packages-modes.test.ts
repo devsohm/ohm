@@ -66,7 +66,7 @@ test("optional packages execute through an actual RPC client without model reque
     cwd,
     cliPath: fileURLToPath(new URL("../../src/bin/ohm.ts", import.meta.url)),
     provider: "optional-fixture", model: "fixture",
-    env: { OHM_HOME: agentDir, OHM_OFFLINE: "1", NODE_OPTIONS: `--import=${fileURLToPath(import.meta.resolve("tsx"))}` },
+    env: { OHM_HOME: agentDir, OHM_OFFLINE: "1", NODE_OPTIONS: `--import=${import.meta.resolve("tsx")}` },
     args: ["--offline", "--approve", "--no-session", "--no-skills", "--no-context-files", ...extensions.flatMap((path) => ["--plugin", path])],
   });
   const events: string[] = [];

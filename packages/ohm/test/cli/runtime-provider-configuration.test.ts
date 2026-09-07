@@ -237,7 +237,7 @@ test(`configured ${providerId} completes real SDK and spawned RPC turns with its
     cwd: options.workspace,
     cliPath: fileURLToPath(new URL("../../src/bin/ohm.ts", import.meta.url)),
     provider: providerId, model: "fixture",
-    env: { OHM_HOME: options.agentDirectory, OHM_OFFLINE: "1", NODE_OPTIONS: `--import=${fileURLToPath(import.meta.resolve("tsx"))}` },
+    env: { OHM_HOME: options.agentDirectory, OHM_OFFLINE: "1", NODE_OPTIONS: `--import=${import.meta.resolve("tsx")}` },
     args: ["--offline", "--approve", "--no-session", "--no-plugin-code", "--no-skills", "--no-context-files", "--api-key", "invocation-fixture-key"],
   });
   await client.start();

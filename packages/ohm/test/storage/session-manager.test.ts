@@ -24,6 +24,7 @@ const SPECIAL_SCAN_CHILD_TIMEOUT_MS = process.env.CI === "true"
   && process.arch === "x64" ? 5_000 : 2_000;
 
 const roots = new Set<string>();
+const managers = new Set<SessionManager>();
 let messageSequence = 0;
 const CUSTOM_VALUE_DATA = Type.Object({ value: Type.Number() }, { additionalProperties: true });
 
@@ -39,9 +40,18 @@ async function temporaryRoot(): Promise<string> {
 }
 
 test.afterEach(async () => {
-  await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
+  const ownedManagers = [...managers];
+  const ownedRoots = [...roots];
+  managers.clear();
   roots.clear();
+  for (const manager of ownedManagers) manager.closeV4Store();
+  await Promise.all(ownedRoots.map(async (root) => rm(root, { recursive: true, force: true })));
 });
+
+function ownManager(manager: SessionManager): SessionManager {
+  managers.add(manager);
+  return manager;
+}
 
 function message(
   role: CanonicalMessage["role"],
@@ -168,7 +178,7 @@ test("persistent session directories, journals, and writer locks stay private un
 test("persistent sessions materialize one exact version-four header immediately", async () => {
   const root = await temporaryRoot();
   const cwd = join(root, "workspace");
-  const manager = SessionManager.create(cwd, join(root, "sessions"), { id: "session.one" });
+  const manager = ownManager(SessionManager.create(cwd, join(root, "sessions"), { id: "session.one" }));
   const file = manager.getSessionFile()!;
 
   assert.equal(existsSync(file), true);
@@ -195,7 +205,7 @@ test("persistent sessions materialize one exact version-four header immediately"
 test("failed fresh-session preparation leaves the current writer active", async () => {
   const root = await temporaryRoot();
   const sessions = join(root, "sessions");
-  const manager = SessionManager.create(root, sessions, { id: "current" });
+  const manager = ownManager(SessionManager.create(root, sessions, { id: "current" }));
   const currentFile = manager.getSessionFile()!;
   manager.appendMessage(message("user", "before failure"));
   const blockedDirectory = join(root, "not-a-directory");
@@ -222,7 +232,7 @@ test("conversation entries project from v4 nodes and survive reopening", async (
   manager.appendCustomMessageEntry("notice", "visible context", true, { source: "test" });
 
   manager.closeV4Store();
-  const reopened = SessionManager.open(manager.getSessionFile()!);
+  const reopened = ownManager(SessionManager.open(manager.getSessionFile()!));
   assert.deepEqual(
     reopened.getEntries().map((entry) => entry.type),
     ["message", "message", "thinking_level_change", "model_change", "message", "custom", "custom_message"],
@@ -265,7 +275,7 @@ test("head navigation is durable and appends branches without rewriting nodes", 
   const reset = SessionManager.open(manager.getSessionFile()!);
   reset.resetLeaf();
   reset.closeV4Store();
-  assert.equal(SessionManager.open(manager.getSessionFile()!).getLeafId(), null);
+  assert.equal(ownManager(SessionManager.open(manager.getSessionFile()!)).getLeafId(), null);
 });
 
 test("bounded branch queries support traversal bounds, filters, and active-leaf defaults", async () => {
@@ -551,7 +561,7 @@ test("names and labels are state changes instead of tree pseudo-entries", async 
 
   manager.appendLabelChange(entry, "");
   manager.closeV4Store();
-  const reopened = SessionManager.open(manager.getSessionFile()!);
+  const reopened = ownManager(SessionManager.open(manager.getSessionFile()!));
   assert.equal(reopened.getSessionName(), "My Session");
   assert.equal(reopened.getLabel(entry), undefined);
 });
@@ -717,7 +727,7 @@ test("legacy unterminated tails are excluded from SQLite copies without modifyin
   }));
   const dirtyBytes = statSync(file).size;
 
-  const reopened = SessionManager.open(file);
+  const reopened = ownManager(SessionManager.open(file));
   assert.equal(statSync(file).size, dirtyBytes);
   reopened.appendMessage(message("assistant", "continued"));
   assert.equal(reopened.getV4State().sequence, 2);
@@ -806,10 +816,10 @@ test("non-v4 structures fail ordinary strict validation", async () => {
 test("listing derives metadata, text, lineage, and current workspace", async () => {
   const root = await temporaryRoot();
   const sessions = join(root, "sessions");
-  const first = SessionManager.create(root, sessions, { id: "first" });
+  const first = ownManager(SessionManager.create(root, sessions, { id: "first" }));
   first.appendMessage(message("user", "searchable first", { timestamp: 1_700_000_010_000 }));
   first.appendSessionInfo("Named");
-  const child = SessionManager.forkFrom(first.getSessionFile()!, root, sessions, { id: "child" });
+  const child = ownManager(SessionManager.forkFrom(first.getSessionFile()!, root, sessions, { id: "child" }));
   child.appendMessage(message("assistant", "child answer", { timestamp: 1_700_000_020_000 }));
 
   const listed = await SessionManager.list(root, sessions);
@@ -925,7 +935,7 @@ test("session inspect and list reject special scan entries without blocking", {
 test("forks and extracted branches use linked child headers and independent stores", async () => {
   const root = await temporaryRoot();
   const sessions = join(root, "sessions");
-  const source = SessionManager.create(root, sessions, { id: "source" });
+  const source = ownManager(SessionManager.create(root, sessions, { id: "source" }));
   const prompt = source.appendMessage(message("user", "prompt"));
   const first = source.appendMessage(message("assistant", "first"));
   source.branch(prompt);
@@ -933,7 +943,7 @@ test("forks and extracted branches use linked child headers and independent stor
   source.branch(first);
   source.appendLabelChange(prompt, "start");
 
-  const fork = SessionManager.forkFrom(source.getSessionFile()!, join(root, "target"), sessions, { id: "fork" });
+  const fork = ownManager(SessionManager.forkFrom(source.getSessionFile()!, join(root, "target"), sessions, { id: "fork" }));
   assert.equal(fork.getHeader().parentSession, "source");
   assert.equal(fork.getCwd(), resolve(join(root, "target")));
   assert.equal(fork.getLabel(prompt), "start");
@@ -949,7 +959,7 @@ test("forks and extracted branches use linked child headers and independent stor
 test("forkFrom removes its new journal and writer lease when copying fails", async () => {
   const root = await temporaryRoot();
   const sessions = join(root, "sessions");
-  const source = SessionManager.create(root, sessions, { id: "source" });
+  const source = ownManager(SessionManager.create(root, sessions, { id: "source" }));
   source.appendMessage(message("user", "first"));
   source.appendMessage(message("assistant", "second"));
   const sourceFile = source.getSessionFile()!;
@@ -1051,7 +1061,7 @@ test("default directory identity and explicit paths remain deterministic", async
   assert.equal(existsSync(explicit), true);
   assert.equal(manager.getCwd(), resolve(root));
   manager.closeV4Store();
-  assert.equal(SessionManager.open(explicit, undefined, join(root, "override")).getCwd(), resolve(join(root, "override")));
+  assert.equal(ownManager(SessionManager.open(explicit, undefined, join(root, "override"))).getCwd(), resolve(join(root, "override")));
 });
 
 test("continueRecent reopens the newest matching durable session", async () => {

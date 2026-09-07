@@ -290,18 +290,19 @@ test("resume rejects an active legacy writer, while read-only inspection remains
 test("live WAL commits invalidate list metadata and HTML downloads contain JSONL, not database bytes", async (t) => {
   const root = fixture(t);
   const manager = SessionManager.create(root, join(root, "sessions"));
-  t.after(() => manager.closeV4Store());
-  append(manager, "first");
-  assert.equal((await SessionManager.list(root, join(root, "sessions")))[0]?.messageCount, 1);
-  append(manager, "second");
-  const listing = await SessionManager.list(root, join(root, "sessions"));
-  assert.equal(listing[0]?.messageCount, 2);
-  const exported = exportSessionFile(manager.getSessionFile()!, join(root, "export.html"), { redact: false });
-  const html = readFileSync(exported, "utf8");
-  const encoded = html.match(/<script id="session-data" type="application\/octet-stream">([A-Za-z0-9+/=]+)<\/script>/u)?.[1];
-  assert.ok(encoded);
-  assert.ok(Buffer.from(encoded, "base64").toString("utf8").includes("second"));
-  assert.equal(html.includes("SQLite format"), false);
+  try {
+    append(manager, "first");
+    assert.equal((await SessionManager.list(root, join(root, "sessions")))[0]?.messageCount, 1);
+    append(manager, "second");
+    const listing = await SessionManager.list(root, join(root, "sessions"));
+    assert.equal(listing[0]?.messageCount, 2);
+    const exported = exportSessionFile(manager.getSessionFile()!, join(root, "export.html"), { redact: false });
+    const html = readFileSync(exported, "utf8");
+    const encoded = html.match(/<script id="session-data" type="application\/octet-stream">([A-Za-z0-9+/=]+)<\/script>/u)?.[1];
+    assert.ok(encoded);
+    assert.ok(Buffer.from(encoded, "base64").toString("utf8").includes("second"));
+    assert.equal(html.includes("SQLite format"), false);
+  } finally { manager.closeV4Store(); }
 });
 
 test("aborted and malformed JSONL imports publish no candidate and preserve source", async (t) => {

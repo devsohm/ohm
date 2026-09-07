@@ -92,12 +92,18 @@ test("journal replay rejects a record above the logical byte bound and closes st
 
 test("SQLite replay rejects malformed persisted records and releases writer ownership", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "ohm-replay-malformed-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  let db: DatabaseSync | undefined;
+  t.after(() => {
+    db?.close();
+    for (const manager of managers) manager.closeV4Store();
+    rmSync(directory, { recursive: true, force: true });
+  });
   const manager = SessionManager.create(directory, directory);
+  managers.push(manager);
   const path = manager.getSessionFile()!;
   manager.closeV4Store();
-  const db = new DatabaseSync(path);
-  t.after(() => db.close());
+  db = new DatabaseSync(path);
   const malformed = record();
   Reflect.set(malformed, "sequence", "1");
   db.prepare("INSERT INTO session_commits (sequence, commit_id, record) VALUES (1, 'first', ?)")
@@ -110,6 +116,7 @@ test("SQLite replay rejects malformed persisted records and releases writer owne
   }
   db.prepare("UPDATE session_commits SET record = ? WHERE sequence = 1").run(JSON.stringify(record()));
   const repaired = SessionManager.open(path);
+  managers.push(repaired);
   assert.equal(repaired.getEntryCount(), 1);
   repaired.closeV4Store();
 });
@@ -161,9 +168,13 @@ test("SQLite successful replay still requires its transaction to commit", (t) =>
 
 test("fresh snapshot ownership avoids cloning complete replayed state and public results stay detached", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "ohm-replay-snapshot-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  t.after(() => {
+    for (const manager of managers) manager.closeV4Store();
+    rmSync(directory, { recursive: true, force: true });
+  });
   const writer = SessionManager.create(directory, directory);
-  t.after(() => writer.closeV4Store());
+  managers.push(writer);
   writer.commitChanges(record().changes, "first", TIME);
   const path = writer.getSessionFile()!;
   const full = writer.getV4State();
@@ -176,7 +187,9 @@ test("fresh snapshot ownership avoids cloning complete replayed state and public
     return clone(value);
   });
   const snapshot = SessionManager.open(path, undefined, undefined, { readOnly: true });
+  managers.push(snapshot);
   const fromBytes = SessionManager.openSnapshotBytes(join(directory, "transfer.jsonl"), bytes);
+  managers.push(fromBytes);
   mocked.mock.restore();
   assert.equal(fullStateClones, 0, "opening privately owned replay results must not clone the full journal");
   bytes.fill(0);

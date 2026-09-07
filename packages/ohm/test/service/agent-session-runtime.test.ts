@@ -26,6 +26,7 @@ import {
 import { SessionManager } from "../../src/storage/session-manager.js";
 
 const roots = new Set<string>();
+const managers = new Set<SessionManager>();
 const originalHome = process.env.OHM_HOME;
 
 test("SQLite runtime recovers the original session after cancelled replacement and failed fork", async () => {
@@ -91,6 +92,8 @@ test("JSONL import preserves every commit and cancellation leaves source and SQL
 });
 
 test.afterEach(async () => {
+  for (const manager of managers) manager.closeV4Store();
+  managers.clear();
   await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
   roots.clear();
   if (originalHome === undefined) delete process.env.OHM_HOME;
@@ -168,6 +171,7 @@ function fakeSession(
   events: string[],
   initialModelScope?: readonly string[],
 ): AgentSession {
+  managers.add(manager);
   let modelScope = initialModelScope === undefined ? undefined : [...initialModelScope];
   return agentSessionTestDouble({
     generation,
@@ -1250,6 +1254,7 @@ test("import never follows a colliding destination symlink", async (context) => 
   const sourcePath = await jsonlFixture(source, root);
   const currentDirectory = join(root, "current-sessions");
   const current = SessionManager.create(root, currentDirectory, { id: "current" });
+  managers.add(current);
   persist(current);
   const victim = join(root, "victim.txt");
   const victimBytes = Buffer.from("do not replace\n");

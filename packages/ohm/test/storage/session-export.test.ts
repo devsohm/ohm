@@ -34,6 +34,7 @@ import { MAX_SESSION_FILE_BYTES, SessionManager } from "../../src/storage/sessio
 import type { RuntimeToolRendererBinding } from "../../src/tui/components.js";
 
 const roots = new Set<string>();
+const managers = new Set<SessionManager>();
 const EMBEDDED_SESSION_DATA_VALUE = Type.Object({
   jsonl: Type.String(),
   redacted: Type.Optional(Type.Literal(true)),
@@ -51,6 +52,8 @@ interface CircularFixture {
 }
 
 test.afterEach(async () => {
+  for (const manager of managers) manager.closeV4Store();
+  managers.clear();
   await Promise.all([...roots].map(async (root) => rm(root, { recursive: true, force: true })));
   roots.clear();
 });
@@ -282,7 +285,9 @@ test("standalone export client wires the bounded lazy presentation helpers", () 
 async function managerFixture(name = "exportable"): Promise<{ root: string; manager: SessionManager }> {
   const root = await mkdtemp(join(tmpdir(), "ohm-session-export-"));
   roots.add(root);
-  return { root, manager: SessionManager.create(root, join(root, "sessions"), { id: name }) };
+  const manager = SessionManager.create(root, join(root, "sessions"), { id: name });
+  managers.add(manager);
+  return { root, manager };
 }
 
 test("standalone export embeds exact UTF-8 JSONL and needs no provider runtime", async () => {

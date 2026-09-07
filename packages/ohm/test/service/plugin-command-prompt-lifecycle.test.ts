@@ -183,8 +183,16 @@ test("AgentSession classifies direct and explicit input origins without coupling
 
 test("default embedded session actions forward replacement options and contexts", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-command-replacement-"));
-  context.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const manager = SessionManager.create(workspace, join(workspace, "sessions"));
+  let manager: SessionManager | undefined;
+  let host: Awaited<ReturnType<typeof loadDirectPlugins>> | undefined;
+  let session: AgentSession | undefined;
+  context.after(async () => {
+    await session?.close();
+    await host?.close();
+    manager?.closeV4Store();
+    await rm(workspace, { recursive: true, force: true });
+  });
+  manager = SessionManager.create(workspace, join(workspace, "sessions"));
   const originalPath = manager.getSessionFile();
   assert.ok(originalPath);
   const forkEntry = manager.appendMessage({
@@ -197,7 +205,7 @@ test("default embedded session actions forward replacement options and contexts"
   const replacementPaths: string[] = [];
   let newParent: string | undefined;
   let failure: unknown;
-  const host = await loadDirectPlugins([], {
+  host = await loadDirectPlugins([], {
     workspace,
     activationFailure: "throw",
     inlinePlugins: [{
@@ -241,15 +249,13 @@ test("default embedded session actions forward replacement options and contexts"
       },
     }],
   });
-  context.after(async () => await host.close());
-  const session = await AgentSession.create({
+  session = await AgentSession.create({
     sessionManager: manager,
     providers: new ProviderRegistry([]),
     settingsManager: SettingsManager.inMemory(),
     workspace,
     pluginRunner: host,
   });
-  context.after(async () => await session.close());
   await session.bindPlugins({ mode: "print" });
 
   await session.prompt("/embedded-transition fork");

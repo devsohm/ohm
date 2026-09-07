@@ -179,12 +179,19 @@ test("persisted model tuples resolve through the live model registry", async (co
 
 test("an unknown persisted model leaves a usable fallback untouched", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "ohm-model-fallback-"));
-  context.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  let session: AgentSession | undefined;
+  context.after(async () => {
+    await session?.close();
+    for (const manager of managers) manager.closeV4Store();
+    await rm(workspace, { recursive: true, force: true });
+  });
   const sessionDirectory = join(workspace, "sessions");
   const provider = new CatalogProvider();
   const registry = catalogModelRegistry(provider);
   const currentManager = SessionManager.create(workspace, sessionDirectory, { id: "current" });
-  const session = await AgentSession.create({
+  managers.push(currentManager);
+  session = await AgentSession.create({
     workspace,
     sessionManager: currentManager,
     providers: new ProviderRegistry([provider]),
@@ -197,9 +204,8 @@ test("an unknown persisted model leaves a usable fallback untouched", async (con
       info: provider.models[0]!,
     },
   });
-  context.after(async () => await session.close());
-
   const unknownManager = SessionManager.create(workspace, sessionDirectory, { id: "unknown" });
+  managers.push(unknownManager);
   unknownManager.appendModelChange("missing", "gone");
   unknownManager.appendMessage({
     id: "unknown-user",

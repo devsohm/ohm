@@ -201,12 +201,22 @@ test("a live rename blocks new commits and a closed rename preserves session his
 	try {
 		appendMarker(manager, "before-rename-commit");
 		const beforeRename = manager.getEntries();
-		renameSync(path, renamed);
-		assert.throws(() => SessionManager.open(renamed), /active writer/u);
-		assert.equal(existsSync(`${renamed}.writer-lock`), false);
-		assertChildBlocked(renamed);
-		assert.throws(() => appendMarker(manager, "renamed-owner-commit"), /ENOENT/u);
-		assert.deepEqual(manager.getEntries(), beforeRename);
+		if (process.platform === "win32") {
+			// Native SQLite prevents renaming its open Windows handle.
+			assert.throws(() => renameSync(path, renamed), { code: "EBUSY", syscall: "rename" });
+			assert.equal(existsSync(renamed), false);
+			assert.deepEqual(manager.getEntries(), beforeRename);
+			assert.throws(() => SessionManager.open(path), /active writer/u);
+			assertChildBlocked(path);
+			appendMarker(manager, "blocked-rename-owner-commit");
+		} else {
+			renameSync(path, renamed);
+			assert.throws(() => SessionManager.open(renamed), /active writer/u);
+			assert.equal(existsSync(`${renamed}.writer-lock`), false);
+			assertChildBlocked(renamed);
+			assert.throws(() => appendMarker(manager, "renamed-owner-commit"), /ENOENT/u);
+			assert.deepEqual(manager.getEntries(), beforeRename);
+		}
 	} finally {
 		if (existsSync(renamed)) renameSync(renamed, path);
 		manager.closeV4Store();
@@ -216,6 +226,7 @@ test("a live rename blocks new commits and a closed rename preserves session his
 		renameSync(path, renamed);
 		const reopened = SessionManager.open(renamed);
 		assertMarker(reopened, "before-rename-commit");
+		if (process.platform === "win32") assertMarker(reopened, "blocked-rename-owner-commit");
 		assert.equal(JSON.stringify(reopened.getEntries()).includes("renamed-owner-commit"), false);
 		reopened.closeV4Store();
 	} finally {
@@ -232,14 +243,22 @@ for (const replacement of ["regular file", "same-inode symlink"] as const) {
 		try {
 			appendMarker(manager, "before-replacement-commit");
 			const beforeReplacement = manager.getEntries();
-			renameSync(path, displaced);
-			if (replacement === "regular file") writeFileSync(path, "replacement must remain untouched");
-			else symlinkSync(displaced, path, "file");
-			assert.throws(() => appendMarker(manager, "replaced-owner-commit"), /changed/u);
-			assert.deepEqual(manager.getEntries(), beforeReplacement);
-			assert.throws(() => appendMarker(manager, "faulted-owner-commit"), /faulted/u);
-			if (replacement === "regular file") {
-				assert.equal(readFileSync(path, "utf8"), "replacement must remain untouched");
+			if (process.platform === "win32") {
+				assert.throws(() => renameSync(path, displaced), { code: "EBUSY", syscall: "rename" });
+				assert.equal(existsSync(displaced), false);
+				assert.deepEqual(manager.getEntries(), beforeReplacement);
+				assert.throws(() => SessionManager.open(path), /active writer/u);
+				appendMarker(manager, "blocked-replacement-owner-commit");
+			} else {
+				renameSync(path, displaced);
+				if (replacement === "regular file") writeFileSync(path, "replacement must remain untouched");
+				else symlinkSync(displaced, path, "file");
+				assert.throws(() => appendMarker(manager, "replaced-owner-commit"), /changed/u);
+				assert.deepEqual(manager.getEntries(), beforeReplacement);
+				assert.throws(() => appendMarker(manager, "faulted-owner-commit"), /faulted/u);
+				if (replacement === "regular file") {
+					assert.equal(readFileSync(path, "utf8"), "replacement must remain untouched");
+				}
 			}
 		} finally {
 			if (existsSync(displaced)) {
@@ -253,6 +272,7 @@ for (const replacement of ["regular file", "same-inode symlink"] as const) {
 			const reopened = SessionManager.open(path);
 			try {
 				assertMarker(reopened, "before-replacement-commit");
+				if (process.platform === "win32") assertMarker(reopened, "blocked-replacement-owner-commit");
 				assert.equal(JSON.stringify(reopened.getEntries()).includes("replaced-owner-commit"), false);
 			} finally {
 				reopened.closeV4Store();

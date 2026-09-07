@@ -79,9 +79,16 @@ class ToolUsageProvider implements ProviderAdapter {
 
 test("generated branch summaries persist their own usage on the reachable summary entry", async (context) => {
   const cwd = await mkdtemp(join(tmpdir(), "ohm-branch-usage-"));
-  context.after(async () => await rm(cwd, { recursive: true, force: true }));
+  const managers: SessionManager[] = [];
+  let session: AgentSession | undefined;
+  context.after(async () => {
+    await session?.close();
+    for (const manager of managers) manager.closeV4Store();
+    await rm(cwd, { recursive: true, force: true });
+  });
   const provider = new ToolUsageProvider();
   const manager = SessionManager.create(cwd, join(cwd, "sessions"), { id: "branch-usage" });
+  managers.push(manager);
   const target = manager.appendMessage({
     id: "root-user",
     role: "user",
@@ -98,12 +105,11 @@ test("generated branch summaries persist their own usage on the reachable summar
     api: "openai-chat-completions",
     stopReason: "stop",
   });
-  const session = await AgentSession.create({
+  session = await AgentSession.create({
     sessionManager: manager,
     providers: new ProviderRegistry([provider]),
     settingsManager: SettingsManager.inMemory(),
   });
-  context.after(async () => await session.close());
   await session.setModel({
     provider: provider.id,
     id: provider.model.id,
@@ -128,6 +134,7 @@ test("generated branch summaries persist their own usage on the reachable summar
   const file = manager.getSessionFile();
   assert.ok(file);
   const snapshot = SessionManager.open(file, undefined, undefined, { readOnly: true });
+  managers.push(snapshot);
   const node = [...snapshot.getV4State().commits.values()]
     .flatMap((commit) => commit.changes)
     .filter((change) => change.type === "conversation_node")
